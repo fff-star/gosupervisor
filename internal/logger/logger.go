@@ -12,10 +12,10 @@ import (
 
 // countingWriter 包装 io.Writer 以追踪写入字节数
 type countingWriter struct {
-	writer    io.Writer
+	writer       io.Writer
 	bytesWritten int64
-	onExceed  func()
-	maxSize   int64
+	onExceed     func()
+	maxSize      int64
 }
 
 func (cw *countingWriter) Write(p []byte) (n int, err error) {
