@@ -10,9 +10,26 @@ import (
 	"time"
 )
 
+// countingWriter 包装 io.Writer 以追踪写入字节数
+type countingWriter struct {
+	writer    io.Writer
+	bytesWritten int64
+	onExceed  func()
+	maxSize   int64
+}
+
+func (cw *countingWriter) Write(p []byte) (n int, err error) {
+	n, err = cw.writer.Write(p)
+	cw.bytesWritten += int64(n)
+	if cw.maxSize > 0 && cw.bytesWritten >= cw.maxSize && cw.onExceed != nil {
+		cw.onExceed()
+	}
+	return
+}
+
 type Logger struct {
 	logDir         string
-	processLogs    map[string]*os.File
+	processLogs    map[string]io.Writer
 	maxLogSize     int64
 	maxBackupCount int
 	compress       bool
@@ -37,7 +54,7 @@ func NewLogger(logDir string, maxLogSize int64, maxBackupCount int, compress boo
 
 	return &Logger{
 		logDir:         logDir,
-		processLogs:    make(map[string]*os.File),
+		processLogs:    make(map[string]io.Writer),
 		maxLogSize:     maxLogSize,
 		maxBackupCount: maxBackupCount,
 		compress:       compress,
@@ -55,16 +72,20 @@ func (l *Logger) GetProcessLogWriter(processName string) (io.Writer, error) {
 	defer l.mutex.Unlock()
 
 	// 检查是否已经有打开的日志文件
-	if file, exists := l.processLogs[processName]; exists {
-		// 检查日志文件大小
-		if l.logFileSizes[processName] >= l.maxLogSize {
-			// 进行日志轮转
-			if err := l.rotateLog(processName); err != nil {
-				return nil, fmt.Errorf("日志轮转失败: %v", err)
+	if writer, exists := l.processLogs[processName]; exists {
+		// 检查日志文件大小，根据实际磁盘文件检查
+		logFile := filepath.Join(l.logDir, fmt.Sprintf("%s.log", processName))
+		if fileInfo, err := os.Stat(logFile); err == nil {
+			if fileInfo.Size() >= l.maxLogSize {
+				// 进行日志轮转
+				if err := l.rotateLog(processName); err != nil {
+					return nil, fmt.Errorf("日志轮转失败: %v", err)
+				}
+				// 轮转后重新获取新文件
+				return l.processLogs[processName], nil
 			}
-			return l.processLogs[processName], nil
 		}
-		return file, nil
+		return writer, nil
 	}
 
 	// 检查日志文件大小
@@ -86,17 +107,30 @@ func (l *Logger) GetProcessLogWriter(processName string) (io.Writer, error) {
 		return nil, fmt.Errorf("打开日志文件失败: %v", err)
 	}
 
-	l.processLogs[processName] = file
+	// 包装文件写入器，追踪大小
+	cw := &countingWriter{
+		writer:  file,
+		maxSize: l.maxLogSize,
+		onExceed: func() {
+			// 当超过大小时标记需要轮转（下次调用时执行）
+		},
+	}
+	l.processLogs[processName] = cw
 	l.logFileSizes[processName] = 0
-	return file, nil
+	return cw, nil
 }
 
 // rotateLog 执行单个日志文件的轮转
 func (l *Logger) rotateLog(processName string) error {
 	// 关闭现有的日志文件
-	if file, exists := l.processLogs[processName]; exists {
-		if err := file.Close(); err != nil {
-			return fmt.Errorf("关闭日志文件失败: %v", err)
+	if writer, exists := l.processLogs[processName]; exists {
+		// 如果是 countingWriter，需要关闭其内部文件
+		if cw, ok := writer.(*countingWriter); ok {
+			if f, ok := cw.writer.(*os.File); ok {
+				if err := f.Close(); err != nil {
+					return fmt.Errorf("关闭日志文件失败: %v", err)
+				}
+			}
 		}
 		delete(l.processLogs, processName)
 	}
@@ -220,9 +254,14 @@ func (l *Logger) CloseProcessLog(processName string) error {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
 
-	if file, exists := l.processLogs[processName]; exists {
-		if err := file.Close(); err != nil {
-			return fmt.Errorf("关闭日志文件失败: %v", err)
+	if writer, exists := l.processLogs[processName]; exists {
+		// 如果是 countingWriter，需要关闭其内部文件
+		if cw, ok := writer.(*countingWriter); ok {
+			if f, ok := cw.writer.(*os.File); ok {
+				if err := f.Close(); err != nil {
+					return fmt.Errorf("关闭日志文件失败: %v", err)
+				}
+			}
 		}
 		delete(l.processLogs, processName)
 	}
@@ -246,12 +285,17 @@ func (l *Logger) Close() error {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
 
-	for name, file := range l.processLogs {
-		if err := file.Close(); err != nil {
-			return fmt.Errorf("关闭进程 %s 的日志文件失败: %v", name, err)
+	for name, writer := range l.processLogs {
+		// 如果是 countingWriter，需要关闭其内部文件
+		if cw, ok := writer.(*countingWriter); ok {
+			if f, ok := cw.writer.(*os.File); ok {
+				if err := f.Close(); err != nil {
+					return fmt.Errorf("关闭进程 %s 的日志文件失败: %v", name, err)
+				}
+			}
 		}
 	}
-	l.processLogs = make(map[string]*os.File)
+	l.processLogs = make(map[string]io.Writer)
 	return nil
 }
 
@@ -260,9 +304,14 @@ func (l *Logger) RotateLogs() error {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
 
-	for name, file := range l.processLogs {
-		if err := file.Close(); err != nil {
-			return fmt.Errorf("关闭进程 %s 的日志文件失败: %v", name, err)
+	for name, writer := range l.processLogs {
+		// 如果是 countingWriter，需要关闭其内部文件
+		if cw, ok := writer.(*countingWriter); ok {
+			if f, ok := cw.writer.(*os.File); ok {
+				if err := f.Close(); err != nil {
+					return fmt.Errorf("关闭进程 %s 的日志文件失败: %v", name, err)
+				}
+			}
 		}
 
 		// 重命名旧日志文件

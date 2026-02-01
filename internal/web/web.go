@@ -1,9 +1,11 @@
 package web
 
 import (
+	"bufio"
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"text/template"
@@ -225,27 +227,79 @@ type SystemInfo struct {
 
 // getSystemInfo 获取系统信息
 func getSystemInfo() *SystemInfo {
-	// 基本实现：从运行时/OS 查询可得的字段；其他字段保持示例占位
 	hostname, _ := os.Hostname()
-	return &SystemInfo{
+	info := &SystemInfo{
 		OS:           runtime.GOOS,
 		Arch:         runtime.GOARCH,
 		Hostname:     hostname,
 		CPUCount:     runtime.NumCPU(),
-		MemoryTotal:  0,
-		MemoryUsed:   0,
-		DiskTotal:    0,
-		DiskUsed:     0,
-		Uptime:       "",
 		GoVersion:    runtime.Version(),
-		ProcessCount: len(processesCountHelper()),
+		ProcessCount: countProcesses(),
 	}
+
+	// 从 /proc/meminfo 读取内存信息
+	if meminfo, err := os.Open("/proc/meminfo"); err == nil {
+		defer meminfo.Close()
+		scanner := bufio.NewScanner(meminfo)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "MemTotal:") {
+				var total int64
+				fmt.Sscanf(line, "MemTotal:\t%d", &total)
+				info.MemoryTotal = uint64(total) * 1024 // 转换为字节
+			} else if strings.HasPrefix(line, "MemAvailable:") {
+				var avail int64
+				fmt.Sscanf(line, "MemAvailable:\t%d", &avail)
+				info.MemoryUsed = info.MemoryTotal - uint64(avail)*1024
+			}
+		}
+	}
+
+	// 从 /proc/uptime 读取系统运行时间
+	if uptime, err := os.Open("/proc/uptime"); err == nil {
+		defer uptime.Close()
+		var uptimeSecs float64
+		fmt.Fscanf(uptime, "%f", &uptimeSecs)
+		hours := int(uptimeSecs) / 3600
+		mins := (int(uptimeSecs) % 3600) / 60
+		info.Uptime = fmt.Sprintf("%dh %dm", hours, mins)
+	}
+
+	// 从 df 命令获取磁盘信息（针对根分区）
+	cmd := exec.Command("df", "/")
+	if output, err := cmd.Output(); err == nil {
+		lines := strings.Split(string(output), "\n")
+		if len(lines) > 1 {
+			fields := strings.Fields(lines[1])
+			if len(fields) >= 3 {
+				var total, used int64
+				fmt.Sscanf(fields[1], "%d", &total)
+				fmt.Sscanf(fields[2], "%d", &used)
+				info.DiskTotal = uint64(total) * 1024
+				info.DiskUsed = uint64(used) * 1024
+			}
+		}
+	}
+
+	return info
 }
 
-// processesCountHelper 返回当前 manager 中的进程数量（供模板展示使用）
-func processesCountHelper() []string {
-	// 尝试读取 /proc 来统计进程数；这里作为简单实现，返回空 slice
-	return []string{}
+// countProcesses 统计系统中运行的进程数
+func countProcesses() int {
+	if dir, err := os.Open("/proc"); err == nil {
+		defer dir.Close()
+		if entries, err := dir.Readdirnames(-1); err == nil {
+			count := 0
+			for _, entry := range entries {
+				// 检查是否是数字目录（进程ID）
+				if _, err := fmt.Sscanf(entry, "%d", new(int)); err == nil {
+					count++
+				}
+			}
+			return count
+		}
+	}
+	return 0
 }
 
 const indexTemplate = `<!DOCTYPE html>
