@@ -1,0 +1,45 @@
+# 编译产物
+/bin/
+/build/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 测试文件
+/test_logs/
+internal/*/test_logs/
+
+# 日志文件
+/logs/
+*.log
+*.log.*
+
+# 配置文件
+*.ini
+*.yaml
+*.yml
+*.json
+
+# 依赖
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 环境变量
+.env
+.env.local
+.env.*.local
+
+# 备份文件
+*.bak
+*.backup
+
+# 临时文件
+*.tmp
+*.temp
