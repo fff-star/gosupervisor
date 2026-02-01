@@ -97,9 +97,10 @@ func (p *Process) Start() error {
 	cmd.Env = env
 
 	// 设置进程组
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
-	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{}
+
+	// 根据操作系统设置不同的进程组属性
+	setProcessGroupAttr(cmd.SysProcAttr)
 
 	// 集成日志管理
 	if p.Logger != nil {
