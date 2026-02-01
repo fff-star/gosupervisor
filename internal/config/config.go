@@ -133,23 +133,23 @@ func loadINIConfig(configPath string) (*Config, error) {
 			if strings.HasPrefix(section, "program:") {
 				programName := strings.TrimPrefix(section, "program:")
 				currentProgram = &ProgramConfig{
-					Name:                programName,
-					AutoStart:           true,
-					AutoRestart:         true,
-					StartSecs:           1,
-					StartRetries:        3,
-					StopSecs:            10,
-					StopSignal:          "SIGTERM",
-					Environment:         make(map[string]string),
-					RedirectStdout:      true,
-					RedirectStderr:      true,
-					StdoutLogMaxBytes:   50 * 1024 * 1024, // 50MB
+					Name:                 programName,
+					AutoStart:            true,
+					AutoRestart:          true,
+					StartSecs:            1,
+					StartRetries:         3,
+					StopSecs:             10,
+					StopSignal:           "SIGTERM",
+					Environment:          make(map[string]string),
+					RedirectStdout:       true,
+					RedirectStderr:       true,
+					StdoutLogMaxBytes:    50 * 1024 * 1024, // 50MB
 					StdoutLogBackupCount: 10,
-					StderrLogMaxBytes:   50 * 1024 * 1024, // 50MB
+					StderrLogMaxBytes:    50 * 1024 * 1024, // 50MB
 					StderrLogBackupCount: 10,
-					Priority:            999,
-					Umask:               022,
-					DependsOn:           []string{},
+					Priority:             999,
+					Umask:                022,
+					DependsOn:            []string{},
 				}
 				config.Programs[programName] = currentProgram
 			}
@@ -163,67 +163,67 @@ func loadINIConfig(configPath string) (*Config, error) {
 				value := strings.TrimSpace(parts[1])
 
 				switch key {
-					case "command":
-						currentProgram.Command = value
-					case "directory":
-						currentProgram.Directory = value
-					case "autostart":
-						currentProgram.AutoStart = value == "true"
-					case "autorestart":
-						currentProgram.AutoRestart = value == "true"
-					case "startsecs":
-						fmt.Sscanf(value, "%d", &currentProgram.StartSecs)
-					case "startretries":
-						fmt.Sscanf(value, "%d", &currentProgram.StartRetries)
-					case "stopsecs":
-						fmt.Sscanf(value, "%d", &currentProgram.StopSecs)
-					case "stopsignal":
-						currentProgram.StopSignal = value
-					case "user":
-						currentProgram.User = value
-					case "environment":
-						// 解析环境变量，格式如: KEY1=value1,KEY2=value2
-						envVars := strings.Split(value, ",")
-						for _, envVar := range envVars {
-							envParts := strings.SplitN(envVar, "=", 2)
-							if len(envParts) == 2 {
-								envKey := strings.TrimSpace(envParts[0])
-								envValue := strings.TrimSpace(envParts[1])
-								currentProgram.Environment[envKey] = envValue
-							}
-						}
-					case "redirectstdout":
-						currentProgram.RedirectStdout = value == "true"
-					case "redirectstderr":
-						currentProgram.RedirectStderr = value == "true"
-					case "stdoutlogfile":
-						currentProgram.StdoutLogFile = value
-					case "stderrlogfile":
-						currentProgram.StderrLogFile = value
-					case "stdoutlogmaxbytes":
-						fmt.Sscanf(value, "%d", &currentProgram.StdoutLogMaxBytes)
-					case "stdoutlogbackupcount":
-						fmt.Sscanf(value, "%d", &currentProgram.StdoutLogBackupCount)
-					case "stderrlogmaxbytes":
-						fmt.Sscanf(value, "%d", &currentProgram.StderrLogMaxBytes)
-					case "stderrlogbackupcount":
-						fmt.Sscanf(value, "%d", &currentProgram.StderrLogBackupCount)
-					case "priority":
-						fmt.Sscanf(value, "%d", &currentProgram.Priority)
-					case "umask":
-						fmt.Sscanf(value, "%d", &currentProgram.Umask)
-					case "serverurl":
-						currentProgram.ServerURL = value
-					case "dependson":
-						// 解析依赖关系，格式如: prog1,prog2,prog3
-						deps := strings.Split(value, ",")
-						for _, dep := range deps {
-							dep = strings.TrimSpace(dep)
-							if dep != "" {
-								currentProgram.DependsOn = append(currentProgram.DependsOn, dep)
-							}
+				case "command":
+					currentProgram.Command = value
+				case "directory":
+					currentProgram.Directory = value
+				case "autostart":
+					currentProgram.AutoStart = value == "true"
+				case "autorestart":
+					currentProgram.AutoRestart = value == "true"
+				case "startsecs":
+					fmt.Sscanf(value, "%d", &currentProgram.StartSecs)
+				case "startretries":
+					fmt.Sscanf(value, "%d", &currentProgram.StartRetries)
+				case "stopsecs":
+					fmt.Sscanf(value, "%d", &currentProgram.StopSecs)
+				case "stopsignal":
+					currentProgram.StopSignal = value
+				case "user":
+					currentProgram.User = value
+				case "environment":
+					// 解析环境变量，格式如: KEY1=value1,KEY2=value2
+					envVars := strings.Split(value, ",")
+					for _, envVar := range envVars {
+						envParts := strings.SplitN(envVar, "=", 2)
+						if len(envParts) == 2 {
+							envKey := strings.TrimSpace(envParts[0])
+							envValue := strings.TrimSpace(envParts[1])
+							currentProgram.Environment[envKey] = envValue
 						}
 					}
+				case "redirectstdout":
+					currentProgram.RedirectStdout = value == "true"
+				case "redirectstderr":
+					currentProgram.RedirectStderr = value == "true"
+				case "stdoutlogfile":
+					currentProgram.StdoutLogFile = value
+				case "stderrlogfile":
+					currentProgram.StderrLogFile = value
+				case "stdoutlogmaxbytes":
+					fmt.Sscanf(value, "%d", &currentProgram.StdoutLogMaxBytes)
+				case "stdoutlogbackupcount":
+					fmt.Sscanf(value, "%d", &currentProgram.StdoutLogBackupCount)
+				case "stderrlogmaxbytes":
+					fmt.Sscanf(value, "%d", &currentProgram.StderrLogMaxBytes)
+				case "stderrlogbackupcount":
+					fmt.Sscanf(value, "%d", &currentProgram.StderrLogBackupCount)
+				case "priority":
+					fmt.Sscanf(value, "%d", &currentProgram.Priority)
+				case "umask":
+					fmt.Sscanf(value, "%d", &currentProgram.Umask)
+				case "serverurl":
+					currentProgram.ServerURL = value
+				case "dependson":
+					// 解析依赖关系，格式如: prog1,prog2,prog3
+					deps := strings.Split(value, ",")
+					for _, dep := range deps {
+						dep = strings.TrimSpace(dep)
+						if dep != "" {
+							currentProgram.DependsOn = append(currentProgram.DependsOn, dep)
+						}
+					}
+				}
 			}
 		}
 	}

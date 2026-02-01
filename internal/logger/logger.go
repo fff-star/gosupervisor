@@ -11,13 +11,13 @@ import (
 )
 
 type Logger struct {
-	logDir             string
-	processLogs        map[string]*os.File
-	maxLogSize         int64
-	maxBackupCount     int
-	compress           bool
-	mutex              sync.Mutex
-	logFileSizes       map[string]int64
+	logDir         string
+	processLogs    map[string]*os.File
+	maxLogSize     int64
+	maxBackupCount int
+	compress       bool
+	mutex          sync.Mutex
+	logFileSizes   map[string]int64
 }
 
 func NewLogger(logDir string, maxLogSize int64, maxBackupCount int, compress bool) (*Logger, error) {
@@ -36,12 +36,12 @@ func NewLogger(logDir string, maxLogSize int64, maxBackupCount int, compress boo
 	}
 
 	return &Logger{
-		logDir:             logDir,
-		processLogs:        make(map[string]*os.File),
-		maxLogSize:         maxLogSize,
-		maxBackupCount:     maxBackupCount,
-		compress:           compress,
-		logFileSizes:       make(map[string]int64),
+		logDir:         logDir,
+		processLogs:    make(map[string]*os.File),
+		maxLogSize:     maxLogSize,
+		maxBackupCount: maxBackupCount,
+		compress:       compress,
+		logFileSizes:   make(map[string]int64),
 	}, nil
 }
 
@@ -103,7 +103,7 @@ func (l *Logger) rotateLog(processName string) error {
 
 	// 重命名旧日志文件
 	oldLog := filepath.Join(l.logDir, fmt.Sprintf("%s.log", processName))
-	newLog := filepath.Join(l.logDir, fmt.Sprintf("%s.log.%s", processName, time.Now().Format("20060102150405")))
+	newLog := filepath.Join(l.logDir, fmt.Sprintf("%s.log.%d", processName, time.Now().UnixNano()))
 	if err := os.Rename(oldLog, newLog); err != nil {
 		return fmt.Errorf("重命名日志文件失败: %v", err)
 	}
@@ -267,7 +267,7 @@ func (l *Logger) RotateLogs() error {
 
 		// 重命名旧日志文件
 		oldLog := filepath.Join(l.logDir, fmt.Sprintf("%s.log", name))
-		newLog := filepath.Join(l.logDir, fmt.Sprintf("%s.log.%s", name, time.Now().Format("20060102150405")))
+		newLog := filepath.Join(l.logDir, fmt.Sprintf("%s.log.%d", name, time.Now().UnixNano()))
 		if err := os.Rename(oldLog, newLog); err != nil {
 			return fmt.Errorf("重命名日志文件失败: %v", err)
 		}

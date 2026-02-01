@@ -29,15 +29,15 @@ func setupTestEnvironment() (*process.ProcessManager, error) {
 
 	// 创建测试进程配置
 	programCfg := &config.ProgramConfig{
-		Name:        "test_process",
-		Command:     "echo \"Hello, World!\"",
-		Directory:   ".",
-		AutoStart:   true,
-		AutoRestart: true,
-		StartSecs:   1,
+		Name:         "test_process",
+		Command:      "echo \"Hello, World!\"",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    1,
 		StartRetries: 3,
-		User:        "",
-		Environment: make(map[string]string),
+		User:         "",
+		Environment:  make(map[string]string),
 	}
 
 	// 添加进程
@@ -228,12 +228,12 @@ func TestHandleStop(t *testing.T) {
 
 	// 检查响应状态码（应该是重定向）
 	if w.Code != http.StatusFound {
-		t.Logf("停止进程时遇到错误，状态码为%d（Windows系统上可能正常）", w.Code)
+		t.Logf("停止进程时遇到错误，状态码为%d", w.Code)
 	}
 
 	// 检查重定向URL
 	if w.Header().Get("Location") != "/" {
-		t.Logf("停止进程时重定向URL不正确，实际重定向到%s（Windows系统上可能正常）", w.Header().Get("Location"))
+		t.Logf("停止进程时重定向URL不正确，实际重定向到%s", w.Header().Get("Location"))
 	}
 }
 
@@ -273,12 +273,12 @@ func TestHandleRestart(t *testing.T) {
 
 	// 检查响应状态码（应该是重定向）
 	if w.Code != http.StatusFound {
-		t.Logf("重启进程时遇到错误，状态码为%d（Windows系统上可能正常）", w.Code)
+		t.Logf("重启进程时遇到错误，状态码为%d", w.Code)
 	}
 
 	// 检查重定向URL
 	if w.Header().Get("Location") != "/" {
-		t.Logf("重启进程时重定向URL不正确，实际重定向到%s（Windows系统上可能正常）", w.Header().Get("Location"))
+		t.Logf("重启进程时重定向URL不正确，实际重定向到%s", w.Header().Get("Location"))
 	}
 }
 

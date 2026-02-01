@@ -1,11 +1,6 @@
-//go:build windows
+//go:build ignore
+
+// This file intentionally left as an ignored placeholder.
+// Platform-specific implementation has been removed; repository targets Linux only.
 
 package process
-
-import "syscall"
-
-// setProcessGroupAttr 设置Windows特定的进程组属性
-func setProcessGroupAttr(attr *syscall.SysProcAttr) {
-	// Windows上使用CREATE_NEW_PROCESS_GROUP
-	attr.CreationFlags = syscall.CREATE_NEW_PROCESS_GROUP
-}

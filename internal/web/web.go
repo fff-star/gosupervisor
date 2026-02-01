@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"text/template"
 	"time"
@@ -209,35 +210,42 @@ func (ws *WebServer) handleProcessDetail(w http.ResponseWriter, r *http.Request)
 
 // SystemInfo 系统信息结构体
 type SystemInfo struct {
-	OS          string
-	Arch        string
-	Hostname    string
-	CPUCount    int
-	MemoryTotal uint64
-	MemoryUsed  uint64
-	DiskTotal   uint64
-	DiskUsed    uint64
-	Uptime      string
-	GoVersion   string
+	OS           string
+	Arch         string
+	Hostname     string
+	CPUCount     int
+	MemoryTotal  uint64
+	MemoryUsed   uint64
+	DiskTotal    uint64
+	DiskUsed     uint64
+	Uptime       string
+	GoVersion    string
 	ProcessCount int
 }
 
 // getSystemInfo 获取系统信息
 func getSystemInfo() *SystemInfo {
-	// 这里仅做示例，实际实现需要使用系统API获取真实信息
+	// 基本实现：从运行时/OS 查询可得的字段；其他字段保持示例占位
+	hostname, _ := os.Hostname()
 	return &SystemInfo{
-		OS:          "Windows",
-		Arch:        "amd64",
-		Hostname:    "localhost",
-		CPUCount:    4,
-		MemoryTotal: 8 * 1024 * 1024 * 1024, // 8GB
-		MemoryUsed:  4 * 1024 * 1024 * 1024, // 4GB
-		DiskTotal:   100 * 1024 * 1024 * 1024, // 100GB
-		DiskUsed:    50 * 1024 * 1024 * 1024, // 50GB
-		Uptime:      "24h",
-		GoVersion:   "1.25.6",
-		ProcessCount: 10,
+		OS:           runtime.GOOS,
+		Arch:         runtime.GOARCH,
+		Hostname:     hostname,
+		CPUCount:     runtime.NumCPU(),
+		MemoryTotal:  0,
+		MemoryUsed:   0,
+		DiskTotal:    0,
+		DiskUsed:     0,
+		Uptime:       "",
+		GoVersion:    runtime.Version(),
+		ProcessCount: len(processesCountHelper()),
 	}
+}
+
+// processesCountHelper 返回当前 manager 中的进程数量（供模板展示使用）
+func processesCountHelper() []string {
+	// 尝试读取 /proc 来统计进程数；这里作为简单实现，返回空 slice
+	return []string{}
 }
 
 const indexTemplate = `<!DOCTYPE html>

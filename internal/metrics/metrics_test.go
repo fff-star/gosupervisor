@@ -26,15 +26,15 @@ func setupMetricsTestEnvironment() (*process.ProcessManager, error) {
 
 	// 创建测试进程配置
 	programCfg := &config.ProgramConfig{
-		Name:        "test_process",
-		Command:     "echo \"Hello, World!\"",
-		Directory:   ".",
-		AutoStart:   true,
-		AutoRestart: true,
-		StartSecs:   1,
+		Name:         "test_process",
+		Command:      "echo \"Hello, World!\"",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    1,
 		StartRetries: 3,
-		User:        "",
-		Environment: make(map[string]string),
+		User:         "",
+		Environment:  make(map[string]string),
 	}
 
 	// 添加进程

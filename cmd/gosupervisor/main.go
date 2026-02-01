@@ -4,9 +4,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"syscall"
 	"time"
-	"os/signal"
 
 	"gosupervisor/internal/config"
 	"gosupervisor/internal/logger"
@@ -136,10 +136,10 @@ func main() {
 			if *metricsEnable {
 				// 创建指标管理器
 				metricsManager := metrics.NewMetricsManager(processManager)
-				
+
 				// 启动指标收集器
 				metricsManager.StartMetricsCollector(5 * time.Second)
-				
+
 				// 在goroutine中启动指标服务器
 				go func() {
 					if err := metricsManager.StartMetricsServer(*metricsAddr); err != nil {

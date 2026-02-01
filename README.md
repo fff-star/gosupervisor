@@ -17,7 +17,7 @@ GoSupervisor是一个使用Go语言实现的进程管理工具，类似于Python
 ### 前提条件
 
 - Go 1.16+ 开发环境
-- Windows、Linux或macOS操作系统
+- Linux 操作系统（本仓库仅支持 Linux）
 
 ### 安装步骤
 
@@ -37,10 +37,6 @@ go build -o gosupervisor ./cmd/gosupervisor
 3. **安装到系统路径（可选）**
 
 ```bash
-# Windows
-to copy gosupervisor.exe "C:\Program Files\GoSupervisor"
-
-# Linux/macOS
 sudo cp gosupervisor /usr/local/bin/
 ```
 
@@ -128,10 +124,10 @@ autorestart=true
 startsecs=1
 startretries=3
 user=administrator
-environment=PATH=%PATH%,TEST_VAR=test_value
+  environment=PATH=$PATH,TEST_VAR=test_value
 
 [program:test2]
-command=ping localhost -t
+  command=ping localhost
 directory=.
 autostart=false
 autorestart=true
@@ -227,7 +223,7 @@ GoSupervisor会将进程的输出捕获并写入日志文件，日志文件存�
 
 ## 注意事项
 
-1. **Windows系统**：由于Windows系统的限制，GoSupervisor使用 `cmd.exe /c` 来执行命令。
+1. **命令执行**：在 Linux 上使用 `/bin/sh -c` 来执行配置里的命令字符串。
 
 2. **权限问题**：在Linux/macOS系统下，某些命令可能需要root权限才能执行。
 

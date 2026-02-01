@@ -26,15 +26,15 @@ func TestProcessManager(t *testing.T) {
 
 	// 创建测试进程配置
 	programCfg := &config.ProgramConfig{
-		Name:        "test_process",
-		Command:     "echo \"Hello, World!\"",
-		Directory:   ".",
-		AutoStart:   true,
-		AutoRestart: true,
-		StartSecs:   1,
+		Name:         "test_process",
+		Command:      "echo \"Hello, World!\"",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    1,
 		StartRetries: 3,
-		User:        "",
-		Environment: make(map[string]string),
+		User:         "",
+		Environment:  make(map[string]string),
 	}
 
 	// 添加进程
@@ -93,15 +93,15 @@ func TestProcessOperations(t *testing.T) {
 
 	// 创建测试进程配置，使用ping命令让进程一直运行
 	programCfg := &config.ProgramConfig{
-		Name:        "test_process",
-		Command:     "ping localhost -t",
-		Directory:   ".",
-		AutoStart:   true,
-		AutoRestart: true,
-		StartSecs:   1,
+		Name:         "test_process",
+		Command:      "ping localhost",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    1,
 		StartRetries: 3,
-		User:        "",
-		Environment: make(map[string]string),
+		User:         "",
+		Environment:  make(map[string]string),
 	}
 
 	// 添加进程
@@ -128,29 +128,29 @@ func TestProcessOperations(t *testing.T) {
 	}
 
 	// 测试进程重启
-	// 注意：在Windows系统上，重启可能会失败，我们这里捕获错误但不视为测试失败
+	// 重启进程，遇到错误记录但不直接失败测试
 	err = p.Restart()
 	if err != nil {
-		t.Logf("重启进程时遇到错误（Windows系统上可能正常）: %v", err)
+		t.Logf("重启进程时遇到错误: %v", err)
 	}
 
 	// 等待进程重启
 	time.Sleep(2 * time.Second)
 
 	// 测试进程停止
-	// 注意：在Windows系统上，停止可能会失败，我们这里捕获错误但不视为测试失败
+	// 停止进程，遇到错误记录但不直接失败测试
 	err = p.Stop()
 	if err != nil {
-		t.Logf("停止进程时遇到错误（Windows系统上可能正常）: %v", err)
+		t.Logf("停止进程时遇到错误: %v", err)
 	}
 
 	// 等待进程停止
 	time.Sleep(3 * time.Second)
 
 	// 测试进程状态
-	// 注意：在Windows系统上，进程状态可能会变成EXITED而不是STOPPED，我们这里捕获但不视为测试失败
+	// 检查进程最终状态（若不同则记录）
 	if p.State != "STOPPED" {
-		t.Logf("进程状态为%s，期望为STOPPED（Windows系统上可能正常）", p.State)
+		t.Logf("进程状态为%s，期望为STOPPED", p.State)
 	}
 }
 
@@ -171,42 +171,42 @@ func TestTopologicalSort(t *testing.T) {
 
 	// 创建测试进程配置
 	programCfg1 := &config.ProgramConfig{
-		Name:        "process1",
-		Command:     "echo \"Process 1\"",
-		Directory:   ".",
-		AutoStart:   true,
-		AutoRestart: true,
-		StartSecs:   1,
+		Name:         "process1",
+		Command:      "echo \"Process 1\"",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    1,
 		StartRetries: 3,
-		User:        "",
-		Environment: make(map[string]string),
-		DependsOn:   []string{"process2"},
+		User:         "",
+		Environment:  make(map[string]string),
+		DependsOn:    []string{"process2"},
 	}
 
 	programCfg2 := &config.ProgramConfig{
-		Name:        "process2",
-		Command:     "echo \"Process 2\"",
-		Directory:   ".",
-		AutoStart:   true,
-		AutoRestart: true,
-		StartSecs:   1,
+		Name:         "process2",
+		Command:      "echo \"Process 2\"",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    1,
 		StartRetries: 3,
-		User:        "",
-		Environment: make(map[string]string),
-		DependsOn:   []string{"process3"},
+		User:         "",
+		Environment:  make(map[string]string),
+		DependsOn:    []string{"process3"},
 	}
 
 	programCfg3 := &config.ProgramConfig{
-		Name:        "process3",
-		Command:     "echo \"Process 3\"",
-		Directory:   ".",
-		AutoStart:   true,
-		AutoRestart: true,
-		StartSecs:   1,
+		Name:         "process3",
+		Command:      "echo \"Process 3\"",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    1,
 		StartRetries: 3,
-		User:        "",
-		Environment: make(map[string]string),
-		DependsOn:   []string{},
+		User:         "",
+		Environment:  make(map[string]string),
+		DependsOn:    []string{},
 	}
 
 	// 添加进程
@@ -256,42 +256,42 @@ func TestTopologicalSortWithCycle(t *testing.T) {
 
 	// 创建循环依赖的进程配置
 	programCfg1 := &config.ProgramConfig{
-		Name:        "process1",
-		Command:     "echo \"Process 1\"",
-		Directory:   ".",
-		AutoStart:   true,
-		AutoRestart: true,
-		StartSecs:   1,
+		Name:         "process1",
+		Command:      "echo \"Process 1\"",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    1,
 		StartRetries: 3,
-		User:        "",
-		Environment: make(map[string]string),
-		DependsOn:   []string{"process2"},
+		User:         "",
+		Environment:  make(map[string]string),
+		DependsOn:    []string{"process2"},
 	}
 
 	programCfg2 := &config.ProgramConfig{
-		Name:        "process2",
-		Command:     "echo \"Process 2\"",
-		Directory:   ".",
-		AutoStart:   true,
-		AutoRestart: true,
-		StartSecs:   1,
+		Name:         "process2",
+		Command:      "echo \"Process 2\"",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    1,
 		StartRetries: 3,
-		User:        "",
-		Environment: make(map[string]string),
-		DependsOn:   []string{"process3"},
+		User:         "",
+		Environment:  make(map[string]string),
+		DependsOn:    []string{"process3"},
 	}
 
 	programCfg3 := &config.ProgramConfig{
-		Name:        "process3",
-		Command:     "echo \"Process 3\"",
-		Directory:   ".",
-		AutoStart:   true,
-		AutoRestart: true,
-		StartSecs:   1,
+		Name:         "process3",
+		Command:      "echo \"Process 3\"",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    1,
 		StartRetries: 3,
-		User:        "",
-		Environment: make(map[string]string),
-		DependsOn:   []string{"process1"}, // 循环依赖
+		User:         "",
+		Environment:  make(map[string]string),
+		DependsOn:    []string{"process1"}, // 循环依赖
 	}
 
 	// 添加进程
@@ -328,15 +328,15 @@ func TestProcessAutoRestart(t *testing.T) {
 
 	// 创建测试进程配置（设置较短的启动时间，便于测试）
 	programCfg := &config.ProgramConfig{
-		Name:        "test_restart",
-		Command:     "ping localhost -t",
-		Directory:   ".",
-		AutoStart:   true,
-		AutoRestart: true,
-		StartSecs:   1,
+		Name:         "test_restart",
+		Command:      "ping localhost",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    1,
 		StartRetries: 3,
-		User:        "",
-		Environment: make(map[string]string),
+		User:         "",
+		Environment:  make(map[string]string),
 	}
 
 	// 添加进程
@@ -357,22 +357,20 @@ func TestProcessAutoRestart(t *testing.T) {
 	// 等待进程启动
 	time.Sleep(2 * time.Second)
 
-	// 模拟进程退出
+	// 模拟进程退出并等待自动重启
 	p.ExitCode = 1
 	p.State = "EXITED"
-
-	// 等待自动重启
 	time.Sleep(3 * time.Second)
 
 	// 检查进程是否重启
 	if p.State != "RUNNING" {
-		t.Logf("期望进程状态为RUNNING（已重启），实际为%s（Windows系统上可能正常）", p.State)
+		t.Logf("期望进程状态为RUNNING（已重启），实际为%s", p.State)
 	}
 
 	// 停止进程
-	// 注意：在Windows系统上，停止可能会失败，我们这里捕获错误但不视为测试失败
+	// 停止进程，若出错则记录
 	if err := p.Stop(); err != nil {
-		t.Logf("停止进程时遇到错误（Windows系统上可能正常）: %v", err)
+		t.Logf("停止进程时遇到错误: %v", err)
 	}
 }
 
@@ -394,15 +392,15 @@ func TestProcessResourceMonitoring(t *testing.T) {
 
 	// 创建测试进程配置，使用ping命令让进程一直运行
 	programCfg := &config.ProgramConfig{
-		Name:        "test_resource",
-		Command:     "ping localhost -t",
-		Directory:   ".",
-		AutoStart:   true,
-		AutoRestart: true,
-		StartSecs:   1,
+		Name:         "test_resource",
+		Command:      "ping localhost",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    1,
 		StartRetries: 3,
-		User:        "",
-		Environment: make(map[string]string),
+		User:         "",
+		Environment:  make(map[string]string),
 	}
 
 	// 添加进程
@@ -431,9 +429,9 @@ func TestProcessResourceMonitoring(t *testing.T) {
 	}
 
 	// 停止进程
-	// 注意：在Windows系统上，停止可能会失败，我们这里捕获错误但不视为测试失败
+	// 停止进程，若出错则记录
 	if err := p.Stop(); err != nil {
-		t.Logf("停止进程时遇到错误（Windows系统上可能正常）: %v", err)
+		t.Logf("停止进程时遇到错误: %v", err)
 	}
 }
 
@@ -455,15 +453,15 @@ func TestProcessStateTransitions(t *testing.T) {
 
 	// 创建测试进程配置，使用ping命令让进程一直运行
 	programCfg := &config.ProgramConfig{
-		Name:        "test_state",
-		Command:     "ping localhost -t",
-		Directory:   ".",
-		AutoStart:   true,
-		AutoRestart: true,
-		StartSecs:   1,
+		Name:         "test_state",
+		Command:      "ping -c 10 localhost",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    1,
 		StartRetries: 3,
-		User:        "",
-		Environment: make(map[string]string),
+		User:         "",
+		Environment:  make(map[string]string),
 	}
 
 	// 添加进程
@@ -494,18 +492,15 @@ func TestProcessStateTransitions(t *testing.T) {
 		t.Errorf("期望状态为RUNNING，实际为%s", p.State)
 	}
 
-	// 停止进程
-	// 注意：在Windows系统上，停止可能会失败，我们这里捕获错误但不视为测试失败
+	// 停止进程，若出错则记录
 	if err := p.Stop(); err != nil {
-		t.Logf("停止进程时遇到错误（Windows系统上可能正常）: %v", err)
+		t.Logf("停止进程时遇到错误: %v", err)
 	}
 
 	// 等待进程停止
 	time.Sleep(3 * time.Second)
-
-	// 检查停止状态
-	// 注意：在Windows系统上，进程状态可能会变成EXITED而不是STOPPED，我们这里捕获但不视为测试失败
+	// 检查停止状态（记录非预期状态）
 	if p.State != "STOPPED" {
-		t.Logf("进程状态为%s，期望为STOPPED（Windows系统上可能正常）", p.State)
+		t.Logf("进程状态为%s，期望为STOPPED", p.State)
 	}
 }

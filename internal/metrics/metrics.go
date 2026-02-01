@@ -18,15 +18,15 @@ type MetricsManager struct {
 	registry       *prometheus.Registry
 
 	// 指标定义
-	processCount     prometheus.Gauge
-	processStatus    *prometheus.GaugeVec
-	processUptime    *prometheus.GaugeVec
-	processRestarts  *prometheus.GaugeVec
-	processCPUUsage  *prometheus.GaugeVec
-	processMemUsage  *prometheus.GaugeVec
+	processCount    prometheus.Gauge
+	processStatus   *prometheus.GaugeVec
+	processUptime   *prometheus.GaugeVec
+	processRestarts *prometheus.GaugeVec
+	processCPUUsage *prometheus.GaugeVec
+	processMemUsage *prometheus.GaugeVec
 
 	// 内部状态
-	mu              sync.Mutex
+	mu sync.Mutex
 }
 
 // NewMetricsManager 创建新的指标管理器

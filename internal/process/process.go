@@ -24,24 +24,24 @@ const (
 )
 
 type Process struct {
-	Name          string
-	Config        *config.ProgramConfig
-	Cmd           *exec.Cmd
-	State         ProcessState
-	PID           int
-	StartTime     time.Time
-	StopTime      time.Time
-	ExitCode      int
-	StartRetries  int
-	Context       context.Context
-	CancelFunc    context.CancelFunc
-	Logger        *logger.Logger
-	CPUUsage      float64
-	MemoryUsage   uint64
-	RestartCount  int
-	LastRestart   time.Time
-	Healthy       bool
-	Group         string
+	Name         string
+	Config       *config.ProgramConfig
+	Cmd          *exec.Cmd
+	State        ProcessState
+	PID          int
+	StartTime    time.Time
+	StopTime     time.Time
+	ExitCode     int
+	StartRetries int
+	Context      context.Context
+	CancelFunc   context.CancelFunc
+	Logger       *logger.Logger
+	CPUUsage     float64
+	MemoryUsage  uint64
+	RestartCount int
+	LastRestart  time.Time
+	Healthy      bool
+	Group        string
 }
 
 type ProcessManager struct {
@@ -59,12 +59,12 @@ func NewProcessManager(logger *logger.Logger) *ProcessManager {
 func (pm *ProcessManager) AddProcess(cfg *config.ProgramConfig) *Process {
 	ctx, cancel := context.WithCancel(context.Background())
 	process := &Process{
-		Name:         cfg.Name,
-		Config:       cfg,
-		State:        StateStopped,
-		Context:      ctx,
-		CancelFunc:   cancel,
-		Logger:       pm.Logger,
+		Name:       cfg.Name,
+		Config:     cfg,
+		State:      StateStopped,
+		Context:    ctx,
+		CancelFunc: cancel,
+		Logger:     pm.Logger,
 	}
 	pm.Processes[cfg.Name] = process
 	return process
@@ -81,8 +81,9 @@ func (p *Process) Start() error {
 	p.LastRestart = time.Now()
 	p.Healthy = false
 
-	// 准备命令
-	cmd := exec.CommandContext(p.Context, "cmd.exe", "/c", p.Config.Command)
+	// 准备命令（只支持类 Unix 系统）
+	// 使用 /bin/sh -c 来执行配置里的命令字符串
+	cmd := exec.CommandContext(p.Context, "/bin/sh", "-c", p.Config.Command)
 
 	// 设置工作目录
 	if p.Config.Directory != "" {
@@ -96,10 +97,8 @@ func (p *Process) Start() error {
 	}
 	cmd.Env = env
 
-	// 设置进程组
+	// 设置进程组（Linux 特定行为由 proc_linux.go 的 setProcessGroupAttr 实现）
 	cmd.SysProcAttr = &syscall.SysProcAttr{}
-
-	// 根据操作系统设置不同的进程组属性
 	setProcessGroupAttr(cmd.SysProcAttr)
 
 	// 集成日志管理
@@ -144,13 +143,13 @@ func (p *Process) monitorResources() {
 			}
 
 			// 这里可以添加资源监控逻辑
-			// 由于Windows系统的限制，获取进程资源使用情况需要使用特定的API
-			// 这里仅做示例，实际实现需要根据操作系统进行调整
-			
+			// 这里可以添加资源监控逻辑。不同平台有不同的采集方法，
+			// 此处为示例实现，生产环境可使用专门库（如 gopsutil）获取真实指标。
+
 			// 模拟资源使用情况
 			p.CPUUsage = float64(time.Now().UnixNano()%100) / 10.0
 			p.MemoryUsage = uint64(time.Now().UnixNano()%1024) * 1024 * 1024 // 模拟内存使用
-			
+
 			// 检查进程健康状态
 			p.Healthy = p.CPUUsage < 90.0 && p.MemoryUsage < 2*1024*1024*1024 // 2GB
 		case <-p.Context.Done():
@@ -166,7 +165,7 @@ func (p *Process) Stop() error {
 
 	p.State = StateStopping
 
-	// 在Windows系统上，我们直接使用Kill()来终止进程
+	// 使用 Kill() 来终止进程并等待退出
 	if err := p.Cmd.Process.Kill(); err != nil {
 		return fmt.Errorf("终止进程失败: %v", err)
 	}
@@ -254,17 +253,30 @@ func (pm *ProcessManager) topologicalSort(graph map[string][]string) ([]string, 
 	// 计算每个节点的入度并构建反向依赖图
 	inDegree := make(map[string]int)
 	reverseGraph := make(map[string][]string)
-	
+
 	// 初始化入度和反向依赖图
-	for node := range graph {
-		inDegree[node] = 0
-		reverseGraph[node] = []string{}
+	// 确保图中出现的所有节点都被初始化（包括作为依赖出现但未显式声明的节点）
+	for node, deps := range graph {
+		if _, ok := inDegree[node]; !ok {
+			inDegree[node] = 0
+		}
+		if _, ok := reverseGraph[node]; !ok {
+			reverseGraph[node] = []string{}
+		}
+		for _, dep := range deps {
+			if _, ok := inDegree[dep]; !ok {
+				inDegree[dep] = 0
+			}
+			if _, ok := reverseGraph[dep]; !ok {
+				reverseGraph[dep] = []string{}
+			}
+		}
 	}
 
 	// 构建反向依赖图并计算入度
 	for node, dependencies := range graph {
 		for _, dep := range dependencies {
-			inDegree[node]++ // node依赖于dep，所以node的入度+1
+			inDegree[node]++                                    // node依赖于dep，所以node的入度+1
 			reverseGraph[dep] = append(reverseGraph[dep], node) // dep被node依赖，所以反向依赖图中dep指向node
 		}
 	}
