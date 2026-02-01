@@ -19,8 +19,9 @@ type WebServer struct {
 func NewWebServer(processManager *process.ProcessManager) (*WebServer, error) {
 	// 创建模板并添加lower函数
 	tmpl := template.New("index").Funcs(template.FuncMap{
-		"lower": func(s string) string {
-			return strings.ToLower(s)
+		"lower": func(s interface{}) string {
+			// 将任何类型转换为字符串，然后转换为小写
+			return strings.ToLower(fmt.Sprintf("%v", s))
 		},
 	})
 
@@ -196,8 +197,9 @@ func (ws *WebServer) handleProcessDetail(w http.ResponseWriter, r *http.Request)
 
 	// 渲染进程详情页面
 	tmpl := template.Must(template.New("process").Funcs(template.FuncMap{
-		"lower": func(s string) string {
-			return strings.ToLower(s)
+		"lower": func(s interface{}) string {
+			// 将任何类型转换为字符串，然后转换为小写
+			return strings.ToLower(fmt.Sprintf("%v", s))
 		},
 	}).Parse(processDetailTemplate))
 	if err := tmpl.Execute(w, p); err != nil {
