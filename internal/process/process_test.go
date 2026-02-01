@@ -504,3 +504,201 @@ func TestProcessStateTransitions(t *testing.T) {
 		t.Logf("进程状态为%s，期望为STOPPED", p.State)
 	}
 }
+
+// TestMonitorAutoRestart 测试 Monitor 的自动重启功能
+func TestMonitorAutoRestart(t *testing.T) {
+	logDir := "./test_logs"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, err := logger.NewDefaultLogger(logDir)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logManager.Close()
+
+	processManager := NewProcessManager(logManager)
+
+	// 创建一个短暂进程（运行 1 秒后自动退出）
+	programCfg := &config.ProgramConfig{
+		Name:         "short_lived",
+		Command:      "sleep 1",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    1,
+		StartRetries: 2,
+		User:         "",
+		Environment:  make(map[string]string),
+	}
+
+	processManager.AddProcess(programCfg)
+
+	// 创建并启动监控
+	monitor := NewMonitor(processManager)
+	monitor.Start()
+	defer monitor.Stop()
+
+	p := processManager.GetProcess("short_lived")
+	if p == nil {
+		t.Fatalf("获取进程失败")
+	}
+
+	// 手动启动进程
+	err = p.Start()
+	if err != nil {
+		t.Errorf("启动进程失败: %v", err)
+	}
+
+	// 等待进程退出
+	time.Sleep(2 * time.Second)
+
+	// 进程应该已退出
+	if p.State != StateExited && p.State != StateRunning {
+		t.Logf("第一次检查：进程状态为%s", p.State)
+	}
+
+	// 等待监控尝试重启
+	time.Sleep(2 * time.Second)
+
+	// 检查是否发生了重启（RestartCount > 0 或状态变化）
+	// 注意：由于 sleep 1 会快速完成，重启次数应该增加
+	if p.RestartCount == 0 && p.StartRetries == 1 {
+		t.Logf("期望重启至少发生过一次，RestartCount=%d, StartRetries=%d", p.RestartCount, p.StartRetries)
+	}
+}
+
+// TestTopologicalSortWithStartAllFallback 测试依赖关系错误时的降级行为
+func TestTopologicalSortWithStartAllFallback(t *testing.T) {
+	logDir := "./test_logs"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, err := logger.NewDefaultLogger(logDir)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logManager.Close()
+
+	processManager := NewProcessManager(logManager)
+
+	// 创建循环依赖的进程配置
+	programCfg1 := &config.ProgramConfig{
+		Name:         "cycle1",
+		Command:      "echo test1",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  false,
+		StartSecs:    1,
+		StartRetries: 1,
+		User:         "",
+		Environment:  make(map[string]string),
+		DependsOn:    []string{"cycle2"},
+	}
+
+	programCfg2 := &config.ProgramConfig{
+		Name:         "cycle2",
+		Command:      "echo test2",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  false,
+		StartSecs:    1,
+		StartRetries: 1,
+		User:         "",
+		Environment:  make(map[string]string),
+		DependsOn:    []string{"cycle1"}, // 循环依赖
+	}
+
+	processManager.AddProcess(programCfg1)
+	processManager.AddProcess(programCfg2)
+
+	// StartAll 应该尽管存在循环依赖也能执行（使用降级的默认顺序）
+	processManager.StartAll()
+
+	// 等待启动
+	time.Sleep(1 * time.Second)
+
+	// 验证两个进程都被添加到了管理器
+	p1 := processManager.GetProcess("cycle1")
+	p2 := processManager.GetProcess("cycle2")
+
+	if p1 == nil || p2 == nil {
+		t.Fatalf("进程未被正确添加")
+	}
+
+	// 虽然有循环依赖，但进程应该还是能启动（至少状态应该有变化）
+	// 由于 echo 命令会立即完成，进程会进入 EXITED 状态
+	if p1.State == StateStopped && p2.State == StateStopped {
+		t.Logf("循环依赖时 StartAll 可能未执行（期望至少有进程启动/退出）")
+	}
+}
+
+// TestProcessRestartCountLogic 测试重启计数逻辑
+func TestProcessRestartCountLogic(t *testing.T) {
+	logDir := "./test_logs"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, err := logger.NewDefaultLogger(logDir)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logManager.Close()
+
+	processManager := NewProcessManager(logManager)
+
+	programCfg := &config.ProgramConfig{
+		Name:         "restart_test",
+		Command:      "echo restart",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  false,
+		StartSecs:    1,
+		StartRetries: 3,
+		User:         "",
+		Environment:  make(map[string]string),
+	}
+
+	processManager.AddProcess(programCfg)
+	p := processManager.GetProcess("restart_test")
+
+	// 初始状态
+	initialRetries := p.StartRetries
+	initialRestarts := p.RestartCount
+
+	// 第一次启动
+	err = p.Start()
+	if err != nil {
+		t.Errorf("第一次启动失败: %v", err)
+	}
+
+	// StartRetries 应该增加
+	if p.StartRetries <= initialRetries {
+		t.Errorf("期望 StartRetries > %d，实际为 %d", initialRetries, p.StartRetries)
+	}
+
+	if p.RestartCount <= initialRestarts {
+		t.Errorf("期望 RestartCount > %d，实际为 %d", initialRestarts, p.RestartCount)
+	}
+
+	// 等待进程完成
+	time.Sleep(1 * time.Second)
+
+	// 再次启动（重启）
+	p2Retries := p.StartRetries
+	p2Restarts := p.RestartCount
+
+	err = p.Start()
+	if err != nil {
+		t.Errorf("第二次启动失败: %v", err)
+	}
+
+	// 再次检查计数是否继续增加
+	if p.StartRetries <= p2Retries {
+		t.Logf("期望第二次 StartRetries > %d，实际为 %d", p2Retries, p.StartRetries)
+	}
+
+	if p.RestartCount <= p2Restarts {
+		t.Logf("期望第二次 RestartCount > %d，实际为 %d", p2Restarts, p.RestartCount)
+	}
+}

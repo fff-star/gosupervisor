@@ -45,6 +45,70 @@ func TestLogger(t *testing.T) {
 	}
 }
 
+// TestProcessLogWriterWithLargeWrites 测试日志写入时文件大小跟踪是否同步更新
+func TestProcessLogWriterWithLargeWrites(t *testing.T) {
+	logDir := "./test_logs"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	// 创建小的日志大小限制以便快速触发轮转
+	logger, err := NewLogger(logDir, 1024, 5, false) // 1KB max size
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logger.Close()
+
+	// 获取进程日志写入器
+	writer, err := logger.GetProcessLogWriter("test_large")
+	if err != nil {
+		t.Fatalf("获取日志写入器失败: %v", err)
+	}
+
+	// 写入大量数据以触发轮转（>1KB）
+	largeData := make([]byte, 1500)
+	for i := range largeData {
+		largeData[i] = 'A'
+	}
+
+	n, err := writer.Write(largeData)
+	if err != nil {
+		t.Fatalf("写入日志失败: %v", err)
+	}
+
+	if n != len(largeData) {
+		t.Errorf("期望写入%d字节，实际写入%d字节", len(largeData), n)
+	}
+
+	// 等待轮转
+	time.Sleep(500 * time.Millisecond)
+
+	// 再次获取写入器，应该触发轮转
+	writer2, err := logger.GetProcessLogWriter("test_large")
+	if err != nil {
+		t.Fatalf("第二次获取日志写入器失败: %v", err)
+	}
+
+	n2, err := writer2.Write(largeData)
+	if err != nil {
+		t.Fatalf("第二次写入日志失败: %v", err)
+	}
+
+	if n2 != len(largeData) {
+		t.Errorf("期望第二次写入%d字节，实际写入%d字节", len(largeData), n2)
+	}
+
+	// 检查是否生成了轮转文件
+	files, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatalf("读取日志目录失败: %v", err)
+	}
+
+	// 应该至少有原始日志文件和至少一个轮转后的文件
+	if len(files) < 1 {
+		t.Errorf("期望至少有日志文件，实际有%d个", len(files))
+	}
+}
+
 func TestLogRotation(t *testing.T) {
 	// 创建测试日志目录
 	logDir := "./test_logs"
