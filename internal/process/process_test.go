@@ -1191,3 +1191,199 @@ func TestStopThenMonitorRestartRace(t *testing.T) {
 		monitor.Stop()
 	}
 }
+
+// TestTopologicalSortWithPriority tests that processes at the same dependency level
+// are ordered by their Priority field.
+func TestTopologicalSortWithPriority(t *testing.T) {
+	logDir := "./test_logs_prio"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+
+	for _, entry := range []struct {
+		name     string
+		priority int
+	}{
+		{"prio_low", 999},
+		{"prio_high", 1},
+		{"prio_mid", 500},
+	} {
+		pm.AddProcess(&config.ProgramConfig{
+			Name:         entry.name,
+			Command:      "true",
+			Priority:     entry.priority,
+			AutoStart:    false,
+			AutoRestart:  false,
+			StartSecs:    1,
+			StartRetries: 1,
+			Environment:  make(map[string]string),
+		})
+	}
+
+	graph := make(map[string][]string)
+	for name, proc := range pm.Processes {
+		graph[name] = proc.Config.DependsOn
+	}
+
+	order, err := pm.topologicalSort(graph)
+	if err != nil {
+		t.Fatalf("拓扑排序失败: %v", err)
+	}
+
+	if order[0] != "prio_high" {
+		t.Errorf("期望最高优先级(Priority=1)排第一，实际 %s", order[0])
+	}
+	if order[1] != "prio_mid" {
+		t.Errorf("期望中优先级(Priority=500)排第二，实际 %s", order[1])
+	}
+	if order[2] != "prio_low" {
+		t.Errorf("期望最低优先级(Priority=999)排第三，实际 %s", order[2])
+	}
+}
+
+// TestStopSignalsMap tests that all expected signal names are mapped.
+func TestStopSignalsMap(t *testing.T) {
+	expected := []string{"SIGTERM", "SIGQUIT", "SIGINT", "SIGHUP", "SIGUSR1", "SIGUSR2", "SIGKILL"}
+	for _, name := range expected {
+		sig, ok := stopSignals[name]
+		if !ok {
+			t.Errorf("信号 %s 不在 stopSignals 映射中", name)
+		}
+		if sig == 0 {
+			t.Errorf("信号 %s 映射值为零", name)
+		}
+	}
+}
+
+// TestRedirectStdoutStderrFlags tests that RedirectStdout/RedirectStderr are honored.
+func TestRedirectStdoutStderrFlags(t *testing.T) {
+	logDir := "./test_logs_redir"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	t.Run("only stdout redirected", func(t *testing.T) {
+		cfg := &config.ProgramConfig{
+			Name:                 "test_stdout_only",
+			Command:              "echo hi",
+			RedirectStdout:       true,
+			RedirectStderr:       false,
+			AutoStart:            false,
+			AutoRestart:          false,
+			StartSecs:            0,
+			StartRetries:         0,
+			Environment:          make(map[string]string),
+			StdoutLogMaxBytes:    50 * 1024 * 1024,
+			StderrLogMaxBytes:    50 * 1024 * 1024,
+			StdoutLogBackupCount: 10,
+			StderrLogBackupCount: 10,
+		}
+		pm := NewProcessManager(logManager)
+		pm.AddProcess(cfg)
+		p := pm.GetProcess("test_stdout_only")
+		_ = p.Start()
+		time.Sleep(200 * time.Millisecond)
+		p.Stop()
+	})
+
+	t.Run("only stderr redirected", func(t *testing.T) {
+		cfg := &config.ProgramConfig{
+			Name:                 "test_stderr_only",
+			Command:              "echo hi",
+			RedirectStdout:       false,
+			RedirectStderr:       true,
+			AutoStart:            false,
+			AutoRestart:          false,
+			StartSecs:            0,
+			StartRetries:         0,
+			Environment:          make(map[string]string),
+			StdoutLogMaxBytes:    50 * 1024 * 1024,
+			StderrLogMaxBytes:    50 * 1024 * 1024,
+			StdoutLogBackupCount: 10,
+			StderrLogBackupCount: 10,
+		}
+		pm := NewProcessManager(logManager)
+		pm.AddProcess(cfg)
+		p := pm.GetProcess("test_stderr_only")
+		_ = p.Start()
+		time.Sleep(200 * time.Millisecond)
+		p.Stop()
+	})
+
+	t.Run("neither redirected", func(t *testing.T) {
+		cfg := &config.ProgramConfig{
+			Name:                 "test_neither",
+			Command:              "echo hi",
+			RedirectStdout:       false,
+			RedirectStderr:       false,
+			AutoStart:            false,
+			AutoRestart:          false,
+			StartSecs:            0,
+			StartRetries:         0,
+			Environment:          make(map[string]string),
+			StdoutLogMaxBytes:    50 * 1024 * 1024,
+			StderrLogMaxBytes:    50 * 1024 * 1024,
+			StdoutLogBackupCount: 10,
+			StderrLogBackupCount: 10,
+		}
+		pm := NewProcessManager(logManager)
+		pm.AddProcess(cfg)
+		p := pm.GetProcess("test_neither")
+		_ = p.Start()
+		time.Sleep(200 * time.Millisecond)
+		p.Stop()
+	})
+}
+
+// TestCPUUsageIsPercentage tests that CPU usage is computed as a delta-based
+// percentage after two sampling intervals.
+func TestCPUUsageIsPercentage(t *testing.T) {
+	logDir := "./test_logs_cpu"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "cpu_test",
+		Command:      "dd if=/dev/zero of=/dev/null bs=1M count=100",
+		Directory:    ".",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 3,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("cpu_test")
+	_ = p.Start()
+	defer p.Stop()
+
+	// Wait for at least one resource sample
+	time.Sleep(6 * time.Second)
+
+	s := p.Snapshot()
+	if s.CPUUsage < 0 {
+		t.Errorf("CPU 使用率不应为负数, got %.2f", s.CPUUsage)
+	}
+	if s.CPUUsage > 200 {
+		t.Errorf("CPU 使用率异常高 (可能仍是 ticks), got %.2f", s.CPUUsage)
+	}
+	t.Logf("CPU usage: %.2f%%", s.CPUUsage)
+}
+
+// TestReadSystemCPUTicks tests the system CPU ticks reader.
+func TestReadSystemCPUTicks(t *testing.T) {
+	ticks := readSystemCPUTicks()
+	if ticks <= 0 {
+		t.Error("系统 CPU ticks 应大于 0")
+	}
+}

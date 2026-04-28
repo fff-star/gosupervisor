@@ -267,9 +267,40 @@ func testConfiguration(configPath string) error {
 
 // runAsDaemon 以守护进程模式运行
 func runAsDaemon() error {
-	// 在实际实现中，这里会包含守护进程的创建逻辑
-	// 由于Windows系统的特殊性，这里只做简单处理
-	fmt.Println("以守护进程模式运行...")
+	// Already daemonized (parent is init)
+	if os.Getppid() == 1 {
+		return nil
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("获取可执行文件路径失败: %v", err)
+	}
+
+	// Strip -d flag to prevent infinite re-daemonization
+	args := make([]string, 0, len(os.Args))
+	for _, a := range os.Args[1:] {
+		if a == "-d" {
+			continue
+		}
+		args = append(args, a)
+	}
+
+	attr := &os.ProcAttr{
+		Dir:   "/",
+		Files: []*os.File{nil, nil, nil},
+		Sys: &syscall.SysProcAttr{
+			Setsid: true,
+		},
+	}
+
+	child, err := os.StartProcess(exe, append([]string{exe}, args...), attr)
+	if err != nil {
+		return fmt.Errorf("fork 子进程失败: %v", err)
+	}
+
+	fmt.Printf("守护进程已启动，PID: %d\n", child.Pid)
+	os.Exit(0)
 	return nil
 }
 

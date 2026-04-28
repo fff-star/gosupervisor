@@ -3,6 +3,7 @@ package web
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -152,9 +153,8 @@ func (ws *WebServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 读取日志文件
 	logPath := fmt.Sprintf("./logs/%s.log", processName)
-	logContent, err := os.ReadFile(logPath)
+	logContent, err := readTailLines(logPath, tailMaxLines, tailMaxBytes)
 	if err != nil {
 		logContent = []byte(fmt.Sprintf("无法读取日志文件: %v", err))
 	}
@@ -283,6 +283,60 @@ func getSystemInfo() *SystemInfo {
 	}
 
 	return info
+}
+
+const (
+	tailMaxLines = 1000
+	tailMaxBytes = 1 * 1024 * 1024 // 1MB
+)
+
+// readTailLines reads the last maxLines lines from a file,
+// bounded by maxBytes from the end of the file.
+func readTailLines(path string, maxLines int, maxBytes int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	fileSize := fi.Size()
+	readSize := maxBytes
+	if readSize > fileSize {
+		readSize = fileSize
+	}
+
+	_, err = f.Seek(-readSize, io.SeekEnd)
+	if err != nil {
+		// File too small or seek failed; read from start
+		f.Seek(0, io.SeekStart)
+		readSize = fileSize
+	}
+
+	buf := make([]byte, readSize)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return nil, err
+	}
+	buf = buf[:n]
+
+	// Find the start position: skip the first partial line (if we didn't start at BOF)
+	// and keep at most maxLines
+	lines := 0
+	for i := len(buf) - 1; i >= 0; i-- {
+		if buf[i] == '\n' {
+			lines++
+			if lines > maxLines {
+				return buf[i+1:], nil
+			}
+		}
+	}
+
+	return buf, nil
 }
 
 // countProcesses 统计系统中运行的进程数

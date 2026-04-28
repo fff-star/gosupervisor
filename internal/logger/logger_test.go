@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"gosupervisor/internal/config"
 )
 
 func TestLogger(t *testing.T) {
@@ -59,7 +61,14 @@ func TestProcessLogWriterWithLargeWrites(t *testing.T) {
 	defer logger.Close()
 
 	// 获取进程日志写入器
-	writer, err := logger.GetProcessLogWriter("test_large")
+	cfg := &config.ProgramConfig{
+		Name:               "test_large",
+		StdoutLogMaxBytes:  1024,
+		StderrLogMaxBytes:  1024,
+		StdoutLogBackupCount: 5,
+		StderrLogBackupCount: 5,
+	}
+	writer, _, err := logger.GetProcessLogWriters("test_large", cfg)
 	if err != nil {
 		t.Fatalf("获取日志写入器失败: %v", err)
 	}
@@ -83,7 +92,7 @@ func TestProcessLogWriterWithLargeWrites(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// 再次获取写入器，应该触发轮转
-	writer2, err := logger.GetProcessLogWriter("test_large")
+	writer2, _, err := logger.GetProcessLogWriters("test_large", cfg)
 	if err != nil {
 		t.Fatalf("第二次获取日志写入器失败: %v", err)
 	}
@@ -416,5 +425,97 @@ func TestLogLevelFiltering(t *testing.T) {
 
 	if len(logFiles) == 0 {
 		t.Fatalf("日志文件未创建")
+	}
+}
+
+// TestGetProcessLogWritersPerProcessConfig tests per-process log settings.
+func TestGetProcessLogWritersPerProcessConfig(t *testing.T) {
+	logDir := "./test_logs_pp"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logger, err := NewDefaultLogger(logDir)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logger.Close()
+
+	// Use a small per-process max size so rotation triggers
+	cfg := &config.ProgramConfig{
+		Name:                 "pp_test",
+		StdoutLogMaxBytes:    1024,
+		StderrLogMaxBytes:    2048,
+		StdoutLogBackupCount: 3,
+		StderrLogBackupCount: 5,
+	}
+
+	stdoutW, stderrW, err := logger.GetProcessLogWriters("pp_test", cfg)
+	if err != nil {
+		t.Fatalf("GetProcessLogWriters 失败: %v", err)
+	}
+	if stdoutW == nil {
+		t.Error("stdout writer 不应为 nil")
+	}
+	if stderrW == nil {
+		t.Error("stderr writer 不应为 nil")
+	}
+
+	// Write enough data to trigger rotation on stdout
+	largeData := make([]byte, 1500)
+	for i := range largeData {
+		largeData[i] = 'X'
+	}
+	stdoutW.Write(largeData)
+	time.Sleep(300 * time.Millisecond)
+
+	// Next GetProcessLogWriters call should trigger rotation check
+	stdoutW2, _, err := logger.GetProcessLogWriters("pp_test", cfg)
+	if err != nil {
+		t.Fatalf("第二次 GetProcessLogWriters 失败: %v", err)
+	}
+	stdoutW2.Write([]byte("more data\n"))
+	time.Sleep(300 * time.Millisecond)
+}
+
+// TestGetProcessLogWritersSeparatePaths tests custom log file paths.
+func TestGetProcessLogWritersSeparatePaths(t *testing.T) {
+	logDir := "./test_logs_sep"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logger, err := NewDefaultLogger(logDir)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logger.Close()
+
+	stdoutPath := filepath.Join(logDir, "custom_stdout.log")
+	stderrPath := filepath.Join(logDir, "custom_stderr.log")
+
+	cfg := &config.ProgramConfig{
+		Name:                 "sep_test",
+		StdoutLogFile:        stdoutPath,
+		StderrLogFile:        stderrPath,
+		StdoutLogMaxBytes:    50 * 1024 * 1024,
+		StderrLogMaxBytes:    50 * 1024 * 1024,
+		StdoutLogBackupCount: 10,
+		StderrLogBackupCount: 10,
+	}
+
+	stdoutW, stderrW, err := logger.GetProcessLogWriters("sep_test", cfg)
+	if err != nil {
+		t.Fatalf("GetProcessLogWriters 失败: %v", err)
+	}
+
+	stdoutW.Write([]byte("stdout log\n"))
+	stderrW.Write([]byte("stderr log\n"))
+	time.Sleep(300 * time.Millisecond)
+
+	// Verify both custom files exist
+	if _, err := os.Stat(stdoutPath); os.IsNotExist(err) {
+		t.Errorf("自定义 stdout 日志文件未创建: %s", stdoutPath)
+	}
+	if _, err := os.Stat(stderrPath); os.IsNotExist(err) {
+		t.Errorf("自定义 stderr 日志文件未创建: %s", stderrPath)
 	}
 }

@@ -1,9 +1,11 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -457,4 +459,75 @@ func indexOf(s, substr string) int {
 		}
 	}
 	return -1
+}
+
+// TestReadTailLines tests reading the last N lines from a file.
+func TestReadTailLines(t *testing.T) {
+	// Create a temp file with known content
+	tmpFile := "./test_logs/tail_test.log"
+	os.MkdirAll("./test_logs", 0755)
+	defer os.RemoveAll("./test_logs")
+
+	// Write 50 lines
+	var content string
+	for i := 1; i <= 50; i++ {
+		content += fmt.Sprintf("line %d\n", i)
+	}
+	os.WriteFile(tmpFile, []byte(content), 0644)
+
+	// Read last 10 lines
+	result, err := readTailLines(tmpFile, 10, 1*1024*1024)
+	if err != nil {
+		t.Fatalf("readTailLines 失败: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(result)), "\n")
+	if len(lines) != 10 {
+		t.Errorf("期望 10 行, 实际 %d 行", len(lines))
+	}
+	if lines[0] != "line 41" {
+		t.Errorf("期望第一行为 'line 41', 实际 '%s'", lines[0])
+	}
+	if lines[9] != "line 50" {
+		t.Errorf("期望最后一行为 'line 50', 实际 '%s'", lines[9])
+	}
+
+	// Test with maxLines larger than file
+	result2, err := readTailLines(tmpFile, 100, 1*1024*1024)
+	if err != nil {
+		t.Fatalf("readTailLines 大行数失败: %v", err)
+	}
+	lines2 := strings.Split(strings.TrimSpace(string(result2)), "\n")
+	if len(lines2) != 50 {
+		t.Errorf("期望 50 行, 实际 %d 行", len(lines2))
+	}
+
+	// Test with non-existent file
+	_, err = readTailLines("./test_logs/nonexistent.log", 10, 1*1024*1024)
+	if err == nil {
+		t.Error("期望非存在文件返回错误")
+	}
+}
+
+// TestReadTailLinesSmallMaxBytes tests reading with a tight byte limit.
+func TestReadTailLinesSmallMaxBytes(t *testing.T) {
+	os.MkdirAll("./test_logs", 0755)
+	defer os.RemoveAll("./test_logs")
+
+	tmpFile := "./test_logs/tail_bytes_test.log"
+	var content string
+	for i := 1; i <= 100; i++ {
+		content += fmt.Sprintf("line %d with more text to fill bytes\n", i)
+	}
+	os.WriteFile(tmpFile, []byte(content), 0644)
+
+	// Limit to 200 bytes
+	result, err := readTailLines(tmpFile, 1000, 200)
+	if err != nil {
+		t.Fatalf("readTailLines 小字节限制失败: %v", err)
+	}
+
+	if len(result) > 300 {
+		t.Errorf("结果应远小于300字节 (限制200), 实际 %d 字节", len(result))
+	}
 }
