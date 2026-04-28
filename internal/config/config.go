@@ -236,26 +236,31 @@ func loadINIConfig(configPath string) (*Config, error) {
 }
 
 // loadYAMLConfig 加载YAML格式的配置文件
-// configPath 配置文件路径
-// 返回配置对象和错误信息
 func loadYAMLConfig(configPath string) (*Config, error) {
-	file, err := os.Open(configPath)
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("无法打开配置文件: %v", err)
 	}
-	defer file.Close()
+
+	// First pass: detect which keys are present for each program
+	var rawDoc map[string]map[string]map[string]interface{}
+	yaml.Unmarshal(data, &rawDoc)
+	rawPrograms := rawDoc["programs"]
 
 	var yamlConfig YAMLConfig
-	if err := yaml.NewDecoder(file).Decode(&yamlConfig); err != nil {
+	if err := yaml.Unmarshal(data, &yamlConfig); err != nil {
 		return nil, fmt.Errorf("解析YAML配置文件错误: %v", err)
 	}
 
-	// 设置默认值
+	return applyDefaults(yamlConfig.Programs, rawPrograms)
+}
+
+func applyDefaults(programs map[string]*ProgramConfig, rawPrograms map[string]map[string]interface{}) (*Config, error) {
 	config := &Config{
 		Programs: make(map[string]*ProgramConfig),
 	}
 
-	for name, prog := range yamlConfig.Programs {
+	for name, prog := range programs {
 		if prog.Name == "" {
 			prog.Name = name
 		}
@@ -265,6 +270,9 @@ func loadYAMLConfig(configPath string) (*Config, error) {
 		if prog.DependsOn == nil {
 			prog.DependsOn = []string{}
 		}
+
+		raw := rawPrograms[name]
+
 		if prog.StartSecs == 0 {
 			prog.StartSecs = 1
 		}
@@ -278,13 +286,13 @@ func loadYAMLConfig(configPath string) (*Config, error) {
 			prog.StopSignal = "SIGTERM"
 		}
 		if prog.StdoutLogMaxBytes == 0 {
-			prog.StdoutLogMaxBytes = 50 * 1024 * 1024 // 50MB
+			prog.StdoutLogMaxBytes = 50 * 1024 * 1024
 		}
 		if prog.StdoutLogBackupCount == 0 {
 			prog.StdoutLogBackupCount = 10
 		}
 		if prog.StderrLogMaxBytes == 0 {
-			prog.StderrLogMaxBytes = 50 * 1024 * 1024 // 50MB
+			prog.StderrLogMaxBytes = 50 * 1024 * 1024
 		}
 		if prog.StderrLogBackupCount == 0 {
 			prog.StderrLogBackupCount = 10
@@ -295,6 +303,28 @@ func loadYAMLConfig(configPath string) (*Config, error) {
 		if prog.Umask == 0 {
 			prog.Umask = 022
 		}
+
+		// Bool defaults: use raw map to distinguish "absent" from "explicitly false"
+		if raw == nil {
+			prog.AutoStart = true
+			prog.AutoRestart = true
+			prog.RedirectStdout = true
+			prog.RedirectStderr = true
+		} else {
+			if _, ok := raw["autostart"]; !ok {
+				prog.AutoStart = true
+			}
+			if _, ok := raw["autorestart"]; !ok {
+				prog.AutoRestart = true
+			}
+			if _, ok := raw["redirectstdout"]; !ok {
+				prog.RedirectStdout = true
+			}
+			if _, ok := raw["redirectstderr"]; !ok {
+				prog.RedirectStderr = true
+			}
+		}
+
 		config.Programs[name] = prog
 	}
 
@@ -302,67 +332,21 @@ func loadYAMLConfig(configPath string) (*Config, error) {
 }
 
 // loadJSONConfig 加载JSON格式的配置文件
-// configPath 配置文件路径
-// 返回配置对象和错误信息
 func loadJSONConfig(configPath string) (*Config, error) {
-	file, err := os.Open(configPath)
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("无法打开配置文件: %v", err)
 	}
-	defer file.Close()
+
+	// First pass: detect which keys are present
+	var rawDoc map[string]map[string]map[string]interface{}
+	json.Unmarshal(data, &rawDoc)
+	rawPrograms := rawDoc["programs"]
 
 	var jsonConfig JSONConfig
-	if err := json.NewDecoder(file).Decode(&jsonConfig); err != nil {
+	if err := json.Unmarshal(data, &jsonConfig); err != nil {
 		return nil, fmt.Errorf("解析JSON配置文件错误: %v", err)
 	}
 
-	// 设置默认值
-	config := &Config{
-		Programs: make(map[string]*ProgramConfig),
-	}
-
-	for name, prog := range jsonConfig.Programs {
-		if prog.Name == "" {
-			prog.Name = name
-		}
-		if prog.Environment == nil {
-			prog.Environment = make(map[string]string)
-		}
-		if prog.DependsOn == nil {
-			prog.DependsOn = []string{}
-		}
-		if prog.StartSecs == 0 {
-			prog.StartSecs = 1
-		}
-		if prog.StartRetries == 0 {
-			prog.StartRetries = 3
-		}
-		if prog.StopSecs == 0 {
-			prog.StopSecs = 10
-		}
-		if prog.StopSignal == "" {
-			prog.StopSignal = "SIGTERM"
-		}
-		if prog.StdoutLogMaxBytes == 0 {
-			prog.StdoutLogMaxBytes = 50 * 1024 * 1024 // 50MB
-		}
-		if prog.StdoutLogBackupCount == 0 {
-			prog.StdoutLogBackupCount = 10
-		}
-		if prog.StderrLogMaxBytes == 0 {
-			prog.StderrLogMaxBytes = 50 * 1024 * 1024 // 50MB
-		}
-		if prog.StderrLogBackupCount == 0 {
-			prog.StderrLogBackupCount = 10
-		}
-		if prog.Priority == 0 {
-			prog.Priority = 999
-		}
-		if prog.Umask == 0 {
-			prog.Umask = 022
-		}
-		config.Programs[name] = prog
-	}
-
-	return config, nil
+	return applyDefaults(jsonConfig.Programs, rawPrograms)
 }

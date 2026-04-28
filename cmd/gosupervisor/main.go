@@ -83,8 +83,11 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
+	// done channel for clean shutdown (avoids os.Exit bypassing defers)
+	done := make(chan struct{})
+
 	// 启动信号处理协程
-	go handleSignals(sigChan, processManager, configPath, logManager)
+	go handleSignals(sigChan, done, processManager, configPath, logManager)
 
 	// 添加进程
 	for _, programCfg := range cfg.Programs {
@@ -118,7 +121,7 @@ func main() {
 
 			// 如果启用了Web界面，启动Web服务器
 			if *webEnable {
-				webServer, err := web.NewWebServer(processManager)
+				webServer, err := web.NewWebServer(processManager, *logDir)
 				if err != nil {
 					fmt.Printf("初始化Web服务器失败: %v\n", err)
 					os.Exit(1)
@@ -149,7 +152,7 @@ func main() {
 			}
 
 			// 保持运行
-			select {}
+			<-done
 		}
 	case "stop":
 		if *processName != "" {
@@ -305,7 +308,7 @@ func runAsDaemon() error {
 }
 
 // handleSignals 处理系统信号
-func handleSignals(sigChan chan os.Signal, processManager *process.ProcessManager, configPath *string, logManager *logger.Logger) {
+func handleSignals(sigChan chan os.Signal, done chan struct{}, processManager *process.ProcessManager, configPath *string, logManager *logger.Logger) {
 	for {
 		sig := <-sigChan
 		switch sig {
@@ -314,7 +317,8 @@ func handleSignals(sigChan chan os.Signal, processManager *process.ProcessManage
 			logManager.Info("收到终止信号，正在停止所有进程...")
 			processManager.StopAll()
 			logManager.Info("所有进程已停止，正在退出...")
-			os.Exit(0)
+			close(done)
+			return
 		case syscall.SIGHUP:
 			// 处理重载信号
 			logManager.Info("收到重载信号，正在重新加载配置...")

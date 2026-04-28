@@ -64,7 +64,7 @@ func TestNewWebServer(t *testing.T) {
 	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
-	webServer, err := NewWebServer(processManager)
+	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
 		t.Fatalf("创建Web服务器失败: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestHandleIndex(t *testing.T) {
 	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
-	webServer, err := NewWebServer(processManager)
+	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
 		t.Fatalf("创建Web服务器失败: %v", err)
 	}
@@ -133,16 +133,17 @@ func TestHandleStart(t *testing.T) {
 	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
-	webServer, err := NewWebServer(processManager)
+	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
 		t.Fatalf("创建Web服务器失败: %v", err)
 	}
 
 	// 创建测试请求
-	req, err := http.NewRequest("GET", "/start?name=test_process", nil)
+	req, err := http.NewRequest("POST", "/start", strings.NewReader("name=test_process"))
 	if err != nil {
 		t.Fatalf("创建请求失败: %v", err)
 	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	// 创建响应记录器
 	w := httptest.NewRecorder()
@@ -171,16 +172,17 @@ func TestHandleStartWithInvalidProcess(t *testing.T) {
 	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
-	webServer, err := NewWebServer(processManager)
+	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
 		t.Fatalf("创建Web服务器失败: %v", err)
 	}
 
 	// 创建测试请求（请求不存在的进程）
-	req, err := http.NewRequest("GET", "/start?name=non_existent_process", nil)
+	req, err := http.NewRequest("POST", "/start", strings.NewReader("name=non_existent_process"))
 	if err != nil {
 		t.Fatalf("创建请求失败: %v", err)
 	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	// 创建响应记录器
 	w := httptest.NewRecorder()
@@ -204,7 +206,7 @@ func TestHandleStop(t *testing.T) {
 	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
-	webServer, err := NewWebServer(processManager)
+	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
 		t.Fatalf("创建Web服务器失败: %v", err)
 	}
@@ -217,10 +219,11 @@ func TestHandleStop(t *testing.T) {
 	}
 
 	// 创建测试请求
-	req, err := http.NewRequest("GET", "/stop?name=test_process", nil)
+	req, err := http.NewRequest("POST", "/stop", strings.NewReader("name=test_process"))
 	if err != nil {
 		t.Fatalf("创建请求失败: %v", err)
 	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	// 创建响应记录器
 	w := httptest.NewRecorder()
@@ -249,7 +252,7 @@ func TestHandleRestart(t *testing.T) {
 	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
-	webServer, err := NewWebServer(processManager)
+	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
 		t.Fatalf("创建Web服务器失败: %v", err)
 	}
@@ -262,10 +265,11 @@ func TestHandleRestart(t *testing.T) {
 	}
 
 	// 创建测试请求
-	req, err := http.NewRequest("GET", "/restart?name=test_process", nil)
+	req, err := http.NewRequest("POST", "/restart", strings.NewReader("name=test_process"))
 	if err != nil {
 		t.Fatalf("创建请求失败: %v", err)
 	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	// 创建响应记录器
 	w := httptest.NewRecorder()
@@ -294,7 +298,7 @@ func TestHandleLogs(t *testing.T) {
 	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
-	webServer, err := NewWebServer(processManager)
+	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
 		t.Fatalf("创建Web服务器失败: %v", err)
 	}
@@ -336,7 +340,7 @@ func TestHandleSystemInfo(t *testing.T) {
 	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
-	webServer, err := NewWebServer(processManager)
+	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
 		t.Fatalf("创建Web服务器失败: %v", err)
 	}
@@ -378,7 +382,7 @@ func TestHandleProcessDetail(t *testing.T) {
 	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
-	webServer, err := NewWebServer(processManager)
+	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
 		t.Fatalf("创建Web服务器失败: %v", err)
 	}
@@ -420,7 +424,7 @@ func TestHandleProcessDetailWithInvalidProcess(t *testing.T) {
 	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
-	webServer, err := NewWebServer(processManager)
+	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
 		t.Fatalf("创建Web服务器失败: %v", err)
 	}

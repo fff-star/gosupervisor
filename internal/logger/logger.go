@@ -30,14 +30,21 @@ func (cw *countingWriter) Write(p []byte) (n int, err error) {
 	return
 }
 
+// logStream holds per-stream metadata (stdout or stderr for a process).
+type logStream struct {
+	writer      io.Writer
+	path        string
+	maxSize     int64
+	backupCount int
+}
+
 type Logger struct {
 	logDir         string
-	processLogs    map[string]io.Writer
+	processLogs    map[string]*logStream
 	maxLogSize     int64
 	maxBackupCount int
 	compress       bool
 	mutex          sync.Mutex
-	logFileSizes   map[string]int64
 }
 
 func NewLogger(logDir string, maxLogSize int64, maxBackupCount int, compress bool) (*Logger, error) {
@@ -55,11 +62,10 @@ func NewLogger(logDir string, maxLogSize int64, maxBackupCount int, compress boo
 
 	return &Logger{
 		logDir:         logDir,
-		processLogs:    make(map[string]io.Writer),
+		processLogs:    make(map[string]*logStream),
 		maxLogSize:     maxLogSize,
 		maxBackupCount: maxBackupCount,
 		compress:       compress,
-		logFileSizes:   make(map[string]int64),
 	}, nil
 }
 
@@ -69,6 +75,8 @@ func NewDefaultLogger(logDir string) (*Logger, error) {
 
 // GetProcessLogWriters returns stdout and stderr writers for a process.
 // Uses per-process settings from cfg when available, falls back to global defaults.
+// When stdout and stderr paths are the same, they share a single writer to avoid
+// interleaved writes from two file handles to the same file.
 func (l *Logger) GetProcessLogWriters(name string, cfg *config.ProgramConfig) (io.Writer, io.Writer, error) {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
@@ -76,6 +84,7 @@ func (l *Logger) GetProcessLogWriters(name string, cfg *config.ProgramConfig) (i
 	stdoutKey := name + "/stdout"
 	stderrKey := name + "/stderr"
 
+	// Resolve stdout path and settings
 	stdoutPath := cfg.StdoutLogFile
 	if stdoutPath == "" {
 		stdoutPath = filepath.Join(l.logDir, fmt.Sprintf("%s.log", name))
@@ -89,6 +98,7 @@ func (l *Logger) GetProcessLogWriters(name string, cfg *config.ProgramConfig) (i
 		stdoutBackup = l.maxBackupCount
 	}
 
+	// Resolve stderr path and settings
 	stderrPath := cfg.StderrLogFile
 	if stderrPath == "" {
 		stderrPath = filepath.Join(l.logDir, fmt.Sprintf("%s.log", name))
@@ -100,6 +110,17 @@ func (l *Logger) GetProcessLogWriters(name string, cfg *config.ProgramConfig) (i
 	stderrBackup := cfg.StderrLogBackupCount
 	if stderrBackup <= 0 {
 		stderrBackup = l.maxBackupCount
+	}
+
+	// If both streams go to the same path, share the same writer to avoid corruption
+	if stdoutPath == stderrPath {
+		w, err := l.getOrCreateWriter(stdoutKey, stdoutPath, stdoutMaxSize, stdoutBackup)
+		if err != nil {
+			return nil, nil, err
+		}
+		// Link stderr key to same stream
+		l.processLogs[stderrKey] = l.processLogs[stdoutKey]
+		return w, w, nil
 	}
 
 	stdoutWriter, err := l.getOrCreateWriter(stdoutKey, stdoutPath, stdoutMaxSize, stdoutBackup)
@@ -116,21 +137,21 @@ func (l *Logger) GetProcessLogWriters(name string, cfg *config.ProgramConfig) (i
 
 // getOrCreateWriter returns an existing writer or creates a new one with rotation check.
 func (l *Logger) getOrCreateWriter(key, filePath string, maxSize int64, backupCount int) (io.Writer, error) {
-	if writer, exists := l.processLogs[key]; exists {
+	if stream, exists := l.processLogs[key]; exists {
 		if info, err := os.Stat(filePath); err == nil {
 			if info.Size() >= maxSize {
-				if err := l.rotateLogByKey(key, filePath, maxSize, backupCount); err != nil {
+				if err := l.rotateLogByKey(key, stream.path, stream.maxSize, stream.backupCount); err != nil {
 					return nil, err
 				}
-				return l.processLogs[key], nil
+				return l.processLogs[key].writer, nil
 			}
 		}
-		return writer, nil
+		return stream.writer, nil
 	}
 
 	if info, err := os.Stat(filePath); err == nil {
 		if info.Size() >= maxSize {
-			if err := l.rotateLogByKey(key, filePath, maxSize, backupCount); err != nil {
+			if err := l.rotateFileOutsideLock(filePath, maxSize, backupCount); err != nil {
 				return nil, err
 			}
 		}
@@ -141,30 +162,54 @@ func (l *Logger) getOrCreateWriter(key, filePath string, maxSize int64, backupCo
 		return nil, fmt.Errorf("打开日志文件失败: %v", err)
 	}
 
+	ls := &logStream{
+		writer:      f,
+		path:        filePath,
+		maxSize:     maxSize,
+		backupCount: backupCount,
+	}
+
 	cw := &countingWriter{
 		writer:  f,
 		maxSize: maxSize,
 		onExceed: func() {
-			go l.rotateIfNeeded(key, filePath, maxSize, backupCount)
+			go l.rotateIfNeeded(key)
 		},
 	}
-	l.processLogs[key] = cw
-	l.logFileSizes[key] = 0
+	ls.writer = cw
+	l.processLogs[key] = ls
 	return cw, nil
 }
 
-func (l *Logger) rotateIfNeeded(key, filePath string, maxSize int64, backupCount int) {
+func (l *Logger) rotateIfNeeded(key string) {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
-	if info, err := os.Stat(filePath); err == nil && info.Size() >= maxSize {
-		l.rotateLogByKey(key, filePath, maxSize, backupCount)
+	stream, exists := l.processLogs[key]
+	if !exists {
+		return
 	}
+	if info, err := os.Stat(stream.path); err == nil && info.Size() >= stream.maxSize {
+		l.rotateLogByKey(key, stream.path, stream.maxSize, stream.backupCount)
+	}
+}
+
+// rotateFileOutsideLock rotates a file that has no active writer stream yet.
+func (l *Logger) rotateFileOutsideLock(filePath string, maxSize int64, backupCount int) error {
+	newPath := filePath + fmt.Sprintf(".%d", time.Now().UnixNano())
+	if err := os.Rename(filePath, newPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("重命名日志文件失败: %v", err)
+	}
+	if l.compress {
+		l.compressLog(newPath)
+	}
+	l.cleanupBackups(filePath, backupCount)
+	return nil
 }
 
 // rotateLogByKey rotates a single log file identified by its stream key.
 func (l *Logger) rotateLogByKey(key, filePath string, maxSize int64, backupCount int) error {
-	if writer, exists := l.processLogs[key]; exists {
-		if cw, ok := writer.(*countingWriter); ok {
+	if stream, exists := l.processLogs[key]; exists {
+		if cw, ok := stream.writer.(*countingWriter); ok {
 			if f, ok := cw.writer.(*os.File); ok {
 				f.Close()
 			}
@@ -185,12 +230,25 @@ func (l *Logger) rotateLogByKey(key, filePath string, maxSize int64, backupCount
 
 	l.cleanupBackups(filePath, backupCount)
 
-	newFile, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("创建新日志文件失败: %v", err)
 	}
-	l.processLogs[key] = newFile
-	l.logFileSizes[key] = 0
+
+	cw := &countingWriter{
+		writer:  f,
+		maxSize: maxSize,
+		onExceed: func() {
+			go l.rotateIfNeeded(key)
+		},
+	}
+
+	l.processLogs[key] = &logStream{
+		writer:      cw,
+		path:        filePath,
+		maxSize:     maxSize,
+		backupCount: backupCount,
+	}
 	return nil
 }
 
@@ -198,17 +256,17 @@ func (l *Logger) rotateLogByKey(key, filePath string, maxSize int64, backupCount
 func (l *Logger) rotateLog(processName string) error {
 	stdoutKey := processName + "/stdout"
 	stderrKey := processName + "/stderr"
-	defaultPath := filepath.Join(l.logDir, fmt.Sprintf("%s.log", processName))
 
 	for _, key := range []string{stdoutKey, stderrKey} {
-		if _, exists := l.processLogs[key]; exists {
-			if err := l.rotateLogByKey(key, defaultPath, l.maxLogSize, l.maxBackupCount); err != nil {
+		if stream, exists := l.processLogs[key]; exists {
+			if err := l.rotateLogByKey(key, stream.path, stream.maxSize, stream.backupCount); err != nil {
 				return err
 			}
 		}
 	}
 
-	// If no active writers, rotate the file directly if it exists on disk
+	// If no active writers, rotate default file directly if it exists on disk
+	defaultPath := filepath.Join(l.logDir, fmt.Sprintf("%s.log", processName))
 	if _, hasStdout := l.processLogs[stdoutKey]; !hasStdout {
 		if _, hasStderr := l.processLogs[stderrKey]; !hasStderr {
 			if _, err := os.Stat(defaultPath); err == nil {
@@ -331,15 +389,22 @@ func (l *Logger) CloseProcessLog(processName string) error {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
 
-	for _, suffix := range []string{"/stdout", "/stderr"} {
-		key := processName + suffix
-		if writer, exists := l.processLogs[key]; exists {
-			if cw, ok := writer.(*countingWriter); ok {
+	stdoutKey := processName + "/stdout"
+	stderrKey := processName + "/stderr"
+
+	// When both streams share the same logStream, only close once.
+	for _, key := range []string{stdoutKey, stderrKey} {
+		if stream, exists := l.processLogs[key]; exists {
+			if cw, ok := stream.writer.(*countingWriter); ok {
 				if f, ok := cw.writer.(*os.File); ok {
 					f.Close()
 				}
 			}
 			delete(l.processLogs, key)
+			// If stderr was shared with stdout, it's already deleted
+			if key == stdoutKey && l.processLogs[stderrKey] == nil {
+				// already cleaned
+			}
 		}
 	}
 	return nil
@@ -362,15 +427,15 @@ func (l *Logger) Close() error {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
 
-	for key, writer := range l.processLogs {
-		if cw, ok := writer.(*countingWriter); ok {
+	for key, stream := range l.processLogs {
+		if cw, ok := stream.writer.(*countingWriter); ok {
 			if f, ok := cw.writer.(*os.File); ok {
 				f.Close()
 			}
 		}
 		delete(l.processLogs, key)
 	}
-	l.processLogs = make(map[string]io.Writer)
+	l.processLogs = make(map[string]*logStream)
 	return nil
 }
 
@@ -378,32 +443,38 @@ func (l *Logger) RotateLogs() error {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
 
-	for key, writer := range l.processLogs {
-		if cw, ok := writer.(*countingWriter); ok {
+	for key, stream := range l.processLogs {
+		if cw, ok := stream.writer.(*countingWriter); ok {
 			if f, ok := cw.writer.(*os.File); ok {
 				f.Close()
 			}
 		}
 
-		// Extract process name from key "name/stdout" or "name/stderr"
-		name := key
-		if idx := len(name) - 7; idx > 0 && name[idx:] == "/stdout" {
-			name = name[:idx]
-		} else if idx := len(name) - 7; idx > 0 && name[idx:] == "/stderr" {
-			name = name[:idx]
-		}
-
-		oldLog := filepath.Join(l.logDir, fmt.Sprintf("%s.log", name))
-		newLog := filepath.Join(l.logDir, fmt.Sprintf("%s.log.%d", name, time.Now().UnixNano()))
-		if err := os.Rename(oldLog, newLog); err != nil && !os.IsNotExist(err) {
+		oldPath := stream.path
+		newPath := oldPath + fmt.Sprintf(".%d", time.Now().UnixNano())
+		if err := os.Rename(oldPath, newPath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("重命名日志文件失败: %v", err)
 		}
 
-		newFile, err := os.OpenFile(oldLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if l.compress {
+			l.compressLog(newPath)
+		}
+		l.cleanupBackups(oldPath, stream.backupCount)
+
+		f, err := os.OpenFile(oldPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			return fmt.Errorf("创建新日志文件失败: %v", err)
 		}
-		l.processLogs[key] = newFile
+
+		cw := &countingWriter{
+			writer:  f,
+			maxSize: stream.maxSize,
+			onExceed: func() {
+				go l.rotateIfNeeded(key)
+			},
+		}
+		stream.writer = cw
+		stream.path = oldPath
 	}
 
 	return nil

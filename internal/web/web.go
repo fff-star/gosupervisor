@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"text/template"
@@ -17,10 +18,11 @@ import (
 
 type WebServer struct {
 	processManager *process.ProcessManager
+	logDir         string
 	templates      *template.Template
 }
 
-func NewWebServer(processManager *process.ProcessManager) (*WebServer, error) {
+func NewWebServer(processManager *process.ProcessManager, logDir string) (*WebServer, error) {
 	// 创建模板并添加lower函数
 	tmpl := template.New("index").Funcs(template.FuncMap{
 		"lower": func(s interface{}) string {
@@ -34,8 +36,14 @@ func NewWebServer(processManager *process.ProcessManager) (*WebServer, error) {
 
 	return &WebServer{
 		processManager: processManager,
+		logDir:         logDir,
 		templates:      tmpl,
 	}, nil
+}
+
+// validateProcessName rejects names with path separators or parent references.
+func validateProcessName(name string) bool {
+	return name != "" && !strings.Contains(name, "/") && !strings.Contains(name, "..") && !strings.Contains(name, "\\")
 }
 
 func (ws *WebServer) Start(addr string) error {
@@ -75,85 +83,97 @@ func (ws *WebServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (ws *WebServer) handleStart(w http.ResponseWriter, r *http.Request) {
-	processName := r.URL.Query().Get("name")
-	if processName == "" {
-		http.Error(w, "进程名称不能为空", http.StatusBadRequest)
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	processName := r.FormValue("name")
+	if processName == "" || !validateProcessName(processName) {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 
 	p := ws.processManager.GetProcess(processName)
 	if p == nil {
-		http.Error(w, fmt.Sprintf("进程 %s 不存在", processName), http.StatusNotFound)
+		http.Error(w, "Not Found", http.StatusNotFound)
 		return
 	}
 
 	if err := p.Start(); err != nil {
-		http.Error(w, fmt.Sprintf("启动进程失败: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
-	// 重定向回首页
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 func (ws *WebServer) handleStop(w http.ResponseWriter, r *http.Request) {
-	processName := r.URL.Query().Get("name")
-	if processName == "" {
-		http.Error(w, "进程名称不能为空", http.StatusBadRequest)
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	processName := r.FormValue("name")
+	if processName == "" || !validateProcessName(processName) {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 
 	p := ws.processManager.GetProcess(processName)
 	if p == nil {
-		http.Error(w, fmt.Sprintf("进程 %s 不存在", processName), http.StatusNotFound)
+		http.Error(w, "Not Found", http.StatusNotFound)
 		return
 	}
 
 	if err := p.Stop(); err != nil {
-		http.Error(w, fmt.Sprintf("停止进程失败: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
-	// 重定向回首页
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 func (ws *WebServer) handleRestart(w http.ResponseWriter, r *http.Request) {
-	processName := r.URL.Query().Get("name")
-	if processName == "" {
-		http.Error(w, "进程名称不能为空", http.StatusBadRequest)
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	processName := r.FormValue("name")
+	if processName == "" || !validateProcessName(processName) {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 
 	p := ws.processManager.GetProcess(processName)
 	if p == nil {
-		http.Error(w, fmt.Sprintf("进程 %s 不存在", processName), http.StatusNotFound)
+		http.Error(w, "Not Found", http.StatusNotFound)
 		return
 	}
 
 	if err := p.Restart(); err != nil {
-		http.Error(w, fmt.Sprintf("重启进程失败: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
 
-	// 重定向回首页
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 func (ws *WebServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 	processName := r.URL.Query().Get("name")
-	if processName == "" {
-		http.Error(w, "进程名称不能为空", http.StatusBadRequest)
+	if processName == "" || !validateProcessName(processName) {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 
 	p := ws.processManager.GetProcess(processName)
 	if p == nil {
-		http.Error(w, fmt.Sprintf("进程 %s 不存在", processName), http.StatusNotFound)
+		http.Error(w, "Not Found", http.StatusNotFound)
 		return
 	}
 
-	logPath := fmt.Sprintf("./logs/%s.log", processName)
+	logPath := filepath.Join(ws.logDir, fmt.Sprintf("%s.log", processName))
 	logContent, err := readTailLines(logPath, tailMaxLines, tailMaxBytes)
 	if err != nil {
 		logContent = []byte(fmt.Sprintf("无法读取日志文件: %v", err))
@@ -187,14 +207,14 @@ func (ws *WebServer) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 
 func (ws *WebServer) handleProcessDetail(w http.ResponseWriter, r *http.Request) {
 	processName := r.URL.Query().Get("name")
-	if processName == "" {
-		http.Error(w, "进程名称不能为空", http.StatusBadRequest)
+	if processName == "" || !validateProcessName(processName) {
+		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 
 	p := ws.processManager.GetProcess(processName)
 	if p == nil {
-		http.Error(w, fmt.Sprintf("进程 %s 不存在", processName), http.StatusNotFound)
+		http.Error(w, "Not Found", http.StatusNotFound)
 		return
 	}
 
@@ -461,14 +481,29 @@ const indexTemplate = `<!DOCTYPE html>
 			<td>{{.StartRetries}}</td>
 			<td>
 				{{if ne .State "RUNNING"}}
-				<button class="btn-start" onclick="window.location.href='/start?name={{.Name}}'">启动</button>
+				<form method="post" action="/start" style="display:inline">
+					<input type="hidden" name="name" value="{{.Name}}">
+					<button class="btn-start" type="submit">启动</button>
+				</form>
 				{{end}}
 				{{if eq .State "RUNNING"}}
-				<button class="btn-stop" onclick="window.location.href='/stop?name={{.Name}}'">停止</button>
+				<form method="post" action="/stop" style="display:inline">
+					<input type="hidden" name="name" value="{{.Name}}">
+					<button class="btn-stop" type="submit">停止</button>
+				</form>
 				{{end}}
-				<button class="btn-restart" onclick="window.location.href='/restart?name={{.Name}}'">重启</button>
-				<button class="btn-logs" onclick="window.location.href='/logs?name={{.Name}}'">查看日志</button>
-				<button class="btn-detail" onclick="window.location.href='/process?name={{.Name}}'">详情</button>
+				<form method="post" action="/restart" style="display:inline">
+					<input type="hidden" name="name" value="{{.Name}}">
+					<button class="btn-restart" type="submit">重启</button>
+				</form>
+				<form method="get" action="/logs" style="display:inline">
+					<input type="hidden" name="name" value="{{.Name}}">
+					<button class="btn-logs" type="submit">查看日志</button>
+				</form>
+				<form method="get" action="/process" style="display:inline">
+					<input type="hidden" name="name" value="{{.Name}}">
+					<button class="btn-detail" type="submit">详情</button>
+				</form>
 			</td>
 		</tr>
 		{{end}}
@@ -869,13 +904,25 @@ const processDetailTemplate = `<!DOCTYPE html>
 	</div>
 	<div class="btn-group">
 		{{if ne .State "RUNNING"}}
-		<button class="btn btn-start" onclick="window.location.href='/start?name={{.Name}}'">启动</button>
+		<form method="post" action="/start" style="display:inline">
+			<input type="hidden" name="name" value="{{.Name}}">
+			<button class="btn btn-start" type="submit">启动</button>
+		</form>
 		{{end}}
 		{{if eq .State "RUNNING"}}
-		<button class="btn btn-stop" onclick="window.location.href='/stop?name={{.Name}}'">停止</button>
+		<form method="post" action="/stop" style="display:inline">
+			<input type="hidden" name="name" value="{{.Name}}">
+			<button class="btn btn-stop" type="submit">停止</button>
+		</form>
 		{{end}}
-		<button class="btn btn-restart" onclick="window.location.href='/restart?name={{.Name}}'">重启</button>
-		<button class="btn btn-logs" onclick="window.location.href='/logs?name={{.Name}}'">查看日志</button>
+		<form method="post" action="/restart" style="display:inline">
+			<input type="hidden" name="name" value="{{.Name}}">
+			<button class="btn btn-restart" type="submit">重启</button>
+		</form>
+		<form method="get" action="/logs" style="display:inline">
+			<input type="hidden" name="name" value="{{.Name}}">
+			<button class="btn btn-logs" type="submit">查看日志</button>
+		</form>
 	</div>
 	<button class="back-button" onclick="window.location.href='/'">返回首页</button>
 	<div class="footer">
