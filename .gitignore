@@ -1,4 +1,5 @@
 # 编译产物
+/gosupervisor
 /bin/
 /build/
 *.exe
@@ -15,6 +16,9 @@ internal/*/test_logs/
 /logs/
 *.log
 *.log.*
+
+# Claude
+CLAUDE.md
 
 # 配置文件
 *.ini

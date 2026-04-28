@@ -77,6 +77,11 @@ func (p *Process) Start() error {
 		return fmt.Errorf("进程 %s 已经在运行", p.Name)
 	}
 
+	// 先停止旧进程，避免进程泄漏
+	if p.Cmd != nil && p.Cmd.Process != nil {
+		p.Cmd.Process.Kill()
+	}
+
 	p.State = StateStarting
 	p.StartRetries++
 	p.RestartCount++
@@ -187,39 +192,45 @@ func (p *Process) monitorResources() {
 }
 
 func (p *Process) Stop() error {
-	if p.State != StateRunning {
-		return fmt.Errorf("进程 %s 不在运行状态", p.Name)
+	cmd := p.Cmd
+
+	if cmd == nil || cmd.Process == nil {
+		p.State = StateStopped
+		return nil
+	}
+
+	if p.State != StateRunning && p.State != StateStopping {
+		cmd.Process.Kill()
+		p.State = StateStopped
+		return nil
 	}
 
 	p.State = StateStopping
 
-	// 使用 Kill() 来终止进程并等待退出
-	if err := p.Cmd.Process.Kill(); err != nil {
-		return fmt.Errorf("终止进程失败: %v", err)
+	if err := cmd.Process.Kill(); err != nil {
+		// 进程可能已经退出
+		if p.State == StateStopping {
+			p.State = StateStopped
+		}
+		return nil
 	}
 
-	// 等待进程退出
-	timeout := time.After(10 * time.Second)
-	done := make(chan error, 1)
-
+	// 使用带超时的等待
+	waitDone := make(chan struct{})
 	go func() {
-		done <- p.Cmd.Wait()
+		cmd.Wait()
+		close(waitDone)
 	}()
 
 	select {
-	case err := <-done:
-		if err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				p.ExitCode = exitErr.ExitCode()
-			}
-		}
-	case <-timeout:
-		// 超时，已经尝试过Kill()，这里不再重复
-		return fmt.Errorf("进程终止超时")
+	case <-waitDone:
+	case <-time.After(time.Duration(p.Config.StopSecs) * time.Second):
 	}
 
 	p.StopTime = time.Now()
-	p.State = StateStopped
+	if p.State == StateStopping {
+		p.State = StateStopped
+	}
 	return nil
 }
 
@@ -235,7 +246,10 @@ func (p *Process) monitor() {
 	err := p.Cmd.Wait()
 
 	p.StopTime = time.Now()
-	p.State = StateExited
+	// 如果正在被 Stop() 停止，不要覆盖状态
+	if p.State != StateStopping {
+		p.State = StateExited
+	}
 
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {

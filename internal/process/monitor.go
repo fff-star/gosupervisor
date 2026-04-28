@@ -2,6 +2,7 @@ package process
 
 import (
 	"fmt"
+	"syscall"
 	"time"
 )
 
@@ -55,6 +56,11 @@ func (m *Monitor) checkProcess(process *Process) {
 }
 
 func (m *Monitor) handleExitedProcess(process *Process) {
+	// 正在停止中，不重启
+	if process.State == StateStopping {
+		return
+	}
+
 	if process.Config.AutoRestart {
 		if process.StartRetries <= process.Config.StartRetries {
 			// 等待一段时间后重启
@@ -75,9 +81,14 @@ func (m *Monitor) handleExitedProcess(process *Process) {
 }
 
 func (m *Monitor) checkRunningProcess(process *Process) {
+	// 正在停止中，不检查
+	if process.State == StateStopping {
+		return
+	}
+
 	// 检查进程是否真的在运行
 	if process.Cmd != nil && process.Cmd.Process != nil {
-		if err := process.Cmd.Process.Signal(nil); err != nil {
+		if err := process.Cmd.Process.Signal(syscall.Signal(0)); err != nil {
 			// 进程不存在，标记为已退出
 			process.State = StateExited
 			fmt.Printf("进程 %s 不存在，标记为已退出\n", process.Name)
