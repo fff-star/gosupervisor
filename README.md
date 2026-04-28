@@ -5,15 +5,18 @@ GoSupervisor is a process management tool written in Go, inspired by Python's Su
 ## Features
 
 - **Process management**: start, stop, restart individual or all managed processes
+- **Graceful stop**: configurable signal (SIGTERM/SIGQUIT/SIGINT/…) with timeout, followed by SIGKILL
 - **Automatic restart**: auto-restart processes on unexpected exit, with configurable retry limits
 - **Process monitoring**: exit detection via built-in `cmd.Wait()` tracking; 1-second ticker triggers auto-restart for exited processes
-- **Resource monitoring**: CPU and memory usage tracking via `/proc` every 5 seconds
-- **Log management**: per-process log files with automatic rotation, size limits, and gzip compression
-- **Multi-format config**: INI, YAML, and JSON configuration files (auto-detected by extension)
-- **Dependency ordering**: topological sort for startup/shutdown ordering via `dependson`
-- **Web UI**: browser-based dashboard with process control, log viewing, and system info
+- **Resource monitoring**: CPU (delta-based percentage) and memory (VmRSS) tracking via `/proc` every 5 seconds
+- **Log management**: per-process stdout/stderr writers, per-stream rotation/size/backup settings, custom paths, gzip compression
+- **Multi-format config**: INI, YAML, and JSON configuration files (auto-detected by extension); boolean defaults correctly distinguished from explicit `false`
+- **Dependency ordering**: topological sort with priority-based tiebreaking for startup/shutdown ordering
+- **User switching**: run processes as a different user via `syscall.Credential`
+- **Web UI**: browser-based dashboard with process control (POST-only for mutations), log tail viewing, and system info
 - **Prometheus metrics**: exposable at `/metrics` for integration with monitoring stacks
 - **Live reload**: SIGHUP signal or `-cmd reload` to reload configuration without restarting the supervisor
+- **Daemon mode**: fork with setsid for background operation (`-d` flag)
 
 ## Installation
 
@@ -50,7 +53,7 @@ sudo cp gosupervisor /usr/local/bin/
 | `-web-addr` | `:8080` | Web UI listen address |
 | `-metrics` | `false` | Enable Prometheus metrics |
 | `-metrics-addr` | `:9090` | Metrics HTTP listen address |
-| `-d` | `false` | Run as daemon (stub) |
+| `-d` | `false` | Run as daemon (forks with setsid, parent exits) |
 | `-t` | `false` | Validate config file and exit |
 | `-version` | `false` | Print version and exit |
 
@@ -174,7 +177,7 @@ programs:
 | `startsecs` | int | `1` | Seconds the process must stay up to be considered started |
 | `startretries` | int | `3` | Max restarts before entering FATAL state |
 | `stopsecs` | int | `10` | Seconds to wait for graceful stop before SIGKILL |
-| `stopsignal` | string | `SIGTERM` | (currently unused — always sends SIGKILL) |
+| `stopsignal` | string | `SIGTERM` | Signal sent for graceful stop (SIGTERM, SIGQUIT, SIGINT, SIGHUP, SIGUSR1, SIGUSR2, SIGKILL) |
 | `user` | string | `""` | Run as this user (Linux only) |
 | `environment` | map/string | `{}` | Extra environment variables. INI: comma-separated `KEY=VAL` pairs |
 | `redirectstdout` | bool | `true` | Capture stdout to log |
@@ -198,10 +201,10 @@ The web UI is available when started with `-web`. Default address is `http://loc
 | Route | Description |
 |-------|-------------|
 | `GET /` | Dashboard — process list with status, PID, and action buttons |
-| `GET /start?name=X` | Start a process |
-| `GET /stop?name=X` | Stop a process |
-| `GET /restart?name=X` | Restart a process |
-| `GET /logs?name=X` | View process log |
+| `POST /start` | Start a process (body: `name=X`) |
+| `POST /stop` | Stop a process (body: `name=X`) |
+| `POST /restart` | Restart a process (body: `name=X`) |
+| `GET /logs?name=X` | View process log (last 1000 lines / 1 MB tail) |
 | `GET /process?name=X` | Process detail (config, resource usage, health) |
 | `GET /system` | System info (OS, memory, disk, uptime, Go version) |
 
@@ -220,10 +223,13 @@ Available at `/metrics` when started with `-metrics`. Default address is `http:/
 
 ## Logging
 
-- **Process logs**: `logs/<process_name>.log`
-- **System log**: `logs/system.log`
+- **Process logs**: `{logdir}/{process_name}.log` by default, or custom paths via `stdoutlogfile` / `stderrlogfile`.
+- **System log**: `{logdir}/system.log`
+- **Log tail**: web UI shows only the last 1000 lines / 1 MB, not the entire file.
 
-Logs are automatically rotated when they exceed the configured size limit (default 50 MB). Rotated logs are gzip-compressed, and old backups are cleaned up to stay within the configured backup count (default 10).
+Logs are automatically rotated when they exceed the configured size limit (default 50 MB). Each stream (stdout/stderr) has its own size limit and backup count. Rotated logs are gzip-compressed, and old backups are cleaned up to stay within the configured count (default 10).
+
+When both stdout and stderr target the same file path, a single writer is shared to avoid interleaved writes from separate file handles.
 
 ## Project structure
 
@@ -245,8 +251,14 @@ gosupervisor/
 
 - Commands are executed via `/bin/sh -c`, supporting shell syntax in the command string.
 - Process group isolation (`Setpgid=true`) is enabled on Linux for clean signal propagation.
-- The `-d` (daemon) flag is a stub and not fully implemented. Run under a process manager like systemd for production daemonization.
-- The `user` field only takes effect when running as root on Linux.
+- **Daemon mode** (`-d`): forks a child with `setsid`, parent exits. For production, running under a process manager like systemd is still recommended.
+- **Graceful stop**: `stopsignal` is sent first, then after `stopsecs` (default 10s), SIGKILL is sent if the process is still alive.
+- **User switching**: the `user` field enables running processes as a different user via `syscall.Credential`. Only takes effect when running as root.
+- **Umask**: set via `syscall.Umask()` serialized across all process starts.
+- **CPU metrics**: delta-based percentage computed from `/proc/pid/stat` and `/proc/stat` rather than raw tick counts.
+- **Web security**: state-changing endpoints (start/stop/restart) accept POST only. Process names are validated against path traversal (`/`, `..`, `\`).
+- **YAML/JSON defaults**: boolean fields (`autostart`, `autorestart`, `redirectstdout`, `redirectstderr`) default to `true` only when absent from the config. An explicit `false` is preserved.
+- **Log paths**: when both stdout and stderr target the same file, a single writer is shared to avoid interleaved corruption. Custom paths via `stdoutlogfile`/`stderrlogfile` are fully respected for rotation and tail viewing.
 
 ## License
 
