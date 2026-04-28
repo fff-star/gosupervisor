@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -517,5 +518,64 @@ func TestGetProcessLogWritersSeparatePaths(t *testing.T) {
 	}
 	if _, err := os.Stat(stderrPath); os.IsNotExist(err) {
 		t.Errorf("自定义 stderr 日志文件未创建: %s", stderrPath)
+	}
+}
+// TestGetProcessLogWritersSamePath tests that when stdout and stderr share
+// the same path, they reuse the same writer instead of opening separate handles.
+func TestGetProcessLogWritersSamePath(t *testing.T) {
+	logDir := "./test_logs_samepath"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logger, err := NewDefaultLogger(logDir)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logger.Close()
+
+	// Both stdout and stderr default to {logDir}/{name}.log — same path
+	cfg := &config.ProgramConfig{
+		Name:                  "same_test",
+		StdoutLogMaxBytes:     1024,
+		StderrLogMaxBytes:     2048,
+		StdoutLogBackupCount:  3,
+		StderrLogBackupCount:  5,
+	}
+
+	stdoutW, stderrW, err := logger.GetProcessLogWriters("same_test", cfg)
+	if err != nil {
+		t.Fatalf("GetProcessLogWriters 失败: %v", err)
+	}
+
+	// Same path → same writer instance
+	if stdoutW != stderrW {
+		t.Error("stdout 和 stderr 同路径时应返回同一个 writer")
+	}
+
+	stdoutW.Write([]byte("stdout line\n"))
+	stderrW.Write([]byte("stderr line\n"))
+	time.Sleep(300 * time.Millisecond)
+
+	// Verify only one log file was created
+	files, _ := os.ReadDir(logDir)
+	logFiles := 0
+	for _, f := range files {
+		if !f.IsDir() {
+			logFiles++
+		}
+	}
+	if logFiles != 1 {
+		t.Errorf("期望 1 个日志文件, 实际 %d 个", logFiles)
+	}
+
+	// Verify both lines are in the same file
+	logPath := filepath.Join(logDir, "same_test.log")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("读取日志文件失败: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "stdout line") || !strings.Contains(content, "stderr line") {
+		t.Errorf("日志文件应同时包含 stdout 和 stderr 内容: %s", content)
 	}
 }

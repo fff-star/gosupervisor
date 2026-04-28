@@ -447,6 +447,140 @@ func TestHandleProcessDetailWithInvalidProcess(t *testing.T) {
 	}
 }
 
+// TestHandleStartGetMethodNotAllowed tests that GET to /start returns 405.
+func TestHandleStartGetMethodNotAllowed(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupTestEnvironment()
+
+	webServer, err := NewWebServer(processManager, "./test_logs")
+	if err != nil {
+		t.Fatalf("创建Web服务器失败: %v", err)
+	}
+
+	req, _ := http.NewRequest("GET", "/start?name=test_process", nil)
+	w := httptest.NewRecorder()
+	webServer.handleStart(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("期望 %d, 实际 %d", http.StatusMethodNotAllowed, w.Code)
+	}
+}
+
+// TestHandleStopGetMethodNotAllowed tests that GET to /stop returns 405.
+func TestHandleStopGetMethodNotAllowed(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupTestEnvironment()
+
+	webServer, err := NewWebServer(processManager, "./test_logs")
+	if err != nil {
+		t.Fatalf("创建Web服务器失败: %v", err)
+	}
+
+	req, _ := http.NewRequest("GET", "/stop?name=test_process", nil)
+	w := httptest.NewRecorder()
+	webServer.handleStop(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("期望 %d, 实际 %d", http.StatusMethodNotAllowed, w.Code)
+	}
+}
+
+// TestHandleRestartGetMethodNotAllowed tests that GET to /restart returns 405.
+func TestHandleRestartGetMethodNotAllowed(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupTestEnvironment()
+
+	webServer, err := NewWebServer(processManager, "./test_logs")
+	if err != nil {
+		t.Fatalf("创建Web服务器失败: %v", err)
+	}
+
+	req, _ := http.NewRequest("GET", "/restart?name=test_process", nil)
+	w := httptest.NewRecorder()
+	webServer.handleRestart(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("期望 %d, 实际 %d", http.StatusMethodNotAllowed, w.Code)
+	}
+}
+
+// TestPathTraversalRejected tests that names with path separators are rejected.
+func TestPathTraversalRejected(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupTestEnvironment()
+
+	webServer, err := NewWebServer(processManager, "./test_logs")
+	if err != nil {
+		t.Fatalf("创建Web服务器失败: %v", err)
+	}
+
+	badNames := []string{"../../../etc/passwd", "name/../evil", "path\\name"}
+
+	for _, name := range badNames {
+		// Read endpoints: validate via GET query param
+		for _, ep := range []string{"/logs", "/process"} {
+			req, _ := http.NewRequest("GET", ep+"?name="+name, nil)
+			w := httptest.NewRecorder()
+			switch ep {
+			case "/logs":
+				webServer.handleLogs(w, req)
+			case "/process":
+				webServer.handleProcessDetail(w, req)
+			}
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("%s GET name=%q: 期望 400, 实际 %d", ep, name, w.Code)
+			}
+		}
+
+		// Write endpoints: validate via POST form body
+		for _, ep := range []string{"/start", "/stop", "/restart"} {
+			req, _ := http.NewRequest("POST", ep, strings.NewReader("name="+name))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			w := httptest.NewRecorder()
+			switch ep {
+			case "/start":
+				webServer.handleStart(w, req)
+			case "/stop":
+				webServer.handleStop(w, req)
+			case "/restart":
+				webServer.handleRestart(w, req)
+			}
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("%s POST name=%q: 期望 400, 实际 %d", ep, name, w.Code)
+			}
+		}
+	}
+}
+
+// TestValidateProcessName tests the process name validation function.
+func TestValidateProcessName(t *testing.T) {
+	valid := []string{"test", "my-process_1", "app.service", "foo"}
+	for _, name := range valid {
+		if !validateProcessName(name) {
+			t.Errorf("validateProcessName(%q) 应为 true", name)
+		}
+	}
+
+	invalid := []string{"", "a/b", "a\\b", "..", "../file", "etc/../passwd"}
+	for _, name := range invalid {
+		if validateProcessName(name) {
+			t.Errorf("validateProcessName(%q) 应为 false", name)
+		}
+	}
+}
+
 // 辅助函数：检查字符串是否包含子字符串
 func contains(s, substr string) bool {
 	if len(s) < len(substr) {

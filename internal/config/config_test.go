@@ -274,3 +274,38 @@ command=echo "Cache"
 		t.Errorf("期望第二个依赖为'cache'，实际为'%s'", app.DependsOn[1])
 	}
 }
+// TestYAMLJSONBoolDefaults tests that explicit false values are preserved
+// and absent keys default to true in YAML/JSON configs.
+func TestYAMLJSONBoolDefaults(t *testing.T) {
+	for _, ext := range []string{".yaml", ".json"} {
+		t.Run(ext, func(t *testing.T) {
+			cfg, err := LoadConfig(filepath.Join("testdata", "test_config"+ext))
+			if err != nil {
+				t.Fatalf("加载配置失败: %v", err)
+			}
+
+			// test2 has autostart: false explicitly -> should stay false
+			test2 := cfg.Programs["test2"]
+			if test2.AutoStart {
+				t.Errorf("%s: test2.autostart 显式设为 false，但被默认值覆盖为 true", ext)
+			}
+			if !test2.AutoRestart {
+				t.Errorf("%s: test2.autorestart 显式设为 true，应为 true", ext)
+			}
+
+			// test2 does NOT have redirectstdout/redirectstderr -> should default to true
+			if !test2.RedirectStdout {
+				t.Errorf("%s: test2.redirectstdout 未设置，应默认为 true", ext)
+			}
+			if !test2.RedirectStderr {
+				t.Errorf("%s: test2.redirectstderr 未设置，应默认为 true", ext)
+			}
+
+			// test1 has autostart: true explicitly
+			test1 := cfg.Programs["test1"]
+			if !test1.AutoStart {
+				t.Errorf("%s: test1.autostart 显式设为 true，应为 true", ext)
+			}
+		})
+	}
+}
