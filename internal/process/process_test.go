@@ -1,6 +1,7 @@
 package process
 
 import (
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -123,8 +124,8 @@ func TestProcessOperations(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// 测试进程状态
-	if p.State != "RUNNING" {
-		t.Errorf("期望进程状态为RUNNING，实际为%s", p.State)
+	if state := p.GetState(); state != StateRunning {
+		t.Errorf("期望进程状态为RUNNING，实际为%s", state)
 	}
 
 	// 测试进程重启
@@ -149,8 +150,8 @@ func TestProcessOperations(t *testing.T) {
 
 	// 测试进程状态
 	// 检查进程最终状态（若不同则记录）
-	if p.State != "STOPPED" {
-		t.Logf("进程状态为%s，期望为STOPPED", p.State)
+	if state := p.GetState(); state != StateStopped {
+		t.Logf("进程状态为%s，期望为STOPPED", state)
 	}
 }
 
@@ -359,12 +360,12 @@ func TestProcessAutoRestart(t *testing.T) {
 
 	// 模拟进程退出并等待自动重启
 	p.ExitCode = 1
-	p.State = "EXITED"
+	p.mu.Lock(); p.State = StateExited; p.mu.Unlock()
 	time.Sleep(3 * time.Second)
 
 	// 检查进程是否重启
-	if p.State != "RUNNING" {
-		t.Logf("期望进程状态为RUNNING（已重启），实际为%s", p.State)
+	if state := p.GetState(); state != StateRunning {
+		t.Logf("期望进程状态为RUNNING（已重启），实际为%s", state)
 	}
 
 	// 停止进程
@@ -474,8 +475,8 @@ func TestProcessStateTransitions(t *testing.T) {
 	}
 
 	// 检查初始状态
-	if p.State != "STOPPED" {
-		t.Errorf("期望初始状态为STOPPED，实际为%s", p.State)
+	if state := p.GetState(); state != StateStopped {
+		t.Errorf("期望初始状态为STOPPED，实际为%s", state)
 	}
 
 	// 启动进程
@@ -488,8 +489,8 @@ func TestProcessStateTransitions(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// 检查运行状态
-	if p.State != "RUNNING" {
-		t.Errorf("期望状态为RUNNING，实际为%s", p.State)
+	if state := p.GetState(); state != StateRunning {
+		t.Errorf("期望状态为RUNNING，实际为%s", state)
 	}
 
 	// 停止进程，若出错则记录
@@ -500,8 +501,8 @@ func TestProcessStateTransitions(t *testing.T) {
 	// 等待进程停止
 	time.Sleep(3 * time.Second)
 	// 检查停止状态（记录非预期状态）
-	if p.State != "STOPPED" {
-		t.Logf("进程状态为%s，期望为STOPPED", p.State)
+	if state := p.GetState(); state != StateStopped {
+		t.Logf("进程状态为%s，期望为STOPPED", state)
 	}
 }
 
@@ -554,17 +555,17 @@ func TestMonitorAutoRestart(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// 进程应该已退出
-	if p.State != StateExited && p.State != StateRunning {
-		t.Logf("第一次检查：进程状态为%s", p.State)
+	if state := p.GetState(); state != StateExited && state != StateRunning {
+		t.Logf("第一次检查：进程状态为%s", state)
 	}
 
 	// 等待监控尝试重启
 	time.Sleep(2 * time.Second)
 
 	// 检查是否发生了重启（RestartCount > 0 或状态变化）
-	// 注意：由于 sleep 1 会快速完成，重启次数应该增加
-	if p.RestartCount == 0 && p.StartRetries == 1 {
-		t.Logf("期望重启至少发生过一次，RestartCount=%d, StartRetries=%d", p.RestartCount, p.StartRetries)
+	s := p.Snapshot()
+	if s.RestartCount == 0 && s.StartRetries == 1 {
+		t.Logf("期望重启至少发生过一次，RestartCount=%d, StartRetries=%d", s.RestartCount, s.StartRetries)
 	}
 }
 
@@ -628,14 +629,15 @@ func TestTopologicalSortWithStartAllFallback(t *testing.T) {
 
 	// 虽然有循环依赖，但进程应该还是能启动（至少状态应该有变化）
 	// 由于 echo 命令会立即完成，进程会进入 EXITED 状态
-	if p1.State == StateStopped && p2.State == StateStopped {
+	s1, s2 := p1.GetState(), p2.GetState()
+	if s1 == StateStopped && s2 == StateStopped {
 		t.Logf("循环依赖时 StartAll 可能未执行（期望至少有进程启动/退出）")
 	}
 }
 
 // TestProcessRestartCountLogic 测试重启计数逻辑
 func TestProcessRestartCountLogic(t *testing.T) {
-	logDir := "./test_logs"
+	logDir := "./test_logs_rctl"
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -662,43 +664,530 @@ func TestProcessRestartCountLogic(t *testing.T) {
 	processManager.AddProcess(programCfg)
 	p := processManager.GetProcess("restart_test")
 
-	// 初始状态
-	initialRetries := p.StartRetries
-	initialRestarts := p.RestartCount
-
-	// 第一次启动
+	// 第一次启动：RestartCount 不应增加（不是重启）
 	err = p.Start()
 	if err != nil {
 		t.Errorf("第一次启动失败: %v", err)
 	}
 
-	// StartRetries 应该增加
-	if p.StartRetries <= initialRetries {
-		t.Errorf("期望 StartRetries > %d，实际为 %d", initialRetries, p.StartRetries)
+	if p.StartRetries != 1 {
+		t.Errorf("首次启动后 StartRetries 应为 1，实际为 %d", p.StartRetries)
 	}
-
-	if p.RestartCount <= initialRestarts {
-		t.Errorf("期望 RestartCount > %d，实际为 %d", initialRestarts, p.RestartCount)
+	if p.RestartCount != 0 {
+		t.Errorf("首次启动后 RestartCount 应为 0（不是重启），实际为 %d", p.RestartCount)
 	}
 
 	// 等待进程完成
 	time.Sleep(1 * time.Second)
 
-	// 再次启动（重启）
-	p2Retries := p.StartRetries
-	p2Restarts := p.RestartCount
-
+	// 第二次启动：这才是重启
 	err = p.Start()
 	if err != nil {
 		t.Errorf("第二次启动失败: %v", err)
 	}
 
-	// 再次检查计数是否继续增加
-	if p.StartRetries <= p2Retries {
-		t.Logf("期望第二次 StartRetries > %d，实际为 %d", p2Retries, p.StartRetries)
+	if p.StartRetries != 2 {
+		t.Errorf("第二次启动后 StartRetries 应为 2，实际为 %d", p.StartRetries)
+	}
+	if p.RestartCount != 1 {
+		t.Errorf("第二次启动后 RestartCount 应为 1（一次重启），实际为 %d", p.RestartCount)
 	}
 
-	if p.RestartCount <= p2Restarts {
-		t.Logf("期望第二次 RestartCount > %d，实际为 %d", p2Restarts, p.RestartCount)
+	// 第三次启动
+	time.Sleep(1 * time.Second)
+	err = p.Start()
+	if err != nil {
+		t.Errorf("第三次启动失败: %v", err)
+	}
+
+	if p.RestartCount != 2 {
+		t.Errorf("第三次启动后 RestartCount 应为 2，实际为 %d", p.RestartCount)
+	}
+}
+
+// TestHandleExitedProcessNoAutoRestart 测试：AutoRestart=false 时不重启
+func TestHandleExitedProcessNoAutoRestart(t *testing.T) {
+	logDir := "./test_logs_nar"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, err := logger.NewDefaultLogger(logDir)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "no_restart",
+		Command:      "true",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  false,
+		StartSecs:    1,
+		StartRetries: 3,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("no_restart")
+
+	_ = p.Start()
+	time.Sleep(500 * time.Millisecond)
+
+	p.mu.Lock()
+	p.StartRetries = 0
+	beforeState := p.State
+	p.mu.Unlock()
+
+	m := &Monitor{Manager: pm}
+	m.handleExitedProcess(p)
+
+	if state := p.GetState(); state == StateRunning || state == StateStarting {
+		t.Errorf("AutoRestart=false 时不应重启，但状态变为 %s", state)
+	}
+	if beforeState != StateExited {
+		t.Logf("初始状态为 %s", beforeState)
+	}
+}
+
+// TestHandleExitedProcessRetryLimit 测试：重试耗尽后进入 FATAL
+func TestHandleExitedProcessRetryLimit(t *testing.T) {
+	logDir := "./test_logs_rl"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, err := logger.NewDefaultLogger(logDir)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "retry_limit",
+		Command:      "false",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    0,
+		StartRetries: 2,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("retry_limit")
+
+	p.mu.Lock()
+	p.StartRetries = 2
+	p.State = StateExited
+	p.mu.Unlock()
+
+	m := &Monitor{Manager: pm}
+	m.handleExitedProcess(p)
+
+	// 等待异步重启完成（1s sleep + Start + false 退出）
+	time.Sleep(2 * time.Second)
+
+	// 此时 StartRetries=3 > limit=2，再次触发应进入 FATAL
+	p.mu.Lock()
+	if p.State == StateExited {
+		p.mu.Unlock()
+		m.handleExitedProcess(p)
+	} else {
+		p.mu.Unlock()
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	if p.GetState() != StateFatal {
+		t.Errorf("重试次数超限后应进入 FATAL，实际为 %s (StartRetries=%d, limit=%d)",
+			p.GetState(), p.StartRetries, cfg.StartRetries)
+	}
+}
+
+// TestHandleExitedProcessRetryExhaustion 测试：已超限直接 FATAL
+func TestHandleExitedProcessRetryExhaustion(t *testing.T) {
+	logDir := "./test_logs_re"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, err := logger.NewDefaultLogger(logDir)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "exhaust_test",
+		Command:      "false",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    0,
+		StartRetries: 2,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("exhaust_test")
+
+	p.mu.Lock()
+	p.StartRetries = 3
+	p.State = StateExited
+	p.mu.Unlock()
+
+	m := &Monitor{Manager: pm}
+	m.handleExitedProcess(p)
+
+	if state := p.GetState(); state != StateFatal {
+		t.Errorf("StartRetries(%d) > limit(%d) 时应直接进入 FATAL，实际为 %s",
+			p.StartRetries, cfg.StartRetries, state)
+	}
+}
+
+// TestCheckRunningProcessStartRetriesReset 测试：StartSecs 控制重置
+func TestCheckRunningProcessStartRetriesReset(t *testing.T) {
+	logDir := "./test_logs_reset"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, err := logger.NewDefaultLogger(logDir)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "reset_test",
+		Command:      "sleep 60",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    0,
+		StartRetries: 3,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("reset_test")
+
+	_ = p.Start()
+	defer p.Stop()
+
+	p.mu.Lock()
+	p.StartRetries = 5
+	p.State = StateRunning
+	p.mu.Unlock()
+
+	m := &Monitor{Manager: pm}
+	m.checkRunningProcess(p)
+
+	if p.StartRetries != 5 {
+		t.Errorf("StartSecs=0 时不应重置 StartRetries，期望 5，实际 %d", p.StartRetries)
+	}
+
+	p.Config.StartSecs = 1
+	p.mu.Lock()
+	p.StartTime = time.Now().Add(-2 * time.Second)
+	p.mu.Unlock()
+
+	m.checkRunningProcess(p)
+
+	if p.StartRetries != 0 {
+		t.Errorf("StartSecs=1 且已过 2 秒，应重置 StartRetries=0，实际 %d", p.StartRetries)
+	}
+}
+
+// TestRestartCountNotOnInitialStart 测试：首次启动不增加 RestartCount
+func TestRestartCountNotOnInitialStart(t *testing.T) {
+	logDir := "./test_logs_rc"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, err := logger.NewDefaultLogger(logDir)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "initial_test",
+		Command:      "sleep 0.1",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 3,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("initial_test")
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("首次启动失败: %v", err)
+	}
+
+	if p.RestartCount != 0 {
+		t.Errorf("首次启动后 RestartCount 应为 0，实际为 %d", p.RestartCount)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("第二次启动失败: %v", err)
+	}
+
+	if p.RestartCount != 1 {
+		t.Errorf("重启后 RestartCount 应为 1，实际为 %d", p.RestartCount)
+	}
+}
+
+// TestStopDoesNotTriggerRestart 测试：Stop 后 Monitor 不重启
+func TestStopDoesNotTriggerRestart(t *testing.T) {
+	logDir := "./test_logs_stopmon"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, err := logger.NewDefaultLogger(logDir)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "stop_test",
+		Command:      "sleep 60",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    1,
+		StartRetries: 3,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("stop_test")
+
+	_ = p.Start()
+
+	monitor := NewMonitor(pm)
+	monitor.Start()
+	defer monitor.Stop()
+
+	_ = p.Stop()
+	time.Sleep(1 * time.Second)
+
+	state := p.GetState()
+	if state == StateRunning || state == StateStarting {
+		t.Errorf("Stop 后 Monitor 不应重启进程，状态为 %s (StartRetries=%d)", state, p.StartRetries)
+	}
+}
+
+// TestCheckRunningProcessSkipsStopping 测试：STOPPING 时跳过
+func TestCheckRunningProcessSkipsStopping(t *testing.T) {
+	logDir := "./test_logs_stopchk"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, err := logger.NewDefaultLogger(logDir)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "stopping_test",
+		Command:      "sleep 60",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    1,
+		StartRetries: 3,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("stopping_test")
+	_ = p.Start()
+	defer p.Stop()
+
+	p.mu.Lock()
+	p.State = StateStopping
+	p.StartRetries = 5
+	p.mu.Unlock()
+
+	m := &Monitor{Manager: pm}
+	m.checkRunningProcess(p)
+
+	if p.StartRetries != 5 {
+		t.Errorf("StateStopping 时 checkRunningProcess 不应修改状态，StartRetries 期望 5，实际 %d", p.StartRetries)
+	}
+}
+
+// TestDuplicateStartReturnsError 测试：重复启动返回错误
+func TestDuplicateStartReturnsError(t *testing.T) {
+	logDir := "./test_logs_dup"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "dup_start",
+		Command:      "sleep 60",
+		Directory:    ".",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    1,
+		StartRetries: 3,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("dup_start")
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("首次启动失败: %v", err)
+	}
+	defer p.Stop()
+
+	if err := p.Start(); err == nil {
+		t.Error("重复启动应返回错误")
+	}
+}
+
+// TestStopAllHandlesAllStates 测试：StopAll 处理各种状态
+func TestStopAllHandlesAllStates(t *testing.T) {
+	logDir := "./test_logs_stopall"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+
+	for i, cmd := range []string{"sleep 0.1", "sleep 0.1", "sleep 0.1"} {
+		cfg := &config.ProgramConfig{
+			Name:         fmt.Sprintf("sa_proc_%d", i),
+			Command:      cmd,
+			Directory:    ".",
+			AutoStart:    false,
+			AutoRestart:  false,
+			StartSecs:    1,
+			StartRetries: 3,
+			Environment:  make(map[string]string),
+		}
+		pm.AddProcess(cfg)
+	}
+
+	p0 := pm.GetProcess("sa_proc_0")
+	p1 := pm.GetProcess("sa_proc_1")
+	p2 := pm.GetProcess("sa_proc_2")
+
+	// p0: EXITED
+	_ = p0.Start()
+	time.Sleep(300 * time.Millisecond)
+
+	// p1: RUNNING
+	_ = p1.Start()
+	defer p1.Stop()
+
+	// p2: FATAL
+	p2.mu.Lock()
+	p2.State = StateFatal
+	p2.mu.Unlock()
+
+	pm.StopAll()
+
+	for name, proc := range pm.Processes {
+		if s := proc.GetState(); s != StateStopped {
+			t.Errorf("StopAll 后进程 %s 应为 STOPPED，实际为 %s", name, s)
+		}
+	}
+}
+
+// TestProcessSnapshotThreadSafe 测试：并发 Snapshot/GetState 不 panic
+func TestProcessSnapshotThreadSafe(t *testing.T) {
+	logDir := "./test_logs_snap"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "snap_test",
+		Command:      "sleep 60",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    1,
+		StartRetries: 3,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("snap_test")
+	_ = p.Start()
+	defer p.Stop()
+
+	monitor := NewMonitor(pm)
+	monitor.Start()
+	defer monitor.Stop()
+
+	done := make(chan struct{})
+	for i := 0; i < 10; i++ {
+		go func() {
+			for j := 0; j < 100; j++ {
+				_ = p.Snapshot()
+				_ = p.GetState()
+			}
+			done <- struct{}{}
+		}()
+	}
+
+	for i := 0; i < 10; i++ {
+		<-done
+	}
+}
+
+// TestStopThenMonitorRestartRace 测试：Stop/Monitor 并发竞争
+func TestStopThenMonitorRestartRace(t *testing.T) {
+	logDir := "./test_logs_race"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	for i := 0; i < 5; i++ {
+		pm := NewProcessManager(logManager)
+		cfg := &config.ProgramConfig{
+			Name:         fmt.Sprintf("race_%d", i),
+			Command:      "sleep 60",
+			Directory:    ".",
+			AutoStart:    true,
+			AutoRestart:  true,
+			StartSecs:    1,
+			StartRetries: 3,
+			Environment:  make(map[string]string),
+		}
+		pm.AddProcess(cfg)
+		p := pm.GetProcess(cfg.Name)
+		_ = p.Start()
+
+		monitor := NewMonitor(pm)
+		monitor.Start()
+
+		_ = p.Stop()
+		time.Sleep(100 * time.Millisecond)
+
+		if state := p.GetState(); state == StateStarting {
+			t.Errorf("迭代 %d: Stop 后 Monitor 不应重启进程，状态为 %s", i, state)
+		}
+
+		monitor.Stop()
 	}
 }

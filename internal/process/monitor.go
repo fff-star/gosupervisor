@@ -2,7 +2,6 @@ package process
 
 import (
 	"fmt"
-	"syscall"
 	"time"
 )
 
@@ -47,7 +46,7 @@ func (m *Monitor) checkProcesses() {
 }
 
 func (m *Monitor) checkProcess(process *Process) {
-	switch process.State {
+	switch process.GetState() {
 	case StateExited:
 		m.handleExitedProcess(process)
 	case StateRunning:
@@ -56,49 +55,59 @@ func (m *Monitor) checkProcess(process *Process) {
 }
 
 func (m *Monitor) handleExitedProcess(process *Process) {
-	// 正在停止中，不重启
-	if process.State == StateStopping {
+	process.mu.Lock()
+	if !process.Config.AutoRestart {
+		process.mu.Unlock()
 		return
 	}
 
-	if process.Config.AutoRestart {
-		if process.StartRetries <= process.Config.StartRetries {
-			// 等待一段时间后重启
-			time.Sleep(1 * time.Second)
-			fmt.Printf("进程 %s 已退出，尝试重启...\n", process.Name)
-			if err := process.Start(); err != nil {
-				fmt.Printf("重启进程 %s 失败: %v\n", process.Name, err)
-				if process.StartRetries >= process.Config.StartRetries {
-					process.State = StateFatal
-					fmt.Printf("进程 %s 达到最大重启次数，进入FATAL状态\n", process.Name)
-				}
-			}
-		} else {
-			process.State = StateFatal
-			fmt.Printf("进程 %s 达到最大重启次数，进入FATAL状态\n", process.Name)
-		}
+	if process.State != StateExited {
+		// 已经被另一个 goroutine 认领了
+		process.mu.Unlock()
+		return
 	}
+
+	if process.StartRetries > process.Config.StartRetries {
+		process.State = StateFatal
+		process.mu.Unlock()
+		fmt.Printf("进程 %s 达到最大重启次数，进入FATAL状态\n", process.Name)
+		return
+	}
+
+	// 标记为 STARTING 防止 monitor 重复调度
+	process.State = StateStarting
+	name := process.Name
+	process.mu.Unlock()
+
+	// 在独立 goroutine 中执行重启，不阻塞 monitor 循环
+	go func() {
+		time.Sleep(1 * time.Second)
+		fmt.Printf("进程 %s 已退出，尝试重启...\n", name)
+
+		if err := process.Start(); err != nil {
+			fmt.Printf("重启进程 %s 失败: %v\n", name, err)
+
+			process.mu.Lock()
+			if process.StartRetries >= process.Config.StartRetries {
+				process.State = StateFatal
+				fmt.Printf("进程 %s 达到最大重启次数，进入FATAL状态\n", name)
+			}
+			process.mu.Unlock()
+		}
+	}()
 }
 
 func (m *Monitor) checkRunningProcess(process *Process) {
+	process.mu.Lock()
+	defer process.mu.Unlock()
+
 	// 正在停止中，不检查
 	if process.State == StateStopping {
 		return
 	}
 
-	// 检查进程是否真的在运行
-	if process.Cmd != nil && process.Cmd.Process != nil {
-		if err := process.Cmd.Process.Signal(syscall.Signal(0)); err != nil {
-			// 进程不存在，标记为已退出
-			process.State = StateExited
-			fmt.Printf("进程 %s 不存在，标记为已退出\n", process.Name)
-			m.handleExitedProcess(process)
-		}
-	}
-
-	// 检查启动时间，判断是否启动成功
-	if process.State == StateRunning && time.Since(process.StartTime) > time.Duration(process.Config.StartSecs)*time.Second {
-		// 启动成功，重置重试次数
+	// 启动时间超过 StartSecs，重置重试次数
+	if process.Config.StartSecs > 0 && time.Since(process.StartTime) > time.Duration(process.Config.StartSecs)*time.Second {
 		process.StartRetries = 0
 	}
 }

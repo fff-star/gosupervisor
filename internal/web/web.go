@@ -53,18 +53,18 @@ func (ws *WebServer) Start(addr string) error {
 }
 
 func (ws *WebServer) handleIndex(w http.ResponseWriter, r *http.Request) {
-	// 获取所有进程
-	processes := make([]*process.Process, 0, len(ws.processManager.Processes))
+	// 获取所有进程快照（线程安全）
+	snapshots := make([]process.Snapshot, 0, len(ws.processManager.Processes))
 	for _, p := range ws.processManager.Processes {
-		processes = append(processes, p)
+		snapshots = append(snapshots, p.Snapshot())
 	}
 
 	// 渲染模板
 	data := struct {
-		Processes []*process.Process
+		Processes []process.Snapshot
 		Time      string
 	}{
-		Processes: processes,
+		Processes: snapshots,
 		Time:      time.Now().Format("2006-01-02 15:04:05"),
 	}
 
@@ -205,7 +205,8 @@ func (ws *WebServer) handleProcessDetail(w http.ResponseWriter, r *http.Request)
 			return strings.ToLower(fmt.Sprintf("%v", s))
 		},
 	}).Parse(processDetailTemplate))
-	if err := tmpl.Execute(w, p); err != nil {
+	snap := p.Snapshot()
+	if err := tmpl.Execute(w, snap); err != nil {
 		http.Error(w, fmt.Sprintf("渲染模板失败: %v", err), http.StatusInternalServerError)
 	}
 }

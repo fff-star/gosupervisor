@@ -103,9 +103,11 @@ func (mm *MetricsManager) UpdateMetrics() {
 
 	// 更新每个进程的指标
 	for name, proc := range mm.processManager.Processes {
+		s := proc.Snapshot()
+
 		// 进程状态
 		var status float64
-		switch proc.State {
+		switch s.State {
 		case process.StateStopped:
 			status = 0
 		case process.StateStarting:
@@ -122,21 +124,21 @@ func (mm *MetricsManager) UpdateMetrics() {
 		mm.processStatus.WithLabelValues(name).Set(status)
 
 		// 进程运行时间
-		if proc.State == process.StateRunning {
-			uptime := time.Since(proc.StartTime).Seconds()
+		if s.State == process.StateRunning {
+			uptime := time.Since(s.StartTime).Seconds()
 			mm.processUptime.WithLabelValues(name).Set(uptime)
 		} else {
 			mm.processUptime.WithLabelValues(name).Set(0)
 		}
 
 		// 进程重启次数
-		mm.processRestarts.WithLabelValues(name).Set(float64(proc.RestartCount))
+		mm.processRestarts.WithLabelValues(name).Set(float64(s.RestartCount))
 
 		// 进程CPU使用率
-		mm.processCPUUsage.WithLabelValues(name).Set(proc.CPUUsage)
+		mm.processCPUUsage.WithLabelValues(name).Set(s.CPUUsage)
 
 		// 进程内存使用量
-		mm.processMemUsage.WithLabelValues(name).Set(float64(proc.MemoryUsage))
+		mm.processMemUsage.WithLabelValues(name).Set(float64(s.MemoryUsage))
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -26,6 +27,8 @@ const (
 )
 
 type Process struct {
+	mu sync.Mutex
+
 	Name         string
 	Config       *config.ProgramConfig
 	Cmd          *exec.Cmd
@@ -44,6 +47,10 @@ type Process struct {
 	LastRestart  time.Time
 	Healthy      bool
 	Group        string
+
+	// waitCh is closed by monitor() after cmd.Wait() returns.
+	// Stop() waits on it instead of calling cmd.Wait() directly.
+	waitCh chan struct{}
 }
 
 type ProcessManager struct {
@@ -73,7 +80,9 @@ func (pm *ProcessManager) AddProcess(cfg *config.ProgramConfig) *Process {
 }
 
 func (p *Process) Start() error {
+	p.mu.Lock()
 	if p.State == StateRunning {
+		p.mu.Unlock()
 		return fmt.Errorf("进程 %s 已经在运行", p.Name)
 	}
 
@@ -84,31 +93,30 @@ func (p *Process) Start() error {
 
 	p.State = StateStarting
 	p.StartRetries++
-	p.RestartCount++
+	if p.PID > 0 {
+		p.RestartCount++
+	}
 	p.LastRestart = time.Now()
 	p.Healthy = false
 
 	// 准备命令（只支持类 Unix 系统）
-	// 使用 /bin/sh -c 来执行配置里的命令字符串
-	cmd := exec.CommandContext(p.Context, "/bin/sh", "-c", p.Config.Command)
+	ctx, cancel := context.WithCancel(p.Context)
+	_ = cancel // keep for future use
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", p.Config.Command)
 
-	// 设置工作目录
 	if p.Config.Directory != "" {
 		cmd.Dir = p.Config.Directory
 	}
 
-	// 设置环境变量
 	env := os.Environ()
 	for key, value := range p.Config.Environment {
 		env = append(env, fmt.Sprintf("%s=%s", key, value))
 	}
 	cmd.Env = env
 
-	// 设置进程组（Linux 特定行为由 proc_linux.go 的 setProcessGroupAttr 实现）
 	cmd.SysProcAttr = &syscall.SysProcAttr{}
 	setProcessGroupAttr(cmd.SysProcAttr)
 
-	// 集成日志管理
 	if p.Logger != nil {
 		logWriter, err := p.Logger.GetProcessLogWriter(p.Name)
 		if err == nil {
@@ -117,120 +125,73 @@ func (p *Process) Start() error {
 		}
 	}
 
-	// 启动进程
+	// 创建 waitCh 供 Stop() 使用
+	p.waitCh = make(chan struct{})
+	p.mu.Unlock()
+
+	// 执行 fork/exec（不持有锁）
 	if err := cmd.Start(); err != nil {
-		p.State = StateFatal
+		p.mu.Lock()
+		p.State = StateExited
+		p.mu.Unlock()
 		return fmt.Errorf("启动进程失败: %v", err)
 	}
 
+	p.mu.Lock()
 	p.Cmd = cmd
 	p.PID = cmd.Process.Pid
 	p.StartTime = time.Now()
 	p.State = StateRunning
+	p.mu.Unlock()
 
-	// 启动goroutine监控进程
 	go p.monitor()
-
-	// 启动goroutine监控资源使用情况
 	go p.monitorResources()
 
 	return nil
 }
 
-// monitorResources 监控进程的资源使用情况
-func (p *Process) monitorResources() {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			if p.State != StateRunning {
-				return
-			}
-
-			// 从 /proc 文件系统读取真实的 CPU 和内存使用情况
-			if p.PID > 0 {
-				statFile := fmt.Sprintf("/proc/%d/stat", p.PID)
-				statusFile := fmt.Sprintf("/proc/%d/status", p.PID)
-
-				// 读取 stat 文件获取 CPU 时间
-				if stat, err := os.Open(statFile); err == nil {
-					defer stat.Close()
-					var fields [15]string
-					fmt.Fscanf(stat, "%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s",
-						&fields[0], &fields[1], &fields[2], &fields[3], &fields[4],
-						&fields[5], &fields[6], &fields[7], &fields[8], &fields[9],
-						&fields[10], &fields[11], &fields[12], &fields[13], &fields[14])
-					// 简单的 CPU 使用率估算（实际应该计算 delta）
-					p.CPUUsage = float64(time.Now().UnixNano()%100) / 10.0
-				}
-
-				// 读取 status 文件获取内存使用
-				if status, err := os.Open(statusFile); err == nil {
-					defer status.Close()
-					scanner := bufio.NewScanner(status)
-					for scanner.Scan() {
-						line := scanner.Text()
-						if strings.Contains(line, "VmRSS:") {
-							// 解析内存大小（单位为 KB）
-							var rss int64
-							fmt.Sscanf(line, "VmRSS:\t%d", &rss)
-							p.MemoryUsage = uint64(rss) * 1024 // 转换为字节
-							break
-						}
-					}
-				}
-			}
-
-			// 检查进程健康状态（2GB 内存警告值）
-			p.Healthy = p.CPUUsage < 90.0 && p.MemoryUsage < 2*1024*1024*1024
-		case <-p.Context.Done():
-			return
-		}
-	}
-}
-
 func (p *Process) Stop() error {
+	p.mu.Lock()
 	cmd := p.Cmd
 
 	if cmd == nil || cmd.Process == nil {
 		p.State = StateStopped
+		p.mu.Unlock()
 		return nil
 	}
 
 	if p.State != StateRunning && p.State != StateStopping {
 		cmd.Process.Kill()
 		p.State = StateStopped
+		p.mu.Unlock()
 		return nil
 	}
 
 	p.State = StateStopping
+	waitCh := p.waitCh
+	p.mu.Unlock()
 
-	if err := cmd.Process.Kill(); err != nil {
-		// 进程可能已经退出
-		if p.State == StateStopping {
-			p.State = StateStopped
+	// 发送 SIGKILL（不持有锁）
+	cmd.Process.Kill()
+
+	// 等待 monitor() goroutine 的 cmd.Wait() 返回
+	if waitCh != nil {
+		if p.Config.StopSecs > 0 {
+			select {
+			case <-waitCh:
+			case <-time.After(time.Duration(p.Config.StopSecs) * time.Second):
+			}
+		} else {
+			<-waitCh
 		}
-		return nil
 	}
 
-	// 使用带超时的等待
-	waitDone := make(chan struct{})
-	go func() {
-		cmd.Wait()
-		close(waitDone)
-	}()
-
-	select {
-	case <-waitDone:
-	case <-time.After(time.Duration(p.Config.StopSecs) * time.Second):
-	}
-
+	p.mu.Lock()
 	p.StopTime = time.Now()
 	if p.State == StateStopping {
 		p.State = StateStopped
 	}
+	p.mu.Unlock()
 	return nil
 }
 
@@ -241,12 +202,64 @@ func (p *Process) Restart() error {
 	return p.Start()
 }
 
+// GetState returns a thread-safe copy of the process state.
+func (p *Process) GetState() ProcessState {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.State
+}
+
+// Snapshot holds a point-in-time copy of a Process's display fields.
+// All fields are read under the Process mutex.
+type Snapshot struct {
+	Name         string
+	State        ProcessState
+	PID          int
+	StartTime    time.Time
+	StopTime     time.Time
+	ExitCode     int
+	StartRetries int
+	RestartCount int
+	LastRestart  time.Time
+	CPUUsage     float64
+	MemoryUsage  uint64
+	Healthy      bool
+	Config       *config.ProgramConfig
+}
+
+// Snapshot returns a thread-safe copy of the process's display fields.
+func (p *Process) Snapshot() Snapshot {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return Snapshot{
+		Name:         p.Name,
+		State:        p.State,
+		PID:          p.PID,
+		StartTime:    p.StartTime,
+		StopTime:     p.StopTime,
+		ExitCode:     p.ExitCode,
+		StartRetries: p.StartRetries,
+		RestartCount: p.RestartCount,
+		LastRestart:  p.LastRestart,
+		CPUUsage:     p.CPUUsage,
+		MemoryUsage:  p.MemoryUsage,
+		Healthy:      p.Healthy,
+		Config:       p.Config,
+	}
+}
+
+// monitor 等待进程退出，由 Start() 启动为 goroutine
 func (p *Process) monitor() {
-	// 等待命令执行完成
 	err := p.Cmd.Wait()
 
+	p.mu.Lock()
+	// 关闭 waitCh，通知 Stop() 等待者
+	if p.waitCh != nil {
+		close(p.waitCh)
+		p.waitCh = nil
+	}
+
 	p.StopTime = time.Now()
-	// 如果正在被 Stop() 停止，不要覆盖状态
 	if p.State != StateStopping {
 		p.State = StateExited
 	}
@@ -256,8 +269,81 @@ func (p *Process) monitor() {
 			p.ExitCode = exitErr.ExitCode()
 		}
 	}
+	p.mu.Unlock()
+}
 
-	// 这里可以添加自动重启逻辑，后续会在监控模块中实现
+// monitorResources 监控进程的资源使用情况
+func (p *Process) monitorResources() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			p.mu.Lock()
+			if p.State != StateRunning {
+				p.mu.Unlock()
+				return
+			}
+			pid := p.PID
+			p.mu.Unlock()
+
+			if pid > 0 {
+				p.readProcStats(pid)
+			}
+		case <-p.Context.Done():
+			return
+		}
+	}
+}
+
+// readProcStats 读取 /proc 文件系统中的资源使用信息
+func (p *Process) readProcStats(pid int) {
+	// 读取 VmRSS 内存使用
+	statusFile := fmt.Sprintf("/proc/%d/status", pid)
+	if f, err := os.Open(statusFile); err == nil {
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.Contains(line, "VmRSS:") {
+				var rss int64
+				fmt.Sscanf(line, "VmRSS:\t%d", &rss)
+				p.mu.Lock()
+				p.MemoryUsage = uint64(rss) * 1024
+				p.mu.Unlock()
+				break
+			}
+		}
+		f.Close()
+	}
+
+	// /proc/pid/stat: 找最后一个 ')' 后解析 utime/stime
+	statFile := fmt.Sprintf("/proc/%d/stat", pid)
+	data, err := os.ReadFile(statFile)
+	if err != nil {
+		return
+	}
+	content := string(data)
+	// 跳过 comm 字段（被括号包围，如 "(sleep)"）
+	idx := strings.LastIndex(content, ")")
+	if idx < 0 || idx+2 >= len(content) {
+		return
+	}
+	rest := strings.Fields(content[idx+2:])
+	// rest[0]=state, rest[11]=utime, rest[12]=stime (14-indexed from start, minus pid and comm)
+	if len(rest) < 13 {
+		return
+	}
+	var utime, stime int64
+	fmt.Sscanf(rest[11], "%d", &utime)
+	fmt.Sscanf(rest[12], "%d", &stime)
+	cpuTotal := utime + stime
+
+	p.mu.Lock()
+	p.CPUUsage = float64(cpuTotal)
+	// 健康检查
+	p.Healthy = p.CPUUsage < 90.0 && p.MemoryUsage < 2*1024*1024*1024
+	p.mu.Unlock()
 }
 
 func (pm *ProcessManager) GetProcess(name string) *Process {
@@ -265,39 +351,58 @@ func (pm *ProcessManager) GetProcess(name string) *Process {
 }
 
 func (pm *ProcessManager) StartAll() {
-	// 构建依赖关系图
 	dependencyGraph := make(map[string][]string)
 	for _, process := range pm.Processes {
 		dependencyGraph[process.Name] = process.Config.DependsOn
 	}
 
-	// 执行拓扑排序
 	orderedProcesses, err := pm.topologicalSort(dependencyGraph)
 	if err != nil {
 		fmt.Printf("解析进程依赖关系失败: %v\n", err)
-		// 如果排序失败，使用默认顺序
 		for _, process := range pm.Processes {
 			orderedProcesses = append(orderedProcesses, process.Name)
 		}
 	}
 
-	// 按排序结果启动进程
 	for _, name := range orderedProcesses {
 		process := pm.Processes[name]
 		if process.Config.AutoStart {
-			process.Start()
+			if err := process.Start(); err != nil {
+				fmt.Printf("启动进程 %s 失败: %v\n", name, err)
+			}
 		}
 	}
 }
 
-// topologicalSort 执行拓扑排序，返回进程启动顺序
+func (pm *ProcessManager) StopAll() {
+	dependencyGraph := make(map[string][]string)
+	for _, process := range pm.Processes {
+		dependencyGraph[process.Name] = process.Config.DependsOn
+	}
+
+	orderedProcesses, err := pm.topologicalSort(dependencyGraph)
+	if err != nil {
+		fmt.Printf("解析进程依赖关系失败: %v\n", err)
+		for _, process := range pm.Processes {
+			orderedProcesses = append(orderedProcesses, process.Name)
+		}
+	}
+
+	// 逆序停止进程
+	for i := len(orderedProcesses) - 1; i >= 0; i-- {
+		name := orderedProcesses[i]
+		process := pm.Processes[name]
+		state := process.GetState()
+		if state == StateRunning || state == StateStarting || state == StateExited || state == StateFatal {
+			process.Stop()
+		}
+	}
+}
+
 func (pm *ProcessManager) topologicalSort(graph map[string][]string) ([]string, error) {
-	// 计算每个节点的入度并构建反向依赖图
 	inDegree := make(map[string]int)
 	reverseGraph := make(map[string][]string)
 
-	// 初始化入度和反向依赖图
-	// 确保图中出现的所有节点都被初始化（包括作为依赖出现但未显式声明的节点）
 	for node, deps := range graph {
 		if _, ok := inDegree[node]; !ok {
 			inDegree[node] = 0
@@ -315,15 +420,13 @@ func (pm *ProcessManager) topologicalSort(graph map[string][]string) ([]string, 
 		}
 	}
 
-	// 构建反向依赖图并计算入度
 	for node, dependencies := range graph {
 		for _, dep := range dependencies {
-			inDegree[node]++                                    // node依赖于dep，所以node的入度+1
-			reverseGraph[dep] = append(reverseGraph[dep], node) // dep被node依赖，所以反向依赖图中dep指向node
+			inDegree[node]++
+			reverseGraph[dep] = append(reverseGraph[dep], node)
 		}
 	}
 
-	// 使用队列进行拓扑排序
 	queue := []string{}
 	for node, degree := range inDegree {
 		if degree == 0 {
@@ -337,7 +440,6 @@ func (pm *ProcessManager) topologicalSort(graph map[string][]string) ([]string, 
 		queue = queue[1:]
 		result = append(result, current)
 
-		// 减少依赖于当前节点的节点的入度
 		for _, neighbor := range reverseGraph[current] {
 			inDegree[neighbor]--
 			if inDegree[neighbor] == 0 {
@@ -346,37 +448,9 @@ func (pm *ProcessManager) topologicalSort(graph map[string][]string) ([]string, 
 		}
 	}
 
-	// 检查是否有循环依赖
 	if len(result) != len(graph) {
 		return nil, fmt.Errorf("存在循环依赖")
 	}
 
 	return result, nil
-}
-
-func (pm *ProcessManager) StopAll() {
-	// 构建依赖关系图
-	dependencyGraph := make(map[string][]string)
-	for _, process := range pm.Processes {
-		dependencyGraph[process.Name] = process.Config.DependsOn
-	}
-
-	// 执行拓扑排序
-	orderedProcesses, err := pm.topologicalSort(dependencyGraph)
-	if err != nil {
-		fmt.Printf("解析进程依赖关系失败: %v\n", err)
-		// 如果排序失败，使用默认顺序
-		for _, process := range pm.Processes {
-			orderedProcesses = append(orderedProcesses, process.Name)
-		}
-	}
-
-	// 逆序停止进程（依赖关系的反序）
-	for i := len(orderedProcesses) - 1; i >= 0; i-- {
-		name := orderedProcesses[i]
-		process := pm.Processes[name]
-		if process.State == StateRunning {
-			process.Stop()
-		}
-	}
 }

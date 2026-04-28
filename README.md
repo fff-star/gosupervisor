@@ -6,7 +6,7 @@ GoSupervisor is a process management tool written in Go, inspired by Python's Su
 
 - **Process management**: start, stop, restart individual or all managed processes
 - **Automatic restart**: auto-restart processes on unexpected exit, with configurable retry limits
-- **Process monitoring**: liveness checks every second via null-signal probing
+- **Process monitoring**: exit detection via built-in `cmd.Wait()` tracking; 1-second ticker triggers auto-restart for exited processes
 - **Resource monitoring**: CPU and memory usage tracking via `/proc` every 5 seconds
 - **Log management**: per-process log files with automatic rotation, size limits, and gzip compression
 - **Multi-format config**: INI, YAML, and JSON configuration files (auto-detected by extension)
@@ -174,7 +174,7 @@ programs:
 | `startsecs` | int | `1` | Seconds the process must stay up to be considered started |
 | `startretries` | int | `3` | Max restarts before entering FATAL state |
 | `stopsecs` | int | `10` | Seconds to wait for graceful stop before SIGKILL |
-| `stopsignal` | string | `SIGTERM` | Signal sent on graceful stop |
+| `stopsignal` | string | `SIGTERM` | (currently unused — always sends SIGKILL) |
 | `user` | string | `""` | Run as this user (Linux only) |
 | `environment` | map/string | `{}` | Extra environment variables. INI: comma-separated `KEY=VAL` pairs |
 | `redirectstdout` | bool | `true` | Capture stdout to log |
