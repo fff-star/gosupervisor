@@ -2,6 +2,7 @@ package web
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,26 +20,97 @@ import (
 type WebServer struct {
 	processManager *process.ProcessManager
 	logDir         string
-	templates      *template.Template
+	mux            *http.ServeMux
+	authUser       string
+	authPass       string
+	apiAuth        bool
+
+	indexTmpl         *template.Template
+	logsTmpl          *template.Template
+	systemInfoTmpl    *template.Template
+	processDetailTmpl *template.Template
 }
 
 func NewWebServer(processManager *process.ProcessManager, logDir string) (*WebServer, error) {
-	// 创建模板并添加lower函数
-	tmpl := template.New("index").Funcs(template.FuncMap{
+	return NewWebServerWithAuth(processManager, logDir, "", "", false)
+}
+
+// NewWebServerWithAuth creates a WebServer with optional HTTP Basic Auth.
+func NewWebServerWithAuth(processManager *process.ProcessManager, logDir, user, pass string, apiAuth bool) (*WebServer, error) {
+	funcs := template.FuncMap{
 		"lower": func(s interface{}) string {
-			// 将任何类型转换为字符串，然后转换为小写
 			return strings.ToLower(fmt.Sprintf("%v", s))
 		},
-	})
+	}
 
-	// 解析HTML模板
-	tmpl = template.Must(tmpl.Parse(indexTemplate))
+	indexTmpl := template.Must(template.New("index").Funcs(funcs).Parse(indexTemplate))
+	logsTmpl := template.Must(template.New("logs").Parse(logsTemplate))
+	systemInfoTmpl := template.Must(template.New("system").Parse(systemInfoTemplate))
+	processDetailTmpl := template.Must(template.New("process").Funcs(funcs).Parse(processDetailTemplate))
 
-	return &WebServer{
-		processManager: processManager,
-		logDir:         logDir,
-		templates:      tmpl,
-	}, nil
+	mux := http.NewServeMux()
+	ws := &WebServer{
+		processManager:    processManager,
+		logDir:            logDir,
+		mux:               mux,
+		authUser:          user,
+		authPass:          pass,
+		apiAuth:           apiAuth,
+		indexTmpl:         indexTmpl,
+		logsTmpl:          logsTmpl,
+		systemInfoTmpl:    systemInfoTmpl,
+		processDetailTmpl: processDetailTmpl,
+	}
+
+	mux.HandleFunc("/", ws.handleIndex)
+	mux.HandleFunc("/api/processes", ws.handleAPIProcesses)
+	mux.HandleFunc("/api/v1/processes", ws.handleAPIV1Processes)
+	mux.HandleFunc("/api/v1/processes/", ws.handleAPIV1ProcessAction)
+	mux.HandleFunc("/api/v1/groups/", ws.handleAPIV1GroupAction)
+	mux.HandleFunc("/start", ws.handleStart)
+	mux.HandleFunc("/stop", ws.handleStop)
+	mux.HandleFunc("/restart", ws.handleRestart)
+	mux.HandleFunc("/logs", ws.handleLogs)
+	mux.HandleFunc("/system", ws.handleSystemInfo)
+	mux.HandleFunc("/process", ws.handleProcessDetail)
+
+	return ws, nil
+}
+
+// basicAuth wraps a handler with HTTP Basic Auth if credentials are configured.
+func (ws *WebServer) basicAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if ws.authUser == "" && ws.authPass == "" {
+			next(w, r)
+			return
+		}
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != ws.authUser || pass != ws.authPass {
+			w.Header().Set("WWW-Authenticate", `Basic realm="GoSupervisor"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// jsonResponse writes a JSON response.
+func jsonResponse(w http.ResponseWriter, status int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(data)
+}
+
+// apiV1ProcessesList is the JSON response for GET /api/v1/processes
+type apiV1ProcessesList struct {
+	Status    string             `json:"status"`
+	Processes []process.Snapshot `json:"processes"`
+}
+
+// apiV1Status is a generic JSON status response.
+type apiV1Status struct {
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
 }
 
 // validateProcessName rejects names with path separators or parent references.
@@ -46,29 +118,60 @@ func validateProcessName(name string) bool {
 	return name != "" && !strings.Contains(name, "/") && !strings.Contains(name, "..") && !strings.Contains(name, "\\")
 }
 
-func (ws *WebServer) Start(addr string) error {
-	// 注册路由
-	http.HandleFunc("/", ws.handleIndex)
-	http.HandleFunc("/start", ws.handleStart)
-	http.HandleFunc("/stop", ws.handleStop)
-	http.HandleFunc("/restart", ws.handleRestart)
-	http.HandleFunc("/logs", ws.handleLogs)
-	http.HandleFunc("/system", ws.handleSystemInfo)
-	http.HandleFunc("/process", ws.handleProcessDetail)
+// isSameOrigin checks that the request's Origin or Referer matches the Host.
+// This provides basic CSRF protection for state-changing endpoints.
+func isSameOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		origin = r.Header.Get("Referer")
+	}
+	if origin == "" {
+		return false
+	}
+	if r.Host == "" {
+		return false
+	}
+	return strings.Contains(origin, r.Host)
+}
 
-	// 启动服务器
+func (ws *WebServer) Start(addr string) error {
 	fmt.Printf("Web服务器启动在 %s\n", addr)
-	return http.ListenAndServe(addr, nil)
+	handler := http.Handler(ws.mux)
+	if ws.authUser != "" || ws.authPass != "" {
+		handler = ws.authMiddleware(ws.mux)
+		fmt.Println("Web界面已启用 HTTP Basic Auth 认证")
+	}
+	return http.ListenAndServe(addr, handler)
+}
+
+func (ws *WebServer) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Auth disabled
+		if ws.authUser == "" && ws.authPass == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Allow /api/v1/ without auth unless apiAuth is enabled
+		if !ws.apiAuth && strings.HasPrefix(r.URL.Path, "/api/v1/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != ws.authUser || pass != ws.authPass {
+			w.Header().Set("WWW-Authenticate", `Basic realm="GoSupervisor"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (ws *WebServer) handleIndex(w http.ResponseWriter, r *http.Request) {
-	// 获取所有进程快照（线程安全）
-	snapshots := make([]process.Snapshot, 0, len(ws.processManager.Processes))
-	for _, p := range ws.processManager.Processes {
+	snapshots := make([]process.Snapshot, 0)
+	ws.processManager.RangeProcesses(func(name string, p *process.Process) {
 		snapshots = append(snapshots, p.Snapshot())
-	}
+	})
 
-	// 渲染模板
 	data := struct {
 		Processes []process.Snapshot
 		Time      string
@@ -77,14 +180,145 @@ func (ws *WebServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 		Time:      time.Now().Format("2006-01-02 15:04:05"),
 	}
 
-	if err := ws.templates.Execute(w, data); err != nil {
+	if err := ws.indexTmpl.Execute(w, data); err != nil {
 		http.Error(w, fmt.Sprintf("渲染模板失败: %v", err), http.StatusInternalServerError)
 	}
+}
+
+func (ws *WebServer) handleAPIProcesses(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	snapshots := make([]process.Snapshot, 0)
+	ws.processManager.RangeProcesses(func(name string, p *process.Process) {
+		snapshots = append(snapshots, p.Snapshot())
+	})
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(snapshots); err != nil {
+		http.Error(w, fmt.Sprintf("编码JSON失败: %v", err), http.StatusInternalServerError)
+	}
+}
+
+// --- API v1 handlers ---
+
+func (ws *WebServer) handleAPIV1Processes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonResponse(w, http.StatusMethodNotAllowed, apiV1Status{Status: "error", Message: "Method Not Allowed"})
+		return
+	}
+	snapshots := make([]process.Snapshot, 0)
+	ws.processManager.RangeProcesses(func(name string, p *process.Process) {
+		snapshots = append(snapshots, p.Snapshot())
+	})
+	jsonResponse(w, http.StatusOK, apiV1ProcessesList{Status: "ok", Processes: snapshots})
+}
+
+func (ws *WebServer) handleAPIV1ProcessAction(w http.ResponseWriter, r *http.Request) {
+	// Path: /api/v1/processes/{name}[/{action}]
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/processes/")
+	parts := strings.SplitN(path, "/", 2)
+	name := parts[0]
+	if name == "" || !validateProcessName(name) {
+		jsonResponse(w, http.StatusBadRequest, apiV1Status{Status: "error", Message: "Bad Request"})
+		return
+	}
+
+	// POST requests require CSRF protection
+	if r.Method == http.MethodPost && !isSameOrigin(r) {
+		jsonResponse(w, http.StatusForbidden, apiV1Status{Status: "error", Message: "Forbidden"})
+		return
+	}
+
+	action := ""
+	if len(parts) > 1 {
+		action = parts[1]
+	}
+
+	p := ws.processManager.GetProcess(name)
+	if p == nil {
+		jsonResponse(w, http.StatusNotFound, apiV1Status{Status: "error", Message: "Process not found"})
+		return
+	}
+
+	switch {
+	case action == "" && r.Method == http.MethodGet:
+		snap := p.Snapshot()
+		jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "process": snap})
+	case action == "start" && r.Method == http.MethodPost:
+		if err := p.Start(); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: err.Error()})
+			return
+		}
+		jsonResponse(w, http.StatusOK, apiV1Status{Status: "ok", Message: "Process started"})
+	case action == "stop" && r.Method == http.MethodPost:
+		if err := p.Stop(); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: err.Error()})
+			return
+		}
+		jsonResponse(w, http.StatusOK, apiV1Status{Status: "ok", Message: "Process stopped"})
+	case action == "restart" && r.Method == http.MethodPost:
+		if err := p.Restart(); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: err.Error()})
+			return
+		}
+		jsonResponse(w, http.StatusOK, apiV1Status{Status: "ok", Message: "Process restarted"})
+	case action == "logs" && r.Method == http.MethodGet:
+		ws.handleProcessLogsStream(w, r, name)
+	default:
+		jsonResponse(w, http.StatusMethodNotAllowed, apiV1Status{Status: "error", Message: "Method Not Allowed"})
+	}
+}
+
+func (ws *WebServer) handleAPIV1GroupAction(w http.ResponseWriter, r *http.Request) {
+	// Path: /api/v1/groups/{group}/{action}
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/groups/")
+	parts := strings.SplitN(path, "/", 2)
+	group := parts[0]
+	if group == "" || !validateProcessName(group) {
+		jsonResponse(w, http.StatusBadRequest, apiV1Status{Status: "error", Message: "Bad Request"})
+		return
+	}
+
+	// POST requests require CSRF protection
+	if r.Method == http.MethodPost && !isSameOrigin(r) {
+		jsonResponse(w, http.StatusForbidden, apiV1Status{Status: "error", Message: "Forbidden"})
+		return
+	}
+
+	action := ""
+	if len(parts) > 1 {
+		action = parts[1]
+	}
+
+	var result []string
+	var errMsg string
+	switch {
+	case action == "start" && r.Method == http.MethodPost:
+		result = ws.processManager.StartGroup(group)
+	case action == "stop" && r.Method == http.MethodPost:
+		result = ws.processManager.StopGroup(group)
+	case action == "restart" && r.Method == http.MethodPost:
+		result = ws.processManager.RestartGroup(group)
+	default:
+		jsonResponse(w, http.StatusMethodNotAllowed, apiV1Status{Status: "error", Message: "Method Not Allowed"})
+		return
+	}
+
+	if errMsg != "" {
+		jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: errMsg})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "processes": result})
 }
 
 func (ws *WebServer) handleStart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !isSameOrigin(r) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -113,6 +347,10 @@ func (ws *WebServer) handleStop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !isSameOrigin(r) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
 
 	processName := r.FormValue("name")
 	if processName == "" || !validateProcessName(processName) {
@@ -137,6 +375,10 @@ func (ws *WebServer) handleStop(w http.ResponseWriter, r *http.Request) {
 func (ws *WebServer) handleRestart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !isSameOrigin(r) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -173,14 +415,18 @@ func (ws *WebServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logPath := filepath.Join(ws.logDir, fmt.Sprintf("%s.log", processName))
+	// Use the process's configured stdout log path, falling back to default.
+	s := p.Snapshot()
+	logPath := s.Config.StdoutLogFile
+	if logPath == "" {
+		logPath = filepath.Join(ws.logDir, fmt.Sprintf("%s.log", processName))
+	}
+
 	logContent, err := readTailLines(logPath, tailMaxLines, tailMaxBytes)
 	if err != nil {
 		logContent = []byte(fmt.Sprintf("无法读取日志文件: %v", err))
 	}
 
-	// 渲染日志页面
-	tmpl := template.Must(template.New("logs").Parse(logsTemplate))
 	data := struct {
 		ProcessName string
 		LogContent  string
@@ -189,18 +435,63 @@ func (ws *WebServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 		LogContent:  string(logContent),
 	}
 
-	if err := tmpl.Execute(w, data); err != nil {
+	if err := ws.logsTmpl.Execute(w, data); err != nil {
 		http.Error(w, fmt.Sprintf("渲染模板失败: %v", err), http.StatusInternalServerError)
 	}
 }
 
-func (ws *WebServer) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
-	// 获取系统信息
-	systemInfo := getSystemInfo()
+// handleProcessLogsStream streams a process log via Server-Sent Events.
+func (ws *WebServer) handleProcessLogsStream(w http.ResponseWriter, r *http.Request, name string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		return
+	}
 
-	// 渲染系统信息页面
-	tmpl := template.Must(template.New("system").Parse(systemInfoTemplate))
-	if err := tmpl.Execute(w, systemInfo); err != nil {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	logFile := filepath.Join(ws.logDir, name+".log")
+	f, err := os.Open(logFile)
+	if err != nil {
+		fmt.Fprintf(w, "data: {\"error\": \"无法打开日志文件\"}\n\n")
+		flusher.Flush()
+		return
+	}
+	defer f.Close()
+
+	// Seek to end for tail -f behavior
+	f.Seek(0, io.SeekEnd)
+
+	ctx := r.Context()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			buf := make([]byte, 65536)
+			n, err := f.Read(buf)
+			if err != nil && err != io.EOF {
+				return
+			}
+			if n > 0 {
+				// JSON-encode each chunk for clean SSE
+				escaped := strings.ReplaceAll(string(buf[:n]), "\n", "\\n")
+				escaped = strings.ReplaceAll(escaped, "\r", "")
+				fmt.Fprintf(w, "data: {\"text\": \"%s\"}\n\n", escaped)
+				flusher.Flush()
+			}
+		}
+	}
+}
+
+func (ws *WebServer) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
+	systemInfo := getSystemInfo()
+	if err := ws.systemInfoTmpl.Execute(w, systemInfo); err != nil {
 		http.Error(w, fmt.Sprintf("渲染模板失败: %v", err), http.StatusInternalServerError)
 	}
 }
@@ -218,15 +509,8 @@ func (ws *WebServer) handleProcessDetail(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// 渲染进程详情页面
-	tmpl := template.Must(template.New("process").Funcs(template.FuncMap{
-		"lower": func(s interface{}) string {
-			// 将任何类型转换为字符串，然后转换为小写
-			return strings.ToLower(fmt.Sprintf("%v", s))
-		},
-	}).Parse(processDetailTemplate))
 	snap := p.Snapshot()
-	if err := tmpl.Execute(w, snap); err != nil {
+	if err := ws.processDetailTmpl.Execute(w, snap); err != nil {
 		http.Error(w, fmt.Sprintf("渲染模板失败: %v", err), http.StatusInternalServerError)
 	}
 }
@@ -265,13 +549,19 @@ func getSystemInfo() *SystemInfo {
 		for scanner.Scan() {
 			line := scanner.Text()
 			if strings.HasPrefix(line, "MemTotal:") {
-				var total int64
-				fmt.Sscanf(line, "MemTotal:\t%d", &total)
-				info.MemoryTotal = uint64(total) * 1024 // 转换为字节
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					var total int64
+					fmt.Sscanf(fields[1], "%d", &total)
+					info.MemoryTotal = uint64(total) * 1024
+				}
 			} else if strings.HasPrefix(line, "MemAvailable:") {
-				var avail int64
-				fmt.Sscanf(line, "MemAvailable:\t%d", &avail)
-				info.MemoryUsed = info.MemoryTotal - uint64(avail)*1024
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					var avail int64
+					fmt.Sscanf(fields[1], "%d", &avail)
+					info.MemoryUsed = info.MemoryTotal - uint64(avail)*1024
+				}
 			}
 		}
 	}
@@ -286,8 +576,8 @@ func getSystemInfo() *SystemInfo {
 		info.Uptime = fmt.Sprintf("%dh %dm", hours, mins)
 	}
 
-	// 从 df 命令获取磁盘信息（针对根分区）
-	cmd := exec.Command("df", "/")
+	// 从 df -B1 命令获取磁盘信息（POSIX 兼容，字节输出）
+	cmd := exec.Command("df", "-B1", "/")
 	if output, err := cmd.Output(); err == nil {
 		lines := strings.Split(string(output), "\n")
 		if len(lines) > 1 {
@@ -296,8 +586,8 @@ func getSystemInfo() *SystemInfo {
 				var total, used int64
 				fmt.Sscanf(fields[1], "%d", &total)
 				fmt.Sscanf(fields[2], "%d", &used)
-				info.DiskTotal = uint64(total) * 1024
-				info.DiskUsed = uint64(used) * 1024
+				info.DiskTotal = uint64(total)
+				info.DiskUsed = uint64(used)
 			}
 		}
 	}
@@ -365,9 +655,9 @@ func countProcesses() int {
 		defer dir.Close()
 		if entries, err := dir.Readdirnames(-1); err == nil {
 			count := 0
+			var n int
 			for _, entry := range entries {
-				// 检查是否是数字目录（进程ID）
-				if _, err := fmt.Sscanf(entry, "%d", new(int)); err == nil {
+				if _, err := fmt.Sscanf(entry, "%d", &n); err == nil {
 					count++
 				}
 			}
@@ -470,6 +760,7 @@ const indexTemplate = `<!DOCTYPE html>
 			<th>启动重试次数</th>
 			<th>操作</th>
 		</tr>
+		<tbody id="process-table-body">
 		{{range .Processes}}
 		<tr>
 			<td>{{.Name}}</td>
@@ -507,16 +798,84 @@ const indexTemplate = `<!DOCTYPE html>
 			</td>
 		</tr>
 		{{end}}
+		</tbody>
 	</table>
 	<div class="footer">
-		<p>最后更新: {{.Time}}</p>
+		<p>最后更新: <span id="last-updated">{{.Time}}</span></p>
 		<p>GoSupervisor - 进程管理工具</p>
 	</div>
-	<script>
-		// 自动刷新页面
-		setInterval(function() {
-			window.location.reload();
-		}, 5000);
+		<script>
+		function esc(s) {
+			return s.replace(/&/g,'&amp;').replace(/</g,'&lt;')
+			        .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+		}
+		function fmtTime(ts) {
+			if (!ts) return '-';
+			var d = new Date(ts);
+			if (d.getFullYear() <= 1) return '-';
+			return d.getFullYear() + '-' +
+				String(d.getMonth()+1).padStart(2,'0') + '-' +
+				String(d.getDate()).padStart(2,'0') + ' ' +
+				String(d.getHours()).padStart(2,'0') + ':' +
+				String(d.getMinutes()).padStart(2,'0') + ':' +
+				String(d.getSeconds()).padStart(2,'0');
+		}
+		function updateTable() {
+			fetch('/api/processes')
+				.then(function(r) { return r.json(); })
+				.then(function(procs) {
+					var h = '';
+					for (var i = 0; i < procs.length; i++) {
+						var p = procs[i];
+						var st  = (p.State || '').toLowerCase();
+						var pid = p.PID > 0 ? String(p.PID) : '-';
+						var start = fmtTime(p.StartTime);
+						var stop  = fmtTime(p.StopTime);
+						var ec    = p.ExitCode !== 0 ? p.ExitCode : '-';
+
+						h += '<tr>' +
+							'<td>' + esc(p.Name) + '</td>' +
+							'<td class="status-' + st + '">' + esc(p.State) + '</td>' +
+							'<td>' + pid + '</td>' +
+							'<td>' + start + '</td>' +
+							'<td>' + stop + '</td>' +
+							'<td>' + ec + '</td>' +
+							'<td>' + p.StartRetries + '</td>' +
+							'<td>';
+
+						var nm = esc(p.Name);
+						if (p.State !== 'RUNNING') {
+							h += '<form method="post" action="/start" style="display:inline">' +
+								'<input type="hidden" name="name" value="' + nm + '">' +
+								'<button class="btn-start" type="submit">启动</button></form>';
+						}
+						if (p.State === 'RUNNING') {
+							h += '<form method="post" action="/stop" style="display:inline">' +
+								'<input type="hidden" name="name" value="' + nm + '">' +
+								'<button class="btn-stop" type="submit">停止</button></form>';
+						}
+						h += '<form method="post" action="/restart" style="display:inline">' +
+							'<input type="hidden" name="name" value="' + nm + '">' +
+							'<button class="btn-restart" type="submit">重启</button></form>' +
+							'<form method="get" action="/logs" style="display:inline">' +
+							'<input type="hidden" name="name" value="' + nm + '">' +
+							'<button class="btn-logs" type="submit">查看日志</button></form>' +
+							'<form method="get" action="/process" style="display:inline">' +
+							'<input type="hidden" name="name" value="' + nm + '">' +
+							'<button class="btn-detail" type="submit">详情</button></form>';
+
+						h += '</td></tr>';
+					}
+					document.getElementById('process-table-body').innerHTML = h;
+					document.getElementById('last-updated').textContent =
+						fmtTime(new Date().toISOString());
+				})
+				.catch(function(e) {
+					console.error('process update failed:', e);
+				});
+		}
+		updateTable();
+		setInterval(updateTable, 2000);
 	</script>
 </body>
 </html>`

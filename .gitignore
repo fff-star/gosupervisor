@@ -1,5 +1,6 @@
 # 编译产物
 /gosupervisor
+/gosupervisorctl
 /bin/
 /build/
 *.exe

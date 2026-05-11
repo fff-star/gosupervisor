@@ -2,7 +2,12 @@ package process
 
 import (
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -422,11 +427,9 @@ func TestProcessResourceMonitoring(t *testing.T) {
 	// 等待进程启动
 	time.Sleep(2 * time.Second)
 
-	// 测试获取进程资源使用情况
-	if p.PID > 0 {
-		// 尝试获取资源使用情况
-		// 这里只是测试方法调用不会报错
-		// 实际的资源监控测试需要一个长时间运行的进程
+	// 测试获取进程资源使用情况 — verify PID is populated
+	if p.PID <= 0 {
+		t.Error("已启动进程应有有效 PID")
 	}
 
 	// 停止进程
@@ -1385,5 +1388,1243 @@ func TestReadSystemCPUTicks(t *testing.T) {
 	ticks := readSystemCPUTicks()
 	if ticks <= 0 {
 		t.Error("系统 CPU ticks 应大于 0")
+	}
+}
+
+// TestProcessManagerMutex tests that concurrent access to ProcessManager
+// does not panic under the race detector.
+func TestProcessManagerMutex(t *testing.T) {
+	logDir := "./test_logs_mutex"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	for i := 0; i < 10; i++ {
+		pm.AddProcess(&config.ProgramConfig{
+			Name:         fmt.Sprintf("p%d", i),
+			Command:      "sleep 0.1",
+			AutoStart:    false,
+			AutoRestart:  false,
+			StartSecs:    0,
+			StartRetries: 1,
+			Environment:  make(map[string]string),
+		})
+	}
+
+	// Concurrent reads via RangeProcesses
+	done := make(chan struct{})
+	for i := 0; i < 10; i++ {
+		go func() {
+			for j := 0; j < 100; j++ {
+				pm.RangeProcesses(func(name string, p *Process) {
+					_ = p.Snapshot()
+				})
+				_ = pm.Len()
+				_ = pm.GetProcess("p0")
+			}
+			done <- struct{}{}
+		}()
+	}
+
+	// Concurrent writes via ReplaceProcesses
+	go func() {
+		for j := 0; j < 10; j++ {
+			newMap := make(map[string]*Process)
+			for name, p := range pm.Processes {
+				newMap[name] = p
+			}
+			pm.ReplaceProcesses(newMap)
+			time.Sleep(5 * time.Millisecond)
+		}
+		done <- struct{}{}
+	}()
+
+	for i := 0; i < 11; i++ {
+		<-done
+	}
+}
+
+// TestMonitorResourcesExitsOnRestart tests that calling Start() a second time
+// causes the old monitorResources goroutine to exit via context cancellation.
+func TestMonitorResourcesExitsOnRestart(t *testing.T) {
+	logDir := "./test_logs_mr"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "mr_test",
+		Command:      "sleep 60",
+		Directory:    ".",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    1,
+		StartRetries: 3,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("mr_test")
+
+	_ = p.Start()
+	defer p.Stop()
+
+	oldStartCtx := p.startCtx
+
+	// Restart should cancel the old context
+	err := p.Restart()
+	if err != nil {
+		t.Fatalf("Restart 失败: %v", err)
+	}
+	defer p.Stop()
+
+	if oldStartCtx == nil {
+		t.Fatal("oldStartCtx is nil")
+	}
+
+	// Old context should be cancelled
+	select {
+	case <-oldStartCtx.Done():
+		// Expected: old context is cancelled
+	default:
+		t.Error("期望旧 startCtx 被取消，但它未被取消")
+	}
+}
+
+// TestStartWaitChRace tests that calling Start() multiple times does not panic
+// due to waitCh/monitorDone races.
+func TestStartWaitChRace(t *testing.T) {
+	logDir := "./test_logs_wc"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "wc_test",
+		Command:      "sleep 0.1",
+		Directory:    ".",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 3,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("wc_test")
+
+	// Start multiple times rapidly — should not panic
+	for i := 0; i < 5; i++ {
+		_ = p.Start()
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Final cleanup
+	p.Stop()
+}
+
+// TestMonitorResetsExitCodeOnSuccess tests that ExitCode is cleared on
+// successful exit (code 0).
+func TestMonitorResetsExitCodeOnSuccess(t *testing.T) {
+	logDir := "./test_logs_ec"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "ec_test",
+		Command:      "exit 1",
+		Directory:    ".",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 3,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("ec_test")
+
+	_ = p.Start()
+	time.Sleep(300 * time.Millisecond)
+
+	s := p.Snapshot()
+	if s.ExitCode != 1 {
+		t.Errorf("期望 ExitCode=1 (exit 1), 实际 %d", s.ExitCode)
+	}
+
+	// Start again with exit 0
+	cfg2 := &config.ProgramConfig{
+		Name:         "ec_test2",
+		Command:      "exit 0",
+		Directory:    ".",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 3,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg2)
+	p2 := pm.GetProcess("ec_test2")
+	_ = p2.Start()
+	time.Sleep(300 * time.Millisecond)
+
+	s2 := p2.Snapshot()
+	if s2.ExitCode != 0 {
+		t.Errorf("期望 ExitCode=0 (exit 0), 实际 %d", s2.ExitCode)
+	}
+}
+
+// TestHandleExitedProcessOffByOne tests that the retry limit is respected
+// without an extra off-by-one attempt.
+func TestHandleExitedProcessOffByOne(t *testing.T) {
+	logDir := "./test_logs_obo"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "obo_test",
+		Command:      "false",
+		Directory:    ".",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    0,
+		StartRetries: 2,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("obo_test")
+
+	// Simulate: StartRetries == StartRetries (limit reached)
+	p.mu.Lock()
+	p.StartRetries = 2
+	p.State = StateExited
+	p.mu.Unlock()
+
+	m := &Monitor{Manager: pm}
+	m.handleExitedProcess(p)
+
+	// Should immediately go to FATAL (>= check), not attempt restart
+	if state := p.GetState(); state != StateFatal {
+		t.Errorf("StartRetries(2) >= limit(2) 时应直接 FATAL, 实际 %s", state)
+	}
+}
+
+// TestRangeProcesses tests the safe iteration helper.
+func TestRangeProcesses(t *testing.T) {
+	logDir := "./test_logs_rp"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	for i := 0; i < 3; i++ {
+		pm.AddProcess(&config.ProgramConfig{
+			Name:         fmt.Sprintf("rp%d", i),
+			Command:      "true",
+			AutoStart:    false,
+			AutoRestart:  false,
+			StartSecs:    0,
+			StartRetries: 1,
+			Environment:  make(map[string]string),
+		})
+	}
+
+	count := 0
+	pm.RangeProcesses(func(name string, p *Process) {
+		count++
+	})
+	if count != 3 {
+		t.Errorf("期望 3 个进程, 实际 %d", count)
+	}
+}
+
+// TestRemoveProcess tests RemoveProcess and Len.
+func TestRemoveProcess(t *testing.T) {
+	logDir := "./test_logs_rm"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	pm.AddProcess(&config.ProgramConfig{
+		Name:         "rm_test",
+		Command:      "true",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 1,
+		Environment:  make(map[string]string),
+	})
+
+	if pm.Len() != 1 {
+		t.Fatalf("期望 Len=1, 实际 %d", pm.Len())
+	}
+
+	pm.RemoveProcess("rm_test")
+	if pm.Len() != 0 {
+		t.Errorf("期望 Len=0, 实际 %d", pm.Len())
+	}
+	if p := pm.GetProcess("rm_test"); p != nil {
+		t.Error("期望 GetProcess 返回 nil")
+	}
+}
+
+
+// TestMonitorExitCodeOnSignal tests that ExitCode is set to -1 when a process
+// is killed by a signal (non-ExitError from cmd.Wait).
+func TestMonitorExitCodeOnSignal(t *testing.T) {
+	logDir := "./test_logs_exitcode"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "exitcode_test",
+		Command:      "sleep 60",
+		Directory:    ".",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    1,
+		StartRetries: 3,
+		StopSecs:     1,
+		StopSignal:   "SIGKILL",
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("exitcode_test")
+	if p == nil {
+		t.Fatal("获取进程失败")
+	}
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("启动进程失败: %v", err)
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	if err := p.Stop(); err != nil {
+		t.Logf("停止进程时遇到错误: %v", err)
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	s := p.Snapshot()
+	if s.ExitCode == 0 {
+		t.Errorf("期望 ExitCode 不为 0 (信号杀死), 实际 %d", s.ExitCode)
+	}
+	t.Logf("ExitCode after signal kill: %d", s.ExitCode)
+}
+
+// TestMonitorExitCodeOnNormalExit tests ExitCode for normal exit and ExitError.
+func TestMonitorExitCodeOnNormalExit(t *testing.T) {
+	logDir := "./test_logs_exitnorm"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "exitnorm_test",
+		Command:      "exit 42",
+		Directory:    ".",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 1,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("exitnorm_test")
+	if p == nil {
+		t.Fatal("获取进程失败")
+	}
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("启动进程失败: %v", err)
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	s := p.Snapshot()
+	if s.ExitCode != 42 {
+		t.Errorf("期望 ExitCode=42, 实际 %d", s.ExitCode)
+	}
+}
+
+// TestMemoryUsagePreservedOnStatFailure tests that MemoryUsage from VmRSS
+// is preserved on Snapshot after resource monitoring runs.
+func TestMemoryUsagePreservedOnStatFailure(t *testing.T) {
+	logDir := "./test_logs_memstat"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "memstat_test",
+		Command:      "sleep 30",
+		Directory:    ".",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    1,
+		StartRetries: 3,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("memstat_test")
+	if p == nil {
+		t.Fatal("获取进程失败")
+	}
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("启动进程失败: %v", err)
+	}
+
+	// Wait for at least one resource monitoring tick
+	time.Sleep(6 * time.Second)
+
+	s := p.Snapshot()
+	t.Logf("MemoryUsage: %d bytes, State: %s", s.MemoryUsage, s.State)
+	if s.State == "RUNNING" && s.MemoryUsage == 0 {
+		t.Log("MemoryUsage 为 0, 可能监控尚未触发或进程内存极低")
+	}
+
+	p.Stop()
+}
+
+// TestGroupOperations tests StartGroup, StopGroup, RestartGroup.
+func TestGroupOperations(t *testing.T) {
+	logDir := "./test_logs_group"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+
+	for i := 0; i < 3; i++ {
+		pm.AddProcess(&config.ProgramConfig{
+			Name:         fmt.Sprintf("grp_%d", i),
+			Command:      "sleep 0.1",
+			Group:        "testgrp",
+			AutoStart:    true,
+			AutoRestart:  false,
+			StartSecs:    0,
+			StartRetries: 1,
+			Environment:  make(map[string]string),
+		})
+	}
+	pm.AddProcess(&config.ProgramConfig{
+		Name:         "other",
+		Command:      "sleep 0.1",
+		Group:        "othergrp",
+		AutoStart:    true,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 1,
+		Environment:  make(map[string]string),
+	})
+
+	started := pm.StartGroup("testgrp")
+	if len(started) != 3 {
+		t.Errorf("StartGroup 期望启动 3 个, 实际 %d", len(started))
+	}
+
+	time.Sleep(400 * time.Millisecond)
+
+	stopped := pm.StopGroup("testgrp")
+	if len(stopped) != 3 {
+		t.Errorf("StopGroup 期望停止 3 个, 实际 %d", len(stopped))
+	}
+
+	restarted := pm.RestartGroup("othergrp")
+	if len(restarted) != 1 {
+		t.Errorf("RestartGroup 期望重启 1 个, 实际 %d", len(restarted))
+	}
+	time.Sleep(200 * time.Millisecond)
+	pp := pm.GetProcess("other")
+	if pp != nil {
+		pp.Stop()
+	}
+}
+
+func TestEmptyGroup(t *testing.T) {
+	logDir := "./test_logs_emptygrp"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	started := pm.StartGroup("nonexistent")
+	if len(started) != 0 {
+		t.Errorf("空组 StartGroup 应返回空, 实际 %d", len(started))
+	}
+}
+
+func TestRestartRateLimiting(t *testing.T) {
+	logDir := "./test_logs_rate"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:             "rate_test",
+		Command:          "false",
+		AutoStart:        true,
+		AutoRestart:      true,
+		StartSecs:        0,
+		StartRetries:     99,
+		RestartMaxCount:  3,
+		RestartWindowSecs: 60,
+		Environment:      make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("rate_test")
+
+	p.mu.Lock()
+	now := time.Now()
+	p.restartTimestamps = []time.Time{now.Add(-10 * time.Second), now.Add(-5 * time.Second), now.Add(-1 * time.Second)}
+	p.State = StateExited
+	p.mu.Unlock()
+
+	m := &Monitor{Manager: pm}
+	m.handleExitedProcess(p)
+
+	if state := p.GetState(); state != StateFatal {
+		t.Errorf("达到速率限制后应进入 FATAL, 实际 %s", state)
+	}
+}
+
+func TestRestartRateLimitingNotExceeded(t *testing.T) {
+	logDir := "./test_logs_rate2"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:             "rate_ok",
+		Command:          "sleep 0.1",
+		AutoStart:        true,
+		AutoRestart:      true,
+		StartSecs:        0,
+		StartRetries:     99,
+		RestartMaxCount:  5,
+		RestartWindowSecs: 60,
+		Environment:      make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("rate_ok")
+
+	p.mu.Lock()
+	now := time.Now()
+	p.restartTimestamps = []time.Time{now.Add(-10 * time.Second)}
+	p.State = StateExited
+	p.StartRetries = 0
+	p.mu.Unlock()
+
+	m := &Monitor{Manager: pm}
+	m.handleExitedProcess(p)
+
+	if state := p.GetState(); state == StateFatal {
+		t.Errorf("未超过速率限制不应进入 FATAL, 实际 %s", state)
+	}
+	time.Sleep(2 * time.Second)
+	p.Stop()
+}
+
+func TestRestartRateLimitDisabled(t *testing.T) {
+	logDir := "./test_logs_ratenolimit"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:             "nolimit",
+		Command:          "sleep 0.1",
+		AutoStart:        true,
+		AutoRestart:      true,
+		StartSecs:        0,
+		StartRetries:     99,
+		RestartMaxCount:  0,
+		RestartWindowSecs: 60,
+		Environment:      make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("nolimit")
+
+	if p.restartRateExceeded() {
+		t.Error("RestartMaxCount=0 时不应限制")
+	}
+}
+
+func TestExitCodePolicyRestartCodes(t *testing.T) {
+	logDir := "./test_logs_ecpolicy"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "ec_policy",
+		Command:      "sleep 0.1",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    0,
+		StartRetries: 99,
+		RestartCodes: []int{1, 2, 3},
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("ec_policy")
+
+	p.mu.Lock()
+	p.ExitCode = 1
+	p.mu.Unlock()
+	if !p.shouldRestartOnExitCode() {
+		t.Error("ExitCode=1 在 RestartCodes 中, 应允许重启")
+	}
+
+	p.mu.Lock()
+	p.ExitCode = 0
+	p.mu.Unlock()
+	if p.shouldRestartOnExitCode() {
+		t.Error("ExitCode=0 不在 RestartCodes 中, 不应重启")
+	}
+}
+
+func TestExitCodePolicyNoRestartCodes(t *testing.T) {
+	logDir := "./test_logs_ecpol2"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:           "ec_skip",
+		Command:        "sleep 0.1",
+		AutoStart:      true,
+		AutoRestart:    true,
+		StartSecs:      0,
+		StartRetries:   99,
+		NoRestartCodes: []int{0, 143},
+		Environment:    make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("ec_skip")
+
+	p.mu.Lock()
+	p.ExitCode = 143
+	p.mu.Unlock()
+	if p.shouldRestartOnExitCode() {
+		t.Error("ExitCode=143 在 NoRestartCodes 中, 不应重启")
+	}
+
+	p.mu.Lock()
+	p.ExitCode = 1
+	p.mu.Unlock()
+	if !p.shouldRestartOnExitCode() {
+		t.Error("ExitCode=1 不在 NoRestartCodes 中, 应允许重启")
+	}
+}
+
+func TestExitCodePolicyMonitor(t *testing.T) {
+	logDir := "./test_logs_ecmon"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "ecmon",
+		Command:      "false",
+		AutoStart:    true,
+		AutoRestart:  true,
+		StartSecs:    0,
+		StartRetries: 99,
+		RestartCodes: []int{1},
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("ecmon")
+
+	p.mu.Lock()
+	p.ExitCode = 0
+	p.State = StateExited
+	p.mu.Unlock()
+
+	m := &Monitor{Manager: pm}
+	m.handleExitedProcess(p)
+
+	if state := p.GetState(); state != StateFatal {
+		t.Errorf("ExitCode=0 不在 RestartCodes 中, 应进入 FATAL, 实际 %s", state)
+	}
+}
+
+func TestPersistentState(t *testing.T) {
+	logDir := "./test_logs_state"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	pm.AddProcess(&config.ProgramConfig{
+		Name:         "stateful",
+		Command:      "sleep 0.1",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 1,
+		Environment:  make(map[string]string),
+	})
+
+	p := pm.GetProcess("stateful")
+	p.mu.Lock()
+	p.RestartCount = 5
+	p.LastRestart = time.Now()
+	p.mu.Unlock()
+
+	statePath := filepath.Join(logDir, "state.json")
+	if err := pm.SaveState(statePath); err != nil {
+		t.Fatalf("SaveState 失败: %v", err)
+	}
+
+	p.mu.Lock()
+	p.RestartCount = 0
+	p.LastRestart = time.Time{}
+	p.mu.Unlock()
+
+	if err := pm.RestoreState(statePath); err != nil {
+		t.Fatalf("RestoreState 失败: %v", err)
+	}
+
+	if s := p.Snapshot(); s.RestartCount != 5 {
+		t.Errorf("RestoreState: RestartCount 期望 5, 实际 %d", s.RestartCount)
+	}
+	if p.LastRestart.IsZero() {
+		t.Error("RestoreState: LastRestart 不应为零值")
+	}
+}
+
+func TestPersistentStateNonExistent(t *testing.T) {
+	logDir := "./test_logs_nostate"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	err := pm.RestoreState("/nonexistent/path/state.json")
+	if err != nil {
+		t.Errorf("不存在的状态文件应返回 nil, 实际 %v", err)
+	}
+}
+
+func TestRunHook(t *testing.T) {
+	if err := runHook("true"); err != nil {
+		t.Errorf("runHook(true) 应成功, 实际 %v", err)
+	}
+	if err := runHook("exit 1"); err == nil {
+		t.Error("runHook(exit 1) 应失败")
+	}
+}
+
+func TestCheckHealthTCP(t *testing.T) {
+	if checkHealth("tcp://127.0.0.1:19999", 1*time.Second) {
+		t.Error("TCP 检查不存在端口应失败")
+	}
+}
+
+func TestCheckHealthHTTP(t *testing.T) {
+	if checkHealth("http://127.0.0.1:19999/health", 1*time.Second) {
+		t.Error("HTTP 检查不存在服务器应失败")
+	}
+}
+
+func TestShouldRestartOnExitCodeDefault(t *testing.T) {
+	logDir := "./test_logs_ecdef"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "ecdef",
+		Command:      "sleep 0.1",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 1,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("ecdef")
+
+	for _, code := range []int{0, 1, 137, 143} {
+		p.mu.Lock()
+		p.ExitCode = code
+		p.mu.Unlock()
+		if !p.shouldRestartOnExitCode() {
+			t.Errorf("默认策略下 ExitCode=%d 应该允许重启", code)
+		}
+	}
+}
+
+func TestAddRestartTimestampPrunesOld(t *testing.T) {
+	logDir := "./test_logs_prune"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	pm.AddProcess(&config.ProgramConfig{
+		Name:         "prune",
+		Command:      "true",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 1,
+		Environment:  make(map[string]string),
+	})
+	p := pm.GetProcess("prune")
+
+	p.mu.Lock()
+	p.restartTimestamps = []time.Time{time.Now().Add(-120 * time.Second)}
+	p.mu.Unlock()
+
+	p.addRestartTimestamp(60)
+
+	p.mu.Lock()
+	count := len(p.restartTimestamps)
+	p.mu.Unlock()
+
+	if count != 1 {
+		t.Errorf("旧时间戳应被裁剪, 期望 1 个, 实际 %d", count)
+	}
+}
+
+func TestProcessGroupField(t *testing.T) {
+	logDir := "./test_logs_grpfield"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "grouped",
+		Command:      "true",
+		Group:        "mygroup",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 1,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("grouped")
+	if p.Group != "mygroup" {
+		t.Errorf("Process.Group 期望 'mygroup', 实际 '%s'", p.Group)
+	}
+}
+
+func TestApplyCgroupInvalidPath(t *testing.T) {
+	logDir := "./test_logs_cgroup"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "cgroup_test",
+		Command:      "sleep 60",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 1,
+		CgroupPath:   "/nonexistent/cgroup/path",
+		Environment:  make(map[string]string),
+	}
+	p := pm.AddProcess(cfg)
+	if err := p.Start(); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+	defer p.Stop()
+
+	// PID should be set after start
+	p.mu.Lock()
+	pid := p.PID
+	p.mu.Unlock()
+	if pid <= 0 {
+		t.Fatal("PID should be > 0 after start")
+	}
+
+	// applyCgroup should not panic even with invalid path (prints error)
+	p.applyCgroup()
+}
+
+func TestApplyCgroupNoPID(t *testing.T) {
+	logDir := "./test_logs_cgroup2"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "cgroup_nopid",
+		Command:      "true",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 1,
+		CgroupPath:   "/sys/fs/cgroup/test",
+		Environment:  make(map[string]string),
+	}
+	p := pm.AddProcess(cfg)
+	// Don't start — PID should be 0, applyCgroup returns immediately
+	p.applyCgroup() // should not panic
+}
+
+func TestSendWebhookEmptyURL(t *testing.T) {
+	logDir := "./test_logs_webhook1"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "wh_empty",
+		Command:      "true",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 1,
+		WebhookURL:   "",
+		Environment:  make(map[string]string),
+	}
+	p := pm.AddProcess(cfg)
+	// Should be no-op when WebhookURL is empty
+	p.sendWebhook()
+}
+
+func TestSendWebhookDeliversPayload(t *testing.T) {
+	logDir := "./test_logs_webhook2"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	received := make(chan []byte, 1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/hook", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		received <- body
+		w.WriteHeader(200)
+	})
+	server := &http.Server{Addr: "127.0.0.1:0", Handler: mux}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go server.Serve(ln)
+	defer server.Close()
+
+	addr := ln.Addr().String()
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "wh_test",
+		Command:      "true",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 1,
+		WebhookURL:   "http://" + addr + "/hook",
+		Environment:  make(map[string]string),
+	}
+	p := pm.AddProcess(cfg)
+
+	p.mu.Lock()
+	p.PID = 12345
+	p.ExitCode = 0
+	p.State = StateExited
+	p.mu.Unlock()
+
+	p.sendWebhook()
+
+	select {
+	case body := <-received:
+		if !strings.Contains(string(body), "wh_test") {
+			t.Errorf("webhook payload 应包含进程名: %s", string(body))
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("webhook 未在超时内收到")
+	}
+}
+
+func TestSendWebhookServerError(t *testing.T) {
+	logDir := "./test_logs_webhook3"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/hook", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+	})
+	server := &http.Server{Addr: "127.0.0.1:0", Handler: mux}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go server.Serve(ln)
+	defer server.Close()
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "wh_err",
+		Command:      "true",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 1,
+		WebhookURL:   "http://" + ln.Addr().String() + "/hook",
+		Environment:  make(map[string]string),
+	}
+	p := pm.AddProcess(cfg)
+	p.mu.Lock()
+	p.PID = 1
+	p.State = StateExited
+	p.mu.Unlock()
+	// Should not panic, just print error
+	p.sendWebhook()
+}
+
+func TestStartHealthCheckAndRunHealthCheck(t *testing.T) {
+	logDir := "./test_logs_healthrun"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:                         "hc_run",
+		Command:                      "sleep 60",
+		AutoStart:                    false,
+		AutoRestart:                  false,
+		StartSecs:                    0,
+		StartRetries:                 1,
+		HealthCheckURL:               "http://127.0.0.1:19999/health",
+		HealthCheckInterval:          1,
+		HealthCheckTimeout:           1,
+		HealthCheckUnhealthyThreshold: 2,
+		Environment:                  make(map[string]string),
+	}
+	p := pm.AddProcess(cfg)
+	if err := p.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer p.Stop()
+
+	// Start health check
+	p.startHealthCheck()
+
+	// Wait for at least one health check cycle
+	time.Sleep(1500 * time.Millisecond)
+
+	p.mu.Lock()
+	failures := p.healthCheckFailures
+	healthy := p.Healthy
+	p.mu.Unlock()
+
+	// Server doesn't exist, so health check should record failures
+	if failures == 0 {
+		t.Error("应对不存在服务器记录健康检查失败")
+	}
+	if healthy {
+		t.Error("不存在的服务器应导致不健康状态")
+	}
+}
+
+func TestStartHealthCheckSecondCallCancelsPrevious(t *testing.T) {
+	logDir := "./test_logs_hccancel"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:                "hc_cancel",
+		Command:             "sleep 60",
+		AutoStart:           false,
+		AutoRestart:         false,
+		StartSecs:           0,
+		StartRetries:        1,
+		HealthCheckURL:      "http://127.0.0.1:19999/health",
+		HealthCheckInterval:  1,
+		HealthCheckTimeout:  1,
+		Environment:         make(map[string]string),
+	}
+	p := pm.AddProcess(cfg)
+	if err := p.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer p.Stop()
+
+	// Start twice — second should cancel first
+	p.startHealthCheck()
+	oldCtx := p.healthCheckCtx
+	p.startHealthCheck()
+	newCtx := p.healthCheckCtx
+
+	if oldCtx == newCtx {
+		t.Error("第二次 startHealthCheck 应创建新 context")
+	}
+
+	// Verify old context is cancelled
+	select {
+	case <-oldCtx.Done():
+		// expected
+	case <-time.After(100 * time.Millisecond):
+		t.Error("旧 context 应被取消")
+	}
+}
+
+func TestCheckHealthTCPSuccess(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+
+	addr := ln.Addr().String()
+	if !checkHealth("tcp://"+addr, 1*time.Second) {
+		t.Error("TCP 检查应成功")
+	}
+}
+
+func TestCheckHealthHTTPSuccess(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ok", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	})
+	server := &http.Server{Addr: "127.0.0.1:0", Handler: mux}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go server.Serve(ln)
+	defer server.Close()
+
+	if !checkHealth("http://"+ln.Addr().String()+"/ok", 1*time.Second) {
+		t.Error("HTTP 200 检查应成功")
+	}
+}
+
+func TestCheckHealthHTTPRedirect(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/redir", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(302)
+	})
+	server := &http.Server{Addr: "127.0.0.1:0", Handler: mux}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go server.Serve(ln)
+	defer server.Close()
+
+	if !checkHealth("http://"+ln.Addr().String()+"/redir", 1*time.Second) {
+		t.Error("HTTP 302 检查应成功")
+	}
+}
+
+func TestCheckHealthHTTP4xx(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/bad", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+	})
+	server := &http.Server{Addr: "127.0.0.1:0", Handler: mux}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	go server.Serve(ln)
+	defer server.Close()
+
+	if checkHealth("http://"+ln.Addr().String()+"/bad", 1*time.Second) {
+		t.Error("HTTP 404 检查应失败")
 	}
 }

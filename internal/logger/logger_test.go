@@ -579,3 +579,159 @@ func TestGetProcessLogWritersSamePath(t *testing.T) {
 		t.Errorf("日志文件应同时包含 stdout 和 stderr 内容: %s", content)
 	}
 }
+
+// TestCountingWriterConcurrent tests that concurrent writes to countingWriter
+// don't race when tracking bytesWritten via sync/atomic.
+func TestCountingWriterConcurrent(t *testing.T) {
+	logDir := "./test_logs_cwcon"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logger, err := NewLogger(logDir, 50*1024*1024, 10, false)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logger.Close()
+
+	cfg := &config.ProgramConfig{
+		Name:                 "cw_test",
+		StdoutLogMaxBytes:    50 * 1024 * 1024,
+		StderrLogMaxBytes:    50 * 1024 * 1024,
+		StdoutLogBackupCount: 10,
+		StderrLogBackupCount: 10,
+	}
+	stdoutW, _, err := logger.GetProcessLogWriters("cw_test", cfg)
+	if err != nil {
+		t.Fatalf("GetProcessLogWriters 失败: %v", err)
+	}
+
+	done := make(chan struct{})
+	for i := 0; i < 10; i++ {
+		go func() {
+			for j := 0; j < 100; j++ {
+				stdoutW.Write([]byte("concurrent write test data\n"))
+			}
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < 10; i++ {
+		<-done
+	}
+}
+
+// TestRotateLogsSharedWriter tests that RotateLogs handles shared writers
+// without double-rotating the same file.
+func TestRotateLogsSharedWriter(t *testing.T) {
+	logDir := "./test_logs_sw"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logger, err := NewLogger(logDir, 1024, 5, false)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logger.Close()
+
+	cfg := &config.ProgramConfig{
+		Name:                 "sw_test",
+		StdoutLogMaxBytes:    1024,
+		StderrLogMaxBytes:    1024,
+		StdoutLogBackupCount: 3,
+		StderrLogBackupCount: 3,
+	}
+	stdoutW, stderrW, err := logger.GetProcessLogWriters("sw_test", cfg)
+	if err != nil {
+		t.Fatalf("GetProcessLogWriters 失败: %v", err)
+	}
+	if stdoutW != stderrW {
+		t.Fatal("期望 stdout 和 stderr 共享同一个 writer")
+	}
+
+	stdoutW.Write([]byte(strings.Repeat("A", 500)))
+	stderrW.Write([]byte(strings.Repeat("B", 500)))
+
+	if err := logger.RotateLogs(); err != nil {
+		t.Errorf("RotateLogs 失败: %v", err)
+	}
+
+	// After rotation, old writers are closed; acquire fresh ones
+	newW, _, err := logger.GetProcessLogWriters("sw_test", cfg)
+	if err != nil {
+		t.Fatalf("旋转后获取新 writer 失败: %v", err)
+	}
+	_, err = newW.Write([]byte("after rotation\n"))
+	if err != nil {
+		t.Errorf("旋转后写入失败: %v", err)
+	}
+}
+
+
+// TestRotateLogFallback tests the fallback path when no active writers exist.
+func TestRotateLogFallback(t *testing.T) {
+	logDir := "./test_logs_fallback"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logger, err := NewDefaultLogger(logDir)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logger.Close()
+
+	// Create a log file on disk without an active writer
+	defaultPath := filepath.Join(logDir, "fallback_test.log")
+	if err := os.WriteFile(defaultPath, []byte("test content\n"), 0644); err != nil {
+		t.Fatalf("创建测试日志文件失败: %v", err)
+	}
+
+	// rotateLog should handle the fallback path (no active writers)
+	if err := logger.rotateLog("fallback_test"); err != nil {
+		t.Errorf("rotateLog fallback 应成功, 返回: %v", err)
+	}
+
+	// Verify the old file was rotated away from defaultPath
+	files, _ := os.ReadDir(logDir)
+	rotatedFound := false
+	for _, f := range files {
+		if !f.IsDir() && strings.HasPrefix(f.Name(), "fallback_test.log.") {
+			rotatedFound = true
+			break
+		}
+	}
+	if !rotatedFound {
+		t.Error("期望找到轮转后的文件 (带时间戳后缀)")
+	}
+}
+
+// TestRotateLogFallbackCompressEnabled tests fallback rotation with compression.
+func TestRotateLogFallbackCompressEnabled(t *testing.T) {
+	logDir := "./test_logs_fallback_gz"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logger, err := NewLogger(logDir, 50*1024*1024, 10, true)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logger.Close()
+
+	defaultPath := filepath.Join(logDir, "fallback_gz_test.log")
+	os.WriteFile(defaultPath, []byte("compressible content\n"), 0644)
+
+	if err := logger.rotateLog("fallback_gz_test"); err != nil {
+		t.Errorf("rotateLog fallback (compress) 应成功, 返回: %v", err)
+	}
+
+	// Should have created a .gz file
+	files, _ := os.ReadDir(logDir)
+	gzFound := false
+	for _, f := range files {
+		if !f.IsDir() && strings.HasSuffix(f.Name(), ".gz") {
+			gzFound = true
+			break
+		}
+	}
+	if !gzFound {
+		t.Error("期望找到压缩后的 .gz 文件")
+	}
+}

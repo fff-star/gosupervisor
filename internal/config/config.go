@@ -14,52 +14,59 @@ import (
 
 // ProgramConfig 表示单个进程的配置
 type ProgramConfig struct {
-	// Name 进程名称
-	Name string
-	// Command 要执行的命令
-	Command string
-	// Directory 命令执行的工作目录
-	Directory string
-	// AutoStart 是否自动启动
-	AutoStart bool
-	// AutoRestart 是否自动重启
-	AutoRestart bool
-	// StartSecs 启动后等待多少秒确认进程正常运行
-	StartSecs int
-	// StartRetries 启动失败后重试的次数
-	StartRetries int
-	// StopSecs 停止进程前等待的秒数
-	StopSecs int
-	// StopSignal 停止信号
-	StopSignal string
-	// User 以哪个用户身份运行进程
-	User string
-	// Environment 环境变量
-	Environment map[string]string
-	// RedirectStdout 是否重定向标准输出到日志
-	RedirectStdout bool
-	// RedirectStderr 是否重定向标准错误到日志
-	RedirectStderr bool
-	// StdoutLogFile 标准输出日志文件路径
-	StdoutLogFile string
-	// StderrLogFile 标准错误日志文件路径
-	StderrLogFile string
-	// StdoutLogMaxBytes 标准输出日志文件最大大小
-	StdoutLogMaxBytes int64
-	// StdoutLogBackupCount 标准输出日志文件备份数量
-	StdoutLogBackupCount int
-	// StderrLogMaxBytes 标准错误日志文件最大大小
-	StderrLogMaxBytes int64
-	// StderrLogBackupCount 标准错误日志文件备份数量
-	StderrLogBackupCount int
-	// Priority 启动优先级
-	Priority int
-	// Umask 文件权限掩码
-	Umask int
-	// ServerURL 服务器URL
-	ServerURL string
-	// DependsOn 依赖的其他进程
-	DependsOn []string
+	Name                 string            `yaml:"name" json:"name"`
+	Command              string            `yaml:"command" json:"command"`
+	Directory            string            `yaml:"directory" json:"directory"`
+	AutoStart            bool              `yaml:"autostart" json:"autostart"`
+	AutoRestart          bool              `yaml:"autorestart" json:"autorestart"`
+	StartSecs            int               `yaml:"startsecs" json:"startsecs"`
+	StartRetries         int               `yaml:"startretries" json:"startretries"`
+	StopSecs             int               `yaml:"stopsecs" json:"stopsecs"`
+	StopSignal           string            `yaml:"stopsignal" json:"stopsignal"`
+	User                 string            `yaml:"user" json:"user"`
+	Environment          map[string]string `yaml:"environment" json:"environment"`
+	RedirectStdout       bool              `yaml:"redirectstdout" json:"redirectstdout"`
+	RedirectStderr       bool              `yaml:"redirectstderr" json:"redirectstderr"`
+	StdoutLogFile        string            `yaml:"stdoutlogfile" json:"stdoutlogfile"`
+	StderrLogFile        string            `yaml:"stderrlogfile" json:"stderrlogfile"`
+	StdoutLogMaxBytes    int64             `yaml:"stdoutlogmaxbytes" json:"stdoutlogmaxbytes"`
+	StdoutLogBackupCount int               `yaml:"stdoutlogbackupcount" json:"stdoutlogbackupcount"`
+	StderrLogMaxBytes    int64             `yaml:"stderrlogmaxbytes" json:"stderrlogmaxbytes"`
+	StderrLogBackupCount int               `yaml:"stderrlogbackupcount" json:"stderrlogbackupcount"`
+	Priority             int               `yaml:"priority" json:"priority"`
+	Umask                int               `yaml:"umask" json:"umask"`
+	DependsOn            []string          `yaml:"dependson" json:"dependson"`
+	Group                string            `yaml:"group" json:"group"`
+
+	// Health checks
+	HealthCheckURL                string  `yaml:"healthcheckurl" json:"healthcheckurl"`
+	HealthCheckInterval           int     `yaml:"healthcheckinterval" json:"healthcheckinterval"`
+	HealthCheckTimeout            int     `yaml:"healthchecktimeout" json:"healthchecktimeout"`
+	HealthCheckUnhealthyThreshold int     `yaml:"healthcheckunhealthythreshold" json:"healthcheckunhealthythreshold"`
+	HealthCheckRestart            bool    `yaml:"healthcheckrestart" json:"healthcheckrestart"`
+	CPUThresholdPercent           float64 `yaml:"cputhresholdpercent" json:"cputhresholdpercent"`
+	MemoryThresholdBytes          int64   `yaml:"memorythresholdbytes" json:"memorythresholdbytes"`
+
+	// Event hooks
+	PreStartScript string `yaml:"prestartscript" json:"prestartscript"`
+	PostStopScript string `yaml:"poststopscript" json:"poststopscript"`
+
+	// Restart rate limiting
+	RestartMaxCount  int `yaml:"restartmaxcount" json:"restartmaxcount"`
+	RestartWindowSecs int `yaml:"restartwindowsecs" json:"restartwindowsecs"`
+
+	// Exit code-based restart policy
+	RestartCodes   []int `yaml:"restartcodes" json:"restartcodes"`
+	NoRestartCodes []int `yaml:"norestartcodes" json:"norestartcodes"`
+
+	// Cgroup v2
+	CgroupPath string `yaml:"cgrouppath" json:"cgrouppath"`
+
+	// Webhook notifications
+	WebhookURL string `yaml:"webhookurl" json:"webhookurl"`
+
+	// Stdin
+	StdinFile string `yaml:"stdinfile" json:"stdinfile"`
 }
 
 // Config 表示整个配置文件的结构
@@ -133,23 +140,32 @@ func loadINIConfig(configPath string) (*Config, error) {
 			if strings.HasPrefix(section, "program:") {
 				programName := strings.TrimPrefix(section, "program:")
 				currentProgram = &ProgramConfig{
-					Name:                 programName,
-					AutoStart:            true,
-					AutoRestart:          true,
-					StartSecs:            1,
-					StartRetries:         3,
-					StopSecs:             10,
-					StopSignal:           "SIGTERM",
-					Environment:          make(map[string]string),
-					RedirectStdout:       true,
-					RedirectStderr:       true,
-					StdoutLogMaxBytes:    50 * 1024 * 1024, // 50MB
-					StdoutLogBackupCount: 10,
-					StderrLogMaxBytes:    50 * 1024 * 1024, // 50MB
-					StderrLogBackupCount: 10,
-					Priority:             999,
-					Umask:                022,
-					DependsOn:            []string{},
+					Name:                         programName,
+					AutoStart:                    true,
+					AutoRestart:                  true,
+					StartSecs:                    1,
+					StartRetries:                 3,
+					StopSecs:                     10,
+					StopSignal:                   "SIGTERM",
+					Environment:                  make(map[string]string),
+					RedirectStdout:               true,
+					RedirectStderr:               true,
+					StdoutLogMaxBytes:            50 * 1024 * 1024, // 50MB
+					StdoutLogBackupCount:         10,
+					StderrLogMaxBytes:            50 * 1024 * 1024, // 50MB
+					StderrLogBackupCount:         10,
+					Priority:                     999,
+					Umask:                        022,
+					DependsOn:                    []string{},
+					RestartCodes:                 []int{},
+					NoRestartCodes:               []int{},
+					HealthCheckInterval:           30,
+					HealthCheckTimeout:            5,
+					HealthCheckUnhealthyThreshold: 3,
+					HealthCheckRestart:            false,
+					CPUThresholdPercent:           90.0,
+					MemoryThresholdBytes:          2 * 1024 * 1024 * 1024, // 2GB
+					RestartWindowSecs:             60,
 				}
 				config.Programs[programName] = currentProgram
 			}
@@ -212,8 +228,6 @@ func loadINIConfig(configPath string) (*Config, error) {
 					fmt.Sscanf(value, "%d", &currentProgram.Priority)
 				case "umask":
 					fmt.Sscanf(value, "%d", &currentProgram.Umask)
-				case "serverurl":
-					currentProgram.ServerURL = value
 				case "dependson":
 					// 解析依赖关系，格式如: prog1,prog2,prog3
 					deps := strings.Split(value, ",")
@@ -223,6 +237,48 @@ func loadINIConfig(configPath string) (*Config, error) {
 							currentProgram.DependsOn = append(currentProgram.DependsOn, dep)
 						}
 					}
+				case "group":
+					currentProgram.Group = value
+				case "healthcheckurl":
+					currentProgram.HealthCheckURL = value
+				case "healthcheckinterval":
+					fmt.Sscanf(value, "%d", &currentProgram.HealthCheckInterval)
+				case "healthchecktimeout":
+					fmt.Sscanf(value, "%d", &currentProgram.HealthCheckTimeout)
+				case "healthcheckunhealthythreshold":
+					fmt.Sscanf(value, "%d", &currentProgram.HealthCheckUnhealthyThreshold)
+				case "healthcheckrestart":
+					currentProgram.HealthCheckRestart = value == "true"
+				case "cputhresholdpercent":
+					fmt.Sscanf(value, "%f", &currentProgram.CPUThresholdPercent)
+				case "memorythresholdbytes":
+					fmt.Sscanf(value, "%d", &currentProgram.MemoryThresholdBytes)
+				case "prestartscript":
+					currentProgram.PreStartScript = value
+				case "poststopscript":
+					currentProgram.PostStopScript = value
+				case "restartmaxcount":
+					fmt.Sscanf(value, "%d", &currentProgram.RestartMaxCount)
+				case "restartwindowsecs":
+					fmt.Sscanf(value, "%d", &currentProgram.RestartWindowSecs)
+				case "restartcodes":
+					for _, s := range strings.Split(value, ",") {
+						var code int
+						fmt.Sscanf(strings.TrimSpace(s), "%d", &code)
+						currentProgram.RestartCodes = append(currentProgram.RestartCodes, code)
+					}
+				case "norestartcodes":
+					for _, s := range strings.Split(value, ",") {
+						var code int
+						fmt.Sscanf(strings.TrimSpace(s), "%d", &code)
+						currentProgram.NoRestartCodes = append(currentProgram.NoRestartCodes, code)
+					}
+				case "cgrouppath":
+					currentProgram.CgroupPath = value
+				case "webhookurl":
+					currentProgram.WebhookURL = value
+				case "stdinfile":
+					currentProgram.StdinFile = value
 				}
 			}
 		}
@@ -261,6 +317,10 @@ func applyDefaults(programs map[string]*ProgramConfig, rawPrograms map[string]ma
 	}
 
 	for name, prog := range programs {
+		if prog == nil {
+			prog = &ProgramConfig{Name: name}
+			programs[name] = prog
+		}
 		if prog.Name == "" {
 			prog.Name = name
 		}
@@ -269,6 +329,12 @@ func applyDefaults(programs map[string]*ProgramConfig, rawPrograms map[string]ma
 		}
 		if prog.DependsOn == nil {
 			prog.DependsOn = []string{}
+		}
+		if prog.RestartCodes == nil {
+			prog.RestartCodes = []int{}
+		}
+		if prog.NoRestartCodes == nil {
+			prog.NoRestartCodes = []int{}
 		}
 
 		raw := rawPrograms[name]
@@ -302,6 +368,24 @@ func applyDefaults(programs map[string]*ProgramConfig, rawPrograms map[string]ma
 		}
 		if prog.Umask == 0 {
 			prog.Umask = 022
+		}
+		if prog.HealthCheckInterval == 0 {
+			prog.HealthCheckInterval = 30
+		}
+		if prog.HealthCheckTimeout == 0 {
+			prog.HealthCheckTimeout = 5
+		}
+		if prog.HealthCheckUnhealthyThreshold == 0 {
+			prog.HealthCheckUnhealthyThreshold = 3
+		}
+		if prog.CPUThresholdPercent == 0 {
+			prog.CPUThresholdPercent = 90.0
+		}
+		if prog.MemoryThresholdBytes == 0 {
+			prog.MemoryThresholdBytes = 2 * 1024 * 1024 * 1024 // 2GB
+		}
+		if prog.RestartWindowSecs == 0 {
+			prog.RestartWindowSecs = 60
 		}
 
 		// Bool defaults: use raw map to distinguish "absent" from "explicitly false"
@@ -349,4 +433,20 @@ func loadJSONConfig(configPath string) (*Config, error) {
 	}
 
 	return applyDefaults(jsonConfig.Programs, rawPrograms)
+}
+
+// ValidateConfig validates config consistency — missing DependsOn references, etc.
+func (c *Config) ValidateConfig() []string {
+	var warnings []string
+	for name, prog := range c.Programs {
+		for _, dep := range prog.DependsOn {
+			if _, ok := c.Programs[dep]; !ok {
+				warnings = append(warnings, fmt.Sprintf("进程 %s 依赖了不存在的进程 %s", name, dep))
+			}
+		}
+		if prog.Name == "" {
+			warnings = append(warnings, fmt.Sprintf("进程 %s 配置缺少 name 字段", name))
+		}
+	}
+	return warnings
 }

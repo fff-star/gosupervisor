@@ -12,6 +12,7 @@ import (
 	"gosupervisor/internal/logger"
 	"gosupervisor/internal/metrics"
 	"gosupervisor/internal/process"
+	"gosupervisor/internal/socket"
 	"gosupervisor/internal/web"
 )
 
@@ -23,16 +24,25 @@ const (
 )
 
 func main() {
+	var exitCode int
+	defer func() { os.Exit(exitCode) }()
+
 	// 解析命令行参数
 	configPath := flag.String("c", "gosupervisor.ini", "配置文件路径")
 	logDir := flag.String("l", "./logs", "日志目录路径")
 	command := flag.String("cmd", "start", "命令: start, stop, restart, status, reload, update")
 	processName := flag.String("p", "", "进程名称")
+	groupName := flag.String("g", "", "进程组名称")
 	webEnable := flag.Bool("web", false, "启用Web界面")
 	webAddr := flag.String("web-addr", ":8080", "Web界面地址")
+	webUser := flag.String("web-user", "", "Web界面HTTP Basic Auth用户名")
+	webPass := flag.String("web-pass", "", "Web界面HTTP Basic Auth密码")
+	webAPIAuth := flag.Bool("web-api-auth", false, "启用API v1的HTTP Basic Auth认证")
 	metricsEnable := flag.Bool("metrics", false, "启用Prometheus指标导出")
 	metricsAddr := flag.String("metrics-addr", ":9090", "Prometheus指标导出地址")
+	socketPath := flag.String("socket", "", "Unix socket CLI 路径")
 	daemonMode := flag.Bool("d", false, "以守护进程模式运行")
+	stateFile := flag.String("state-file", "", "持久化状态文件路径")
 	testConfig := flag.Bool("t", false, "测试配置文件有效性")
 	version := flag.Bool("version", false, "显示版本信息")
 	flag.Parse()
@@ -45,9 +55,20 @@ func main() {
 
 	// 处理配置文件测试
 	if *testConfig {
-		if err := testConfiguration(*configPath); err != nil {
+		cfg, err := config.LoadConfig(*configPath)
+		if err != nil {
 			fmt.Printf("配置文件测试失败: %v\n", err)
-			os.Exit(1)
+			exitCode = 1
+			return
+		}
+		warnings := cfg.ValidateConfig()
+		if len(warnings) > 0 {
+			fmt.Println("配置警告:")
+			for _, w := range warnings {
+				fmt.Printf("  - %s\n", w)
+			}
+			exitCode = 1
+			return
 		}
 		fmt.Println("配置文件测试通过!")
 		os.Exit(0)
@@ -57,14 +78,21 @@ func main() {
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
 		fmt.Printf("加载配置文件失败: %v\n", err)
-		os.Exit(1)
+		exitCode = 1
+		return
+	}
+
+	// Validate config
+	for _, warn := range cfg.ValidateConfig() {
+		fmt.Printf("配置警告: %s\n", warn)
 	}
 
 	// 处理守护进程模式
 	if *daemonMode {
 		if err := runAsDaemon(); err != nil {
 			fmt.Printf("启动守护进程失败: %v\n", err)
-			os.Exit(1)
+			exitCode = 1
+			return
 		}
 	}
 
@@ -72,7 +100,8 @@ func main() {
 	logManager, err := logger.NewDefaultLogger(*logDir)
 	if err != nil {
 		fmt.Printf("初始化日志管理器失败: %v\n", err)
-		os.Exit(1)
+		exitCode = 1
+		return
 	}
 	defer logManager.Close()
 
@@ -87,11 +116,18 @@ func main() {
 	done := make(chan struct{})
 
 	// 启动信号处理协程
-	go handleSignals(sigChan, done, processManager, configPath, logManager)
+	go handleSignals(sigChan, done, processManager, configPath, logManager, stateFile)
 
 	// 添加进程
 	for _, programCfg := range cfg.Programs {
 		processManager.AddProcess(programCfg)
+	}
+
+	// Restore persistent state if configured
+	if *stateFile != "" {
+		if err := processManager.RestoreState(*stateFile); err != nil {
+			fmt.Printf("恢复进程状态失败: %v\n", err)
+		}
 	}
 
 	// 初始化监控器
@@ -102,16 +138,21 @@ func main() {
 	// 处理命令
 	switch *command {
 	case "start":
-		if *processName != "" {
+		if *groupName != "" {
+			started := processManager.StartGroup(*groupName)
+			fmt.Printf("组 %s 中启动了 %d 个进程\n", *groupName, len(started))
+		} else if *processName != "" {
 			// 启动指定进程
 			p := processManager.GetProcess(*processName)
 			if p == nil {
 				fmt.Printf("进程 %s 不存在\n", *processName)
-				os.Exit(1)
+				exitCode = 1
+				return
 			}
 			if err := p.Start(); err != nil {
 				fmt.Printf("启动进程 %s 失败: %v\n", *processName, err)
-				os.Exit(1)
+				exitCode = 1
+				return
 			}
 			fmt.Printf("进程 %s 启动成功\n", *processName)
 		} else {
@@ -119,12 +160,24 @@ func main() {
 			processManager.StartAll()
 			fmt.Println("所有进程启动成功")
 
+			// 如果启用了Unix socket CLI
+			if *socketPath != "" {
+				socketServer := socket.NewSocketServer(processManager)
+				if err := socketServer.Start(*socketPath); err != nil {
+					fmt.Printf("启动Unix socket CLI失败: %v\n", err)
+					exitCode = 1
+					return
+				}
+				defer socketServer.Stop()
+			}
+
 			// 如果启用了Web界面，启动Web服务器
 			if *webEnable {
-				webServer, err := web.NewWebServer(processManager, *logDir)
+				webServer, err := web.NewWebServerWithAuth(processManager, *logDir, *webUser, *webPass, *webAPIAuth)
 				if err != nil {
 					fmt.Printf("初始化Web服务器失败: %v\n", err)
-					os.Exit(1)
+					exitCode = 1
+					return
 				}
 
 				// 在goroutine中启动Web服务器
@@ -155,16 +208,21 @@ func main() {
 			<-done
 		}
 	case "stop":
-		if *processName != "" {
+		if *groupName != "" {
+			stopped := processManager.StopGroup(*groupName)
+			fmt.Printf("组 %s 中停止了 %d 个进程\n", *groupName, len(stopped))
+		} else if *processName != "" {
 			// 停止指定进程
 			p := processManager.GetProcess(*processName)
 			if p == nil {
 				fmt.Printf("进程 %s 不存在\n", *processName)
-				os.Exit(1)
+				exitCode = 1
+				return
 			}
 			if err := p.Stop(); err != nil {
 				fmt.Printf("停止进程 %s 失败: %v\n", *processName, err)
-				os.Exit(1)
+				exitCode = 1
+				return
 			}
 			fmt.Printf("进程 %s 停止成功\n", *processName)
 		} else {
@@ -173,16 +231,21 @@ func main() {
 			fmt.Println("所有进程停止成功")
 		}
 	case "restart":
-		if *processName != "" {
+		if *groupName != "" {
+			restarted := processManager.RestartGroup(*groupName)
+			fmt.Printf("组 %s 中重启了 %d 个进程\n", *groupName, len(restarted))
+		} else if *processName != "" {
 			// 重启指定进程
 			p := processManager.GetProcess(*processName)
 			if p == nil {
 				fmt.Printf("进程 %s 不存在\n", *processName)
-				os.Exit(1)
+				exitCode = 1
+				return
 			}
 			if err := p.Restart(); err != nil {
 				fmt.Printf("重启进程 %s 失败: %v\n", *processName, err)
-				os.Exit(1)
+				exitCode = 1
+				return
 			}
 			fmt.Printf("进程 %s 重启成功\n", *processName)
 		} else {
@@ -201,7 +264,8 @@ func main() {
 			p := processManager.GetProcess(*processName)
 			if p == nil {
 				fmt.Printf("进程 %s 不存在\n", *processName)
-				os.Exit(1)
+				exitCode = 1
+				return
 			}
 			printProcessStatus(p)
 		} else {
@@ -215,7 +279,8 @@ func main() {
 		// 重新加载配置
 		if err := reloadConfiguration(processManager, *configPath, logManager); err != nil {
 			fmt.Printf("重新加载配置失败: %v\n", err)
-			os.Exit(1)
+			exitCode = 1
+			return
 		}
 		fmt.Println("配置重新加载成功")
 	case "update":
@@ -224,16 +289,19 @@ func main() {
 			// 更新指定进程
 			if err := updateProcessConfig(processManager, *configPath, *processName, logManager); err != nil {
 				fmt.Printf("更新进程配置失败: %v\n", err)
-				os.Exit(1)
+				exitCode = 1
+				return
 			}
 			fmt.Printf("进程 %s 配置更新成功\n", *processName)
 		} else {
 			fmt.Println("更新命令需要指定进程名称")
-			os.Exit(1)
+			exitCode = 1
+			return
 		}
 	default:
 		fmt.Printf("未知命令: %s\n", *command)
-		os.Exit(1)
+		exitCode = 1
+		return
 	}
 }
 
@@ -260,12 +328,6 @@ func printVersion() {
 	fmt.Printf("%s version %s\n", ProgramName, Version)
 	fmt.Println("Go-based process supervisor")
 	fmt.Println("Copyright (c) 2024 gosupervisor team")
-}
-
-// testConfiguration 测试配置文件有效性
-func testConfiguration(configPath string) error {
-	_, err := config.LoadConfig(configPath)
-	return err
 }
 
 // runAsDaemon 以守护进程模式运行
@@ -308,7 +370,7 @@ func runAsDaemon() error {
 }
 
 // handleSignals 处理系统信号
-func handleSignals(sigChan chan os.Signal, done chan struct{}, processManager *process.ProcessManager, configPath *string, logManager *logger.Logger) {
+func handleSignals(sigChan chan os.Signal, done chan struct{}, processManager *process.ProcessManager, configPath *string, logManager *logger.Logger, stateFile *string) {
 	for {
 		sig := <-sigChan
 		switch sig {
@@ -316,6 +378,9 @@ func handleSignals(sigChan chan os.Signal, done chan struct{}, processManager *p
 			// 处理终止信号
 			logManager.Info("收到终止信号，正在停止所有进程...")
 			processManager.StopAll()
+			if *stateFile != "" {
+				processManager.SaveState(*stateFile)
+			}
 			logManager.Info("所有进程已停止，正在退出...")
 			close(done)
 			return

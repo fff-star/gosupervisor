@@ -3,6 +3,7 @@ package metrics
 import (
 	"fmt"
 	"net/http"
+	"runtime"
 	"sync"
 	"time"
 
@@ -18,15 +19,26 @@ type MetricsManager struct {
 	registry       *prometheus.Registry
 
 	// 指标定义
-	processCount    prometheus.Gauge
-	processStatus   *prometheus.GaugeVec
-	processUptime   *prometheus.GaugeVec
-	processRestarts *prometheus.GaugeVec
-	processCPUUsage *prometheus.GaugeVec
-	processMemUsage *prometheus.GaugeVec
+	processCount         prometheus.Gauge
+	processStatus        *prometheus.GaugeVec
+	processUptime        *prometheus.GaugeVec
+	processRestarts      *prometheus.CounterVec
+	processCPUUsage      *prometheus.GaugeVec
+	processMemUsage      *prometheus.GaugeVec
+	healthCheckStatus    *prometheus.GaugeVec
+	healthCheckFailures  *prometheus.CounterVec
+	supervisorUptime     prometheus.Gauge
+	supervisorGoroutines prometheus.Gauge
+	supervisorMemory     prometheus.Gauge
+	configReloads        prometheus.Counter
+
+	// Track previous restart counts for CounterVec delta
+	prevRestarts map[string]float64
+	startTime    time.Time
 
 	// 内部状态
-	mu sync.Mutex
+	mu   sync.Mutex
+	stop chan struct{}
 }
 
 // NewMetricsManager 创建新的指标管理器
@@ -36,6 +48,9 @@ func NewMetricsManager(processManager *process.ProcessManager) *MetricsManager {
 	mm := &MetricsManager{
 		processManager: processManager,
 		registry:       registry,
+		prevRestarts:   make(map[string]float64),
+		startTime:      time.Now(),
+		stop:           make(chan struct{}),
 	}
 
 	// 注册指标
@@ -64,8 +79,8 @@ func (mm *MetricsManager) registerMetrics() {
 		Help: "进程运行时间（秒）",
 	}, []string{"name"})
 
-	// 进程重启次数
-	mm.processRestarts = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	// 进程重启次数 (CounterVec for proper rate() support)
+	mm.processRestarts = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "gosupervisor_process_restarts_total",
 		Help: "进程重启总次数",
 	}, []string{"name"})
@@ -82,6 +97,42 @@ func (mm *MetricsManager) registerMetrics() {
 		Help: "进程内存使用量（字节）",
 	}, []string{"name"})
 
+	// 健康检查状态 (1=healthy, 0=unhealthy)
+	mm.healthCheckStatus = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "gosupervisor_healthcheck_status",
+		Help: "进程健康检查状态 (1=healthy, 0=unhealthy)",
+	}, []string{"name"})
+
+	// 健康检查失败次数
+	mm.healthCheckFailures = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "gosupervisor_healthcheck_failures_total",
+		Help: "进程健康检查失败总次数",
+	}, []string{"name"})
+
+	// Supervisor 运行时间
+	mm.supervisorUptime = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "gosupervisor_uptime_seconds",
+		Help: "Supervisor自身运行时间（秒）",
+	})
+
+	// Supervisor goroutine 数量
+	mm.supervisorGoroutines = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "gosupervisor_goroutines",
+		Help: "当前goroutine数量",
+	})
+
+	// Supervisor 内存使用量
+	mm.supervisorMemory = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "gosupervisor_memory_bytes",
+		Help: "Supervisor自身内存使用量（字节）",
+	})
+
+	// 配置重载次数
+	mm.configReloads = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "gosupervisor_config_reloads_total",
+		Help: "配置重载总次数",
+	})
+
 	// 注册到注册表
 	mm.registry.MustRegister(
 		mm.processCount,
@@ -90,6 +141,12 @@ func (mm *MetricsManager) registerMetrics() {
 		mm.processRestarts,
 		mm.processCPUUsage,
 		mm.processMemUsage,
+		mm.healthCheckStatus,
+		mm.healthCheckFailures,
+		mm.supervisorUptime,
+		mm.supervisorGoroutines,
+		mm.supervisorMemory,
+		mm.configReloads,
 	)
 }
 
@@ -98,14 +155,19 @@ func (mm *MetricsManager) UpdateMetrics() {
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
 
-	// 更新进程数量
-	mm.processCount.Set(float64(len(mm.processManager.Processes)))
+	mm.processCount.Set(float64(mm.processManager.Len()))
 
-	// 更新每个进程的指标
-	for name, proc := range mm.processManager.Processes {
+	// Supervisor self metrics
+	mm.supervisorUptime.Set(time.Since(mm.startTime).Seconds())
+	mm.supervisorGoroutines.Set(float64(runtime.NumGoroutine()))
+
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	mm.supervisorMemory.Set(float64(m.Alloc))
+
+	mm.processManager.RangeProcesses(func(name string, proc *process.Process) {
 		s := proc.Snapshot()
 
-		// 进程状态
 		var status float64
 		switch s.State {
 		case process.StateStopped:
@@ -123,7 +185,6 @@ func (mm *MetricsManager) UpdateMetrics() {
 		}
 		mm.processStatus.WithLabelValues(name).Set(status)
 
-		// 进程运行时间
 		if s.State == process.StateRunning {
 			uptime := time.Since(s.StartTime).Seconds()
 			mm.processUptime.WithLabelValues(name).Set(uptime)
@@ -131,36 +192,64 @@ func (mm *MetricsManager) UpdateMetrics() {
 			mm.processUptime.WithLabelValues(name).Set(0)
 		}
 
-		// 进程重启次数
-		mm.processRestarts.WithLabelValues(name).Set(float64(s.RestartCount))
+		// CounterVec: increment by delta from previous value
+		current := float64(s.RestartCount)
+		prev := mm.prevRestarts[name]
+		if current > prev {
+			delta := current - prev
+			mm.processRestarts.WithLabelValues(name).Add(delta)
+		}
+		mm.prevRestarts[name] = current
 
-		// 进程CPU使用率
 		mm.processCPUUsage.WithLabelValues(name).Set(s.CPUUsage)
-
-		// 进程内存使用量
 		mm.processMemUsage.WithLabelValues(name).Set(float64(s.MemoryUsage))
-	}
+
+		// Health check metrics
+		if s.Healthy {
+			mm.healthCheckStatus.WithLabelValues(name).Set(1)
+		} else {
+			mm.healthCheckStatus.WithLabelValues(name).Set(0)
+		}
+	})
+}
+
+// RecordConfigReload increments the config reload counter.
+func (mm *MetricsManager) RecordConfigReload() {
+	mm.configReloads.Inc()
+}
+
+// RecordHealthCheckFailure records a health check failure for a process.
+func (mm *MetricsManager) RecordHealthCheckFailure(name string) {
+	mm.healthCheckFailures.WithLabelValues(name).Inc()
 }
 
 // StartMetricsServer 启动指标服务器
 func (mm *MetricsManager) StartMetricsServer(addr string) error {
-	// 注册HTTP处理器
-	http.Handle("/metrics", promhttp.HandlerFor(mm.registry, promhttp.HandlerOpts{}))
-
-	// 启动HTTP服务器
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(mm.registry, promhttp.HandlerOpts{}))
 	fmt.Printf("Prometheus指标服务器启动在 %s\n", addr)
-	return http.ListenAndServe(addr, nil)
+	return http.ListenAndServe(addr, mux)
 }
 
 // StartMetricsCollector 启动指标收集器
 func (mm *MetricsManager) StartMetricsCollector(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	go func() {
+		defer ticker.Stop()
 		for {
-			<-ticker.C
-			mm.UpdateMetrics()
+			select {
+			case <-ticker.C:
+				mm.UpdateMetrics()
+			case <-mm.stop:
+				return
+			}
 		}
 	}()
+}
+
+// Stop stops the metrics collector.
+func (mm *MetricsManager) Stop() {
+	close(mm.stop)
 }
 
 // GetRegistry 获取Prometheus注册表

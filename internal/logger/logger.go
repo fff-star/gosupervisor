@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gosupervisor/internal/config"
@@ -22,10 +23,10 @@ type countingWriter struct {
 
 func (cw *countingWriter) Write(p []byte) (n int, err error) {
 	n, err = cw.writer.Write(p)
-	cw.bytesWritten += int64(n)
-	if cw.maxSize > 0 && cw.bytesWritten >= cw.maxSize && cw.onExceed != nil {
+	total := atomic.AddInt64(&cw.bytesWritten, int64(n))
+	if cw.maxSize > 0 && total >= cw.maxSize && cw.onExceed != nil {
 		cw.onExceed()
-		cw.bytesWritten = 0
+		atomic.StoreInt64(&cw.bytesWritten, 0)
 	}
 	return
 }
@@ -39,12 +40,15 @@ type logStream struct {
 }
 
 type Logger struct {
-	logDir         string
-	processLogs    map[string]*logStream
-	maxLogSize     int64
-	maxBackupCount int
-	compress       bool
-	mutex          sync.Mutex
+	logDir               string
+	processLogs          map[string]*logStream
+	maxLogSize           int64
+	maxBackupCount       int
+	systemLogMaxBytes    int64
+	systemLogBackupCount int
+	compress             bool
+	mutex                sync.Mutex
+	systemLogMu          sync.Mutex
 }
 
 func NewLogger(logDir string, maxLogSize int64, maxBackupCount int, compress bool) (*Logger, error) {
@@ -60,12 +64,18 @@ func NewLogger(logDir string, maxLogSize int64, maxBackupCount int, compress boo
 		maxBackupCount = 10
 	}
 
+	if maxBackupCount <= 0 {
+		maxBackupCount = 10
+	}
+
 	return &Logger{
-		logDir:         logDir,
-		processLogs:    make(map[string]*logStream),
-		maxLogSize:     maxLogSize,
-		maxBackupCount: maxBackupCount,
-		compress:       compress,
+		logDir:               logDir,
+		processLogs:          make(map[string]*logStream),
+		maxLogSize:           maxLogSize,
+		maxBackupCount:       maxBackupCount,
+		systemLogMaxBytes:    50 * 1024 * 1024, // 50MB
+		systemLogBackupCount: 10,
+		compress:             compress,
 	}, nil
 }
 
@@ -271,12 +281,18 @@ func (l *Logger) rotateLog(processName string) error {
 		if _, hasStderr := l.processLogs[stderrKey]; !hasStderr {
 			if _, err := os.Stat(defaultPath); err == nil {
 				newPath := defaultPath + fmt.Sprintf(".%d", time.Now().UnixNano())
-				os.Rename(defaultPath, newPath)
+				if err := os.Rename(defaultPath, newPath); err != nil {
+					return fmt.Errorf("重命名日志文件失败: %v", err)
+				}
 				if l.compress {
-					l.compressLog(newPath)
+					if err := l.compressLog(newPath); err != nil {
+						fmt.Printf("压缩日志文件失败: %v\n", err)
+					}
 				}
 				l.cleanupBackups(defaultPath, l.maxBackupCount)
-				os.WriteFile(defaultPath, nil, 0644)
+				if err := os.WriteFile(defaultPath, nil, 0644); err != nil {
+					return fmt.Errorf("创建新日志文件失败: %v", err)
+				}
 			}
 		}
 	}
@@ -401,17 +417,52 @@ func (l *Logger) CloseProcessLog(processName string) error {
 				}
 			}
 			delete(l.processLogs, key)
-			// If stderr was shared with stdout, it's already deleted
-			if key == stdoutKey && l.processLogs[stderrKey] == nil {
-				// already cleaned
-			}
+			// If stderr was shared with stdout, it's already deleted; nothing to do
 		}
 	}
 	return nil
 }
 
 func (l *Logger) LogSystem(message string) {
+	l.systemLogMu.Lock()
+	defer l.systemLogMu.Unlock()
+
 	systemLog := filepath.Join(l.logDir, "system.log")
+
+	// Rotate if file exceeds max size
+	if info, err := os.Stat(systemLog); err == nil && info.Size() >= l.systemLogMaxBytes {
+		newPath := systemLog + fmt.Sprintf(".%d", time.Now().UnixNano())
+		if err := os.Rename(systemLog, newPath); err == nil {
+			if l.compress {
+				l.compressLog(newPath)
+			}
+			basePattern := systemLog
+			pattern := basePattern + ".*"
+			files, _ := filepath.Glob(pattern)
+			type fileWithTime struct {
+				path    string
+				modTime time.Time
+			}
+			var fileInfos []fileWithTime
+			for _, f := range files {
+				info, _ := os.Stat(f)
+				if info != nil {
+					fileInfos = append(fileInfos, fileWithTime{f, info.ModTime()})
+				}
+			}
+			for i := 0; i < len(fileInfos); i++ {
+				for j := i + 1; j < len(fileInfos); j++ {
+					if fileInfos[i].modTime.After(fileInfos[j].modTime) {
+						fileInfos[i], fileInfos[j] = fileInfos[j], fileInfos[i]
+					}
+				}
+			}
+			for i := 0; i < len(fileInfos)-l.systemLogBackupCount; i++ {
+				os.Remove(fileInfos[i].path)
+			}
+		}
+	}
+
 	file, err := os.OpenFile(systemLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		fmt.Printf("打开系统日志文件失败: %v\n", err)
@@ -443,7 +494,15 @@ func (l *Logger) RotateLogs() error {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
 
+	// Track pointers already rotated to avoid double-processing shared streams.
+	rotated := make(map[*logStream]bool)
+
 	for key, stream := range l.processLogs {
+		if rotated[stream] {
+			continue
+		}
+		rotated[stream] = true
+
 		if cw, ok := stream.writer.(*countingWriter); ok {
 			if f, ok := cw.writer.(*os.File); ok {
 				f.Close()

@@ -3,8 +3,15 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"go.uber.org/goleak"
 )
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
+}
 
 func TestLoadConfig(t *testing.T) {
 	// 测试INI配置文件
@@ -308,4 +315,291 @@ func TestYAMLJSONBoolDefaults(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestProgramConfigStructTags tests that YAML/JSON struct tags are present
+// and correct for all fields.
+func TestProgramConfigStructTags(t *testing.T) {
+	// Verify that YAML and JSON parsing work correctly with struct tags
+	cfg, err := LoadConfig("testdata/test_config.yaml")
+	if err != nil {
+		t.Fatalf("加载 YAML 配置失败: %v", err)
+	}
+
+	test1 := cfg.Programs["test1"]
+	if test1.Command == "" {
+		t.Error("command 标签导致字段未正确解析")
+	}
+	if test1.StdoutLogMaxBytes == 0 {
+		t.Error("stdoutlogmaxbytes 标签导致字段未正确解析")
+	}
+	if test1.StderrLogBackupCount == 0 {
+		t.Error("stderrlogbackupcount 标签导致字段未正确解析")
+	}
+	if len(test1.DependsOn) != 0 {
+		t.Error("dependson 标签导致字段未正确解析")
+	}
+}
+
+// TestServerURLRemoved tests that the dead ServerURL field no longer exists.
+func TestServerURLRemoved(t *testing.T) {
+	cfg, err := LoadConfig("testdata/test_config.ini")
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+	// Verify that all programs load correctly without the ServerURL field
+	test1 := cfg.Programs["test1"]
+	if test1 == nil {
+		t.Fatal("test1 应为 nil")
+	}
+	// No ServerURL to check — it was removed
+}
+
+// TestNewConfigFieldsINI tests parsing of all new config fields from INI format.
+func TestNewConfigFieldsINI(t *testing.T) {
+	configFile := "new_fields_config.ini"
+	content := `[program:full]
+command=sleep 60
+group=web
+healthcheckurl=http://localhost:8080/health
+healthcheckinterval=10
+healthchecktimeout=3
+healthcheckunhealthythreshold=5
+prestartscript=echo "starting"
+poststopscript=echo "stopped"
+restartmaxcount=5
+restartwindowsecs=120
+restartcodes=1,2,3
+norestartcodes=0,143
+cgrouppath=/sys/fs/cgroup/myapp
+webhookurl=http://hooks.example.com/notify
+stdinfile=/tmp/stdin.txt
+`
+	if err := os.WriteFile(configFile, []byte(content), 0644); err != nil {
+		t.Fatalf("创建配置文件失败: %v", err)
+	}
+	defer os.Remove(configFile)
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+
+	p := cfg.Programs["full"]
+	if p == nil {
+		t.Fatal("进程 full 不存在")
+	}
+
+	if p.Group != "web" {
+		t.Errorf("Group 期望 'web', 实际 '%s'", p.Group)
+	}
+	if p.HealthCheckURL != "http://localhost:8080/health" {
+		t.Errorf("HealthCheckURL 不匹配: '%s'", p.HealthCheckURL)
+	}
+	if p.HealthCheckInterval != 10 {
+		t.Errorf("HealthCheckInterval 期望 10, 实际 %d", p.HealthCheckInterval)
+	}
+	if p.HealthCheckTimeout != 3 {
+		t.Errorf("HealthCheckTimeout 期望 3, 实际 %d", p.HealthCheckTimeout)
+	}
+	if p.HealthCheckUnhealthyThreshold != 5 {
+		t.Errorf("HealthCheckUnhealthyThreshold 期望 5, 实际 %d", p.HealthCheckUnhealthyThreshold)
+	}
+	if p.PreStartScript != "echo \"starting\"" {
+		t.Errorf("PreStartScript 不匹配: '%s'", p.PreStartScript)
+	}
+	if p.PostStopScript != "echo \"stopped\"" {
+		t.Errorf("PostStopScript 不匹配: '%s'", p.PostStopScript)
+	}
+	if p.RestartMaxCount != 5 {
+		t.Errorf("RestartMaxCount 期望 5, 实际 %d", p.RestartMaxCount)
+	}
+	if p.RestartWindowSecs != 120 {
+		t.Errorf("RestartWindowSecs 期望 120, 实际 %d", p.RestartWindowSecs)
+	}
+	if len(p.RestartCodes) != 3 || p.RestartCodes[0] != 1 {
+		t.Errorf("RestartCodes 期望 [1,2,3], 实际 %v", p.RestartCodes)
+	}
+	if len(p.NoRestartCodes) != 2 || p.NoRestartCodes[1] != 143 {
+		t.Errorf("NoRestartCodes 期望 [0,143], 实际 %v", p.NoRestartCodes)
+	}
+	if p.CgroupPath != "/sys/fs/cgroup/myapp" {
+		t.Errorf("CgroupPath 不匹配: '%s'", p.CgroupPath)
+	}
+	if p.WebhookURL != "http://hooks.example.com/notify" {
+		t.Errorf("WebhookURL 不匹配: '%s'", p.WebhookURL)
+	}
+	if p.StdinFile != "/tmp/stdin.txt" {
+		t.Errorf("StdinFile 不匹配: '%s'", p.StdinFile)
+	}
+}
+
+// TestNewConfigFieldsDefaults tests default values for new config fields.
+func TestNewConfigFieldsDefaults(t *testing.T) {
+	configFile := "defaults_config.ini"
+	content := `[program:minimal]
+command=echo hi
+`
+	if err := os.WriteFile(configFile, []byte(content), 0644); err != nil {
+		t.Fatalf("创建配置文件失败: %v", err)
+	}
+	defer os.Remove(configFile)
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+
+	p := cfg.Programs["minimal"]
+	if p == nil {
+		t.Fatal("进程 minimal 不存在")
+	}
+
+	// Health check defaults
+	if p.HealthCheckInterval != 30 {
+		t.Errorf("HealthCheckInterval 默认应为 30, 实际 %d", p.HealthCheckInterval)
+	}
+	if p.HealthCheckTimeout != 5 {
+		t.Errorf("HealthCheckTimeout 默认应为 5, 实际 %d", p.HealthCheckTimeout)
+	}
+	if p.HealthCheckUnhealthyThreshold != 3 {
+		t.Errorf("HealthCheckUnhealthyThreshold 默认应为 3, 实际 %d", p.HealthCheckUnhealthyThreshold)
+	}
+	if p.RestartWindowSecs != 60 {
+		t.Errorf("RestartWindowSecs 默认应为 60, 实际 %d", p.RestartWindowSecs)
+	}
+	if p.RestartCodes == nil {
+		t.Error("RestartCodes 不应为 nil")
+	}
+	if p.NoRestartCodes == nil {
+		t.Error("NoRestartCodes 不应为 nil")
+	}
+}
+
+// TestValidateConfig tests the config validation for DependsOn references.
+func TestValidateConfig(t *testing.T) {
+	configFile := "validate_config.ini"
+	content := `[program:app]
+command=echo app
+dependson=db,cache
+
+[program:db]
+command=echo db
+`
+	if err := os.WriteFile(configFile, []byte(content), 0644); err != nil {
+		t.Fatalf("创建配置文件失败: %v", err)
+	}
+	defer os.Remove(configFile)
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+
+	warnings := cfg.ValidateConfig()
+	if len(warnings) != 1 {
+		t.Fatalf("期望 1 个警告, 实际 %d", len(warnings))
+	}
+	if !strings.Contains(warnings[0], "cache") {
+		t.Errorf("警告应包含缺失的依赖 'cache', 实际: %s", warnings[0])
+	}
+}
+
+// TestValidateConfigNoWarnings tests validation with all dependencies present.
+func TestValidateConfigNoWarnings(t *testing.T) {
+	configFile := "valid_config.ini"
+	content := `[program:app]
+command=echo app
+dependson=db
+
+[program:db]
+command=echo db
+`
+	if err := os.WriteFile(configFile, []byte(content), 0644); err != nil {
+		t.Fatalf("创建配置文件失败: %v", err)
+	}
+	defer os.Remove(configFile)
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("加载配置失败: %v", err)
+	}
+
+	warnings := cfg.ValidateConfig()
+	if len(warnings) != 0 {
+		t.Errorf("期望无警告, 实际 %d: %v", len(warnings), warnings)
+	}
+}
+
+// --- Fuzz tests ---
+
+func FuzzLoadINI(f *testing.F) {
+	f.Add(`[program:test]
+command=echo hello
+autostart=true
+`)
+	f.Add(`[program:a]
+command=sleep 1
+dependson=b,c
+[program:b]
+command=echo b
+[program:c]
+command=echo c
+`)
+
+	f.Fuzz(func(t *testing.T, data string) {
+		path := filepath.Join(t.TempDir(), "fuzz_config.ini")
+		os.WriteFile(path, []byte(data), 0644)
+		cfg, err := LoadConfig(path)
+		if err != nil && cfg != nil {
+			t.Errorf("error 返回但 cfg 非 nil")
+		}
+		if cfg != nil {
+			cfg.ValidateConfig()
+		}
+	})
+}
+
+func FuzzLoadYAML(f *testing.F) {
+	f.Add(`programs:
+  test:
+    command: echo hello
+    autostart: true
+`)
+	f.Add(`programs:
+  a:
+    command: "sleep 1"
+    dependson: [b, c]
+  b:
+    command: echo b
+`)
+
+	f.Fuzz(func(t *testing.T, data string) {
+		path := filepath.Join(t.TempDir(), "fuzz_config.yaml")
+		os.WriteFile(path, []byte(data), 0644)
+		cfg, err := LoadConfig(path)
+		if err != nil && cfg != nil {
+			t.Errorf("error 返回但 cfg 非 nil")
+		}
+		if cfg != nil {
+			cfg.ValidateConfig()
+		}
+	})
+}
+
+func FuzzLoadJSON(f *testing.F) {
+	f.Add(`{"programs":{"test":{"command":"echo hello","autostart":true}}}`)
+	f.Add(`{"programs":{"a":{"command":"sleep 1"},"b":{"command":"echo b"}}}`)
+
+	f.Fuzz(func(t *testing.T, data string) {
+		path := filepath.Join(t.TempDir(), "fuzz_config.json")
+		os.WriteFile(path, []byte(data), 0644)
+		cfg, err := LoadConfig(path)
+		if err != nil && cfg != nil {
+			t.Errorf("error 返回但 cfg 非 nil")
+		}
+		if cfg != nil {
+			cfg.ValidateConfig()
+		}
+	})
 }

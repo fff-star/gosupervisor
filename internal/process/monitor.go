@@ -40,6 +40,8 @@ func (m *Monitor) monitorLoop() {
 }
 
 func (m *Monitor) checkProcesses() {
+	m.Manager.mu.RLock()
+	defer m.Manager.mu.RUnlock()
 	for _, process := range m.Manager.Processes {
 		m.checkProcess(process)
 	}
@@ -62,17 +64,41 @@ func (m *Monitor) handleExitedProcess(process *Process) {
 	}
 
 	if process.State != StateExited {
-		// 已经被另一个 goroutine 认领了
 		process.mu.Unlock()
 		return
 	}
 
-	if process.StartRetries > process.Config.StartRetries {
+	// Check exit code policy
+	if !process.shouldRestartOnExitCode() {
 		process.State = StateFatal
+		name := process.Name
 		process.mu.Unlock()
-		fmt.Printf("进程 %s 达到最大重启次数，进入FATAL状态\n", process.Name)
+		fmt.Printf("进程 %s 因退出码策略不重启 (exit=%d)\n", name, process.ExitCode)
+		process.sendWebhook()
 		return
 	}
+
+	// Check restart rate limiting
+	if process.restartRateExceeded() {
+		process.State = StateFatal
+		name := process.Name
+		process.mu.Unlock()
+		fmt.Printf("进程 %s 达到重启速率限制，进入FATAL状态\n", name)
+		process.sendWebhook()
+		return
+	}
+
+	if process.StartRetries >= process.Config.StartRetries {
+		process.State = StateFatal
+		name := process.Name
+		process.mu.Unlock()
+		fmt.Printf("进程 %s 达到最大重启次数，进入FATAL状态\n", name)
+		process.sendWebhook()
+		return
+	}
+
+	// Record restart timestamp for rate limiting
+	process.addRestartTimestamp(process.Config.RestartWindowSecs)
 
 	// 标记为 STARTING 防止 monitor 重复调度
 	process.State = StateStarting
@@ -88,9 +114,12 @@ func (m *Monitor) handleExitedProcess(process *Process) {
 			fmt.Printf("重启进程 %s 失败: %v\n", name, err)
 
 			process.mu.Lock()
-			if process.StartRetries >= process.Config.StartRetries {
+			if process.StartRetries > process.Config.StartRetries {
 				process.State = StateFatal
 				fmt.Printf("进程 %s 达到最大重启次数，进入FATAL状态\n", name)
+				process.mu.Unlock()
+				process.sendWebhook()
+				return
 			}
 			process.mu.Unlock()
 		}
@@ -99,10 +128,10 @@ func (m *Monitor) handleExitedProcess(process *Process) {
 
 func (m *Monitor) checkRunningProcess(process *Process) {
 	process.mu.Lock()
-	defer process.mu.Unlock()
 
 	// 正在停止中，不检查
 	if process.State == StateStopping {
+		process.mu.Unlock()
 		return
 	}
 
@@ -110,4 +139,26 @@ func (m *Monitor) checkRunningProcess(process *Process) {
 	if process.Config.StartSecs > 0 && time.Since(process.StartTime) > time.Duration(process.Config.StartSecs)*time.Second {
 		process.StartRetries = 0
 	}
+
+	// Health check restart: unhealthy process with HealthCheckRestart enabled
+	if process.Config.HealthCheckRestart && !process.Healthy && process.Config.HealthCheckURL != "" {
+		process.State = StateStarting
+		name := process.Name
+		process.mu.Unlock()
+		fmt.Printf("进程 %s 健康检查失败，触发重启...\n", name)
+		if err := process.Start(); err != nil {
+			fmt.Printf("健康检查重启进程 %s 失败: %v\n", name, err)
+			process.mu.Lock()
+			if process.StartRetries > process.Config.StartRetries {
+				process.State = StateFatal
+				process.mu.Unlock()
+				process.sendWebhook()
+				return
+			}
+			process.mu.Unlock()
+		}
+		return
+	}
+
+	process.mu.Unlock()
 }

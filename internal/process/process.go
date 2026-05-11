@@ -3,7 +3,10 @@ package process
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
@@ -65,9 +68,26 @@ type Process struct {
 	Healthy      bool
 	Group        string
 
+	// Restart rate limiting
+	restartTimestamps []time.Time
+
+	// Health check tracking
+	healthCheckFailures int
+	healthCheckCtx      context.Context
+	healthCheckCancel   context.CancelFunc
+
 	// waitCh is closed by monitor() after cmd.Wait() returns.
 	// Stop() waits on it instead of calling cmd.Wait() directly.
 	waitCh chan struct{}
+
+	// monitorDone is closed by monitor() when it exits, allowing Start() to
+	// wait for the old monitor goroutine before starting a new one.
+	monitorDone chan struct{}
+
+	// startCtx is cancelled on subsequent Start() calls to signal the
+	// previous monitorResources goroutine to exit.
+	startCtx    context.Context
+	startCancel context.CancelFunc
 
 	// CPU percentage tracking
 	prevCPUTicks int64
@@ -78,6 +98,7 @@ type Process struct {
 }
 
 type ProcessManager struct {
+	mu        sync.RWMutex
 	Processes map[string]*Process
 	Logger    *logger.Logger
 }
@@ -98,9 +119,42 @@ func (pm *ProcessManager) AddProcess(cfg *config.ProgramConfig) *Process {
 		Context:    ctx,
 		CancelFunc: cancel,
 		Logger:     pm.Logger,
+		Group:      cfg.Group,
 	}
+	pm.mu.Lock()
 	pm.Processes[cfg.Name] = process
+	pm.mu.Unlock()
 	return process
+}
+
+// RangeProcesses calls fn for each process while holding a read lock.
+func (pm *ProcessManager) RangeProcesses(fn func(name string, p *Process)) {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	for name, p := range pm.Processes {
+		fn(name, p)
+	}
+}
+
+// RemoveProcess removes a process from the manager by name.
+func (pm *ProcessManager) RemoveProcess(name string) {
+	pm.mu.Lock()
+	delete(pm.Processes, name)
+	pm.mu.Unlock()
+}
+
+// Len returns the number of managed processes.
+func (pm *ProcessManager) Len() int {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return len(pm.Processes)
+}
+
+// ReplaceProcesses atomically replaces the entire process map.
+func (pm *ProcessManager) ReplaceProcesses(newMap map[string]*Process) {
+	pm.mu.Lock()
+	pm.Processes = newMap
+	pm.mu.Unlock()
 }
 
 func (p *Process) Start() error {
@@ -110,6 +164,20 @@ func (p *Process) Start() error {
 		return fmt.Errorf("进程 %s 已经在运行", p.Name)
 	}
 
+	// Cancel previous start's context to signal old monitorResources to exit.
+	if p.startCancel != nil {
+		p.startCancel()
+	}
+
+	// Wait for old monitor goroutine to exit before assigning a new waitCh.
+	monDone := p.monitorDone
+	p.mu.Unlock()
+
+	if monDone != nil {
+		<-monDone
+	}
+
+	p.mu.Lock()
 	if p.Cmd != nil && p.Cmd.Process != nil {
 		p.Cmd.Process.Kill()
 	}
@@ -123,7 +191,8 @@ func (p *Process) Start() error {
 	p.Healthy = false
 
 	ctx, cancel := context.WithCancel(p.Context)
-	_ = cancel
+	p.startCtx = ctx
+	p.startCancel = cancel
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", p.Config.Command)
 
 	if p.Config.Directory != "" {
@@ -176,8 +245,26 @@ func (p *Process) Start() error {
 		}
 	}
 
+	// Set up stdin from file if configured
+	if p.Config.StdinFile != "" {
+		f, err := os.Open(p.Config.StdinFile)
+		if err != nil {
+			fmt.Printf("进程 %s 打开 stdin 文件失败: %v\n", p.Name, err)
+		} else {
+			cmd.Stdin = f
+		}
+	}
+
 	p.waitCh = make(chan struct{})
+	p.monitorDone = make(chan struct{})
 	p.mu.Unlock()
+
+	// Run pre-start hook
+	if p.Config.PreStartScript != "" {
+		if err := runHook(p.Config.PreStartScript); err != nil {
+			fmt.Printf("进程 %s pre-start 脚本失败: %v\n", p.Name, err)
+		}
+	}
 
 	// Set umask before fork (process-wide, so serialise via mutex)
 	umaskMu.Lock()
@@ -200,8 +287,20 @@ func (p *Process) Start() error {
 	p.State = StateRunning
 	p.mu.Unlock()
 
+	p.sendWebhook()
+
 	go p.monitor()
 	go p.monitorResources()
+
+	// Start health check if configured
+	if p.Config.HealthCheckURL != "" {
+		p.startHealthCheck()
+	}
+
+	// Apply cgroup if configured
+	if p.Config.CgroupPath != "" {
+		p.applyCgroup()
+	}
 
 	return nil
 }
@@ -267,6 +366,8 @@ done:
 		p.State = StateStopped
 	}
 	p.mu.Unlock()
+
+	p.sendWebhook()
 	return nil
 }
 
@@ -320,6 +421,8 @@ func (p *Process) Snapshot() Snapshot {
 }
 
 func (p *Process) monitor() {
+	defer close(p.monitorDone)
+
 	err := p.Cmd.Wait()
 
 	p.mu.Lock()
@@ -333,17 +436,39 @@ func (p *Process) monitor() {
 		p.State = StateExited
 	}
 
+	if p.State == StateExited {
+		p.mu.Unlock()
+		p.sendWebhook()
+		p.mu.Lock()
+	}
+
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			p.ExitCode = exitErr.ExitCode()
+		} else {
+			// Killed by signal or other abnormal exit
+			p.ExitCode = -1
 		}
+	} else {
+		p.ExitCode = 0
 	}
 	p.mu.Unlock()
+
+	// Run post-stop hook
+	if p.Config.PostStopScript != "" {
+		if hookErr := runHook(p.Config.PostStopScript); hookErr != nil {
+			fmt.Printf("进程 %s post-stop 脚本失败: %v\n", p.Name, hookErr)
+		}
+	}
 }
 
 func (p *Process) monitorResources() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+
+	p.mu.Lock()
+	ctx := p.startCtx
+	p.mu.Unlock()
 
 	for {
 		select {
@@ -359,34 +484,39 @@ func (p *Process) monitorResources() {
 			if pid > 0 {
 				p.readProcStats(pid)
 			}
-		case <-p.Context.Done():
+		case <-ctx.Done():
 			return
 		}
 	}
 }
 
-// userHz is the kernel's USER_HZ constant (clock ticks per second).
-// On almost all Linux architectures this is 100.
-const userHz = 100.0
 
 func (p *Process) readProcStats(pid int) {
+	var rss uint64
+
 	// Read VmRSS
 	statusFile := fmt.Sprintf("/proc/%d/status", pid)
 	if f, err := os.Open(statusFile); err == nil {
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
 			line := scanner.Text()
-			if strings.Contains(line, "VmRSS:") {
-				var rss int64
-				fmt.Sscanf(line, "VmRSS:\t%d", &rss)
-				p.mu.Lock()
-				p.MemoryUsage = uint64(rss) * 1024
-				p.mu.Unlock()
+			if strings.HasPrefix(line, "VmRSS:") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					if v, err := strconv.ParseInt(fields[1], 10, 64); err == nil {
+						rss = uint64(v) * 1024
+					}
+				}
 				break
 			}
 		}
 		f.Close()
 	}
+
+	// Update MemoryUsage even if stat read fails later (VmRSS already read)
+	p.mu.Lock()
+	p.MemoryUsage = rss
+	p.mu.Unlock()
 
 	// Read process CPU ticks from /proc/pid/stat
 	statFile := fmt.Sprintf("/proc/%d/stat", pid)
@@ -411,7 +541,9 @@ func (p *Process) readProcStats(pid int) {
 	// Read system-wide CPU ticks from /proc/stat
 	sysTicks := readSystemCPUTicks()
 
+	// Hold lock once for all updates
 	p.mu.Lock()
+
 	now := time.Now()
 
 	if p.prevCPUTicks > 0 && !p.prevCPUTime.IsZero() && sysTicks > p.prevSysTicks {
@@ -427,8 +559,282 @@ func (p *Process) readProcStats(pid int) {
 	p.prevCPUTime = now
 	p.prevSysTicks = sysTicks
 
-	p.Healthy = p.CPUUsage < 90.0 && p.MemoryUsage < 2*1024*1024*1024
+	p.Healthy = p.CPUUsage < p.Config.CPUThresholdPercent && p.MemoryUsage < uint64(p.Config.MemoryThresholdBytes)
 	p.mu.Unlock()
+}
+
+// runHook executes a shell script hook.
+func runHook(script string) error {
+	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// startHealthCheck starts a health check goroutine for the process.
+func (p *Process) startHealthCheck() {
+	// Cancel previous health check if any
+	if p.healthCheckCancel != nil {
+		p.healthCheckCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	p.healthCheckCtx = ctx
+	p.healthCheckCancel = cancel
+
+	go p.runHealthCheck(ctx)
+}
+
+func (p *Process) runHealthCheck(ctx context.Context) {
+	interval := time.Duration(p.Config.HealthCheckInterval) * time.Second
+	timeout := time.Duration(p.Config.HealthCheckTimeout) * time.Second
+	threshold := p.Config.HealthCheckUnhealthyThreshold
+	url := p.Config.HealthCheckURL
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.mu.Lock()
+			if p.State != StateRunning {
+				p.mu.Unlock()
+				return
+			}
+			p.mu.Unlock()
+
+			ok := checkHealth(url, timeout)
+			p.mu.Lock()
+			if ok {
+				p.healthCheckFailures = 0
+				p.Healthy = true
+			} else {
+				p.healthCheckFailures++
+				if p.healthCheckFailures >= threshold {
+					p.Healthy = false
+				}
+			}
+			p.mu.Unlock()
+		}
+	}
+}
+
+func checkHealth(url string, timeout time.Duration) bool {
+	if strings.HasPrefix(url, "tcp://") {
+		addr := strings.TrimPrefix(url, "tcp://")
+		conn, err := net.DialTimeout("tcp", addr, timeout)
+		if err != nil {
+			return false
+		}
+		conn.Close()
+		return true
+	}
+
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Get(url)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 400
+}
+
+// applyCgroup writes the process PID to cgroup.procs for cgroup v2.
+func (p *Process) applyCgroup() {
+	pid := p.PID
+	if pid <= 0 {
+		return
+	}
+	cgroupProcs := p.Config.CgroupPath + "/cgroup.procs"
+	if err := os.WriteFile(cgroupProcs, []byte(fmt.Sprintf("%d", pid)), 0644); err != nil {
+		fmt.Printf("进程 %s 加入 cgroup 失败: %v\n", p.Name, err)
+	}
+}
+
+// addRestartTimestamp records a restart and prunes old entries outside the window.
+func (p *Process) addRestartTimestamp(windowSecs int) {
+	now := time.Now()
+	p.restartTimestamps = append(p.restartTimestamps, now)
+	cutoff := now.Add(-time.Duration(windowSecs) * time.Second)
+	n := 0
+	for _, ts := range p.restartTimestamps {
+		if ts.After(cutoff) {
+			p.restartTimestamps[n] = ts
+			n++
+		}
+	}
+	p.restartTimestamps = p.restartTimestamps[:n]
+}
+
+// restartRateExceeded checks if the restart rate limit has been exceeded.
+func (p *Process) restartRateExceeded() bool {
+	maxCount := p.Config.RestartMaxCount
+	if maxCount <= 0 {
+		return false
+	}
+	window := p.Config.RestartWindowSecs
+	if window <= 0 {
+		window = 60
+	}
+	cutoff := time.Now().Add(-time.Duration(window) * time.Second)
+	count := 0
+	for _, ts := range p.restartTimestamps {
+		if ts.After(cutoff) {
+			count++
+		}
+	}
+	return count >= maxCount
+}
+
+// shouldRestartOnExitCode checks if the process should restart based on exit code policy.
+func (p *Process) shouldRestartOnExitCode() bool {
+	if len(p.Config.RestartCodes) > 0 {
+		for _, c := range p.Config.RestartCodes {
+			if c == p.ExitCode {
+				return true
+			}
+		}
+		return false
+	}
+	if len(p.Config.NoRestartCodes) > 0 {
+		for _, c := range p.Config.NoRestartCodes {
+			if c == p.ExitCode {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// StartGroup starts all processes in a group.
+func (pm *ProcessManager) StartGroup(group string) []string {
+	var started []string
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	for _, p := range pm.Processes {
+		if p.Config.Group == group && p.Config.AutoStart {
+			if err := p.Start(); err != nil {
+				fmt.Printf("启动进程 %s 失败: %v\n", p.Name, err)
+			} else {
+				started = append(started, p.Name)
+			}
+		}
+	}
+	return started
+}
+
+// StopGroup stops all processes in a group (reverse dependency order within group).
+func (pm *ProcessManager) StopGroup(group string) []string {
+	var stopped []string
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	for _, p := range pm.Processes {
+		if p.Config.Group == group {
+			if err := p.Stop(); err != nil {
+				fmt.Printf("停止进程 %s 失败: %v\n", p.Name, err)
+			} else {
+				stopped = append(stopped, p.Name)
+			}
+		}
+	}
+	return stopped
+}
+
+// PersistentState holds the state that can be saved/restored across restarts.
+type PersistentState struct {
+	ProcessName string        `json:"name"`
+	State       ProcessState  `json:"state"`
+	PID         int           `json:"pid"`
+	ExitCode    int           `json:"exitCode"`
+	RestartCount int          `json:"restartCount"`
+	LastRestart time.Time     `json:"lastRestart"`
+}
+
+// SaveState saves the current state of all processes to a JSON file.
+func (pm *ProcessManager) SaveState(path string) error {
+	var states []PersistentState
+	pm.RangeProcesses(func(name string, p *Process) {
+		s := p.Snapshot()
+		states = append(states, PersistentState{
+			ProcessName:  s.Name,
+			State:        s.State,
+			PID:          s.PID,
+			ExitCode:     s.ExitCode,
+			RestartCount: s.RestartCount,
+			LastRestart:  s.LastRestart,
+		})
+	})
+	data, err := json.MarshalIndent(states, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化进程状态失败: %v", err)
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+// RestoreState reads process state from a JSON file. It only restores metadata,
+// not running processes.
+func (pm *ProcessManager) RestoreState(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var states []PersistentState
+	if err := json.Unmarshal(data, &states); err != nil {
+		return fmt.Errorf("反序列化进程状态失败: %v", err)
+	}
+	for _, s := range states {
+		if p := pm.GetProcess(s.ProcessName); p != nil {
+			p.mu.Lock()
+			p.RestartCount = s.RestartCount
+			if !s.LastRestart.IsZero() {
+				p.LastRestart = s.LastRestart
+			}
+			p.mu.Unlock()
+		}
+	}
+	return nil
+}
+
+// sendWebhook POSTs process state change to the configured webhook URL.
+func (p *Process) sendWebhook() {
+	if p.Config.WebhookURL == "" {
+		return
+	}
+	payload := fmt.Sprintf(
+		`{"name":"%s","group":"%s","state":"%s","pid":%d,"exitCode":%d,"timestamp":"%s"}`,
+		p.Name, p.Config.Group, p.State, p.PID, p.ExitCode,
+		time.Now().Format(time.RFC3339),
+	)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(p.Config.WebhookURL, "application/json",
+		strings.NewReader(payload))
+	if err != nil {
+		fmt.Printf("进程 %s webhook 发送失败: %v\n", p.Name, err)
+		return
+	}
+	resp.Body.Close()
+}
+
+// RestartGroup restarts all processes in a group.
+func (pm *ProcessManager) RestartGroup(group string) []string {
+	var restarted []string
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	for _, p := range pm.Processes {
+		if p.Config.Group == group {
+			if err := p.Restart(); err != nil {
+				fmt.Printf("重启进程 %s 失败: %v\n", p.Name, err)
+			} else {
+				restarted = append(restarted, p.Name)
+			}
+		}
+	}
+	return restarted
 }
 
 // readSystemCPUTicks reads total CPU ticks from /proc/stat.
@@ -450,23 +856,30 @@ func readSystemCPUTicks() int64 {
 }
 
 func (pm *ProcessManager) GetProcess(name string) *Process {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
 	return pm.Processes[name]
 }
 
 func (pm *ProcessManager) StartAll() {
-	dependencyGraph := make(map[string][]string)
+	pm.mu.RLock()
+	dependencyGraph := make(map[string][]string, len(pm.Processes))
 	for _, process := range pm.Processes {
 		dependencyGraph[process.Name] = process.Config.DependsOn
 	}
+	pm.mu.RUnlock()
 
 	orderedProcesses, err := pm.topologicalSort(dependencyGraph)
 	if err != nil {
 		fmt.Printf("解析进程依赖关系失败: %v\n", err)
+		pm.mu.RLock()
 		for _, process := range pm.Processes {
 			orderedProcesses = append(orderedProcesses, process.Name)
 		}
+		pm.mu.RUnlock()
 	}
 
+	pm.mu.RLock()
 	for _, name := range orderedProcesses {
 		process := pm.Processes[name]
 		if process.Config.AutoStart {
@@ -475,25 +888,35 @@ func (pm *ProcessManager) StartAll() {
 			}
 		}
 	}
+	pm.mu.RUnlock()
 }
 
 func (pm *ProcessManager) StopAll() {
-	dependencyGraph := make(map[string][]string)
+	pm.mu.RLock()
+	dependencyGraph := make(map[string][]string, len(pm.Processes))
 	for _, process := range pm.Processes {
 		dependencyGraph[process.Name] = process.Config.DependsOn
 	}
+	pm.mu.RUnlock()
 
 	orderedProcesses, err := pm.topologicalSort(dependencyGraph)
 	if err != nil {
 		fmt.Printf("解析进程依赖关系失败: %v\n", err)
+		pm.mu.RLock()
 		for _, process := range pm.Processes {
 			orderedProcesses = append(orderedProcesses, process.Name)
 		}
+		pm.mu.RUnlock()
 	}
 
 	for i := len(orderedProcesses) - 1; i >= 0; i-- {
 		name := orderedProcesses[i]
+		pm.mu.RLock()
 		process := pm.Processes[name]
+		pm.mu.RUnlock()
+		if process == nil {
+			continue
+		}
 		state := process.GetState()
 		if state == StateRunning || state == StateStarting || state == StateExited || state == StateFatal {
 			process.Stop()
@@ -564,6 +987,8 @@ func (pm *ProcessManager) topologicalSort(graph map[string][]string) ([]string, 
 
 // sortByPriority sorts a slice of process names by their configured priority.
 func (pm *ProcessManager) sortByPriority(names []string) {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
 	sort.Slice(names, func(i, j int) bool {
 		pi, ok := pm.Processes[names[i]]
 		if !ok {

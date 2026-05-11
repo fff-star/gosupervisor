@@ -204,3 +204,22 @@ func TestMetricsIntegration(t *testing.T) {
 	// 检查指标是否更新成功
 	t.Log("集成测试成功")
 }
+
+// TestMetricsStopCollector tests that the collector can be stopped cleanly.
+func TestMetricsStopCollector(t *testing.T) {
+	processManager, err := setupMetricsTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupMetricsTestEnvironment()
+
+	mm := NewMetricsManager(processManager)
+	mm.StartMetricsCollector(100 * time.Millisecond)
+
+	time.Sleep(300 * time.Millisecond)
+	mm.Stop()
+	time.Sleep(100 * time.Millisecond)
+
+	// Should not panic on Stop
+	t.Log("Stop 完成，未发生 panic")
+}
