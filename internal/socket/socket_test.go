@@ -494,3 +494,61 @@ func FuzzHandleCommand(f *testing.F) {
 		}
 	})
 }
+
+func TestHandleCommandSignal(t *testing.T) {
+	s := newTestSocketServer(t)
+
+	// Start a process first so there's something to signal
+	p := s.pm.GetProcess("test1")
+	p.Start()
+	defer p.Stop()
+
+	resp := s.handleCommand("signal test1 SIGHUP")
+	if !strings.HasPrefix(resp, "OK signal") {
+		t.Errorf("signal should succeed, got: %s", resp)
+	}
+}
+
+func TestHandleCommandSignalInvalidSignal(t *testing.T) {
+	s := newTestSocketServer(t)
+	resp := s.handleCommand("signal test1 INVALID")
+	if !strings.HasPrefix(resp, "ERR unknown signal") {
+		t.Errorf("expected ERR unknown signal, got: %s", resp)
+	}
+}
+
+func TestHandleCommandSignalMissingArgs(t *testing.T) {
+	s := newTestSocketServer(t)
+	resp := s.handleCommand("signal test1")
+	if !strings.HasPrefix(resp, "ERR usage") {
+		t.Errorf("expected ERR usage, got: %s", resp)
+	}
+}
+
+func TestHandleCommandEvents(t *testing.T) {
+	s := newTestSocketServer(t)
+
+	process.RecordEvent("test1", process.EventStart, 1, 0, "test")
+	process.RecordEvent("test1", process.EventStop, 1, 0, "test")
+
+	resp := s.handleCommand("events")
+	if !strings.HasPrefix(resp, "OK") {
+		t.Errorf("events should return OK, got: %s", resp)
+	}
+	if !strings.Contains(resp, "start") {
+		t.Error("events should contain 'start' event")
+	}
+}
+
+func TestHandleCommandEventsWithLimit(t *testing.T) {
+	s := newTestSocketServer(t)
+
+	for i := 0; i < 10; i++ {
+		process.RecordEvent("test1", process.EventStart, 1, 0, "test")
+	}
+
+	resp := s.handleCommand("events 3")
+	if !strings.HasPrefix(resp, "OK 3 events") {
+		t.Errorf("expected OK 3 events, got: %s", resp)
+	}
+}

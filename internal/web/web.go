@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"text/template"
 	"time"
 
@@ -24,6 +25,8 @@ type WebServer struct {
 	authUser       string
 	authPass       string
 	apiAuth        bool
+	corsOrigin     string
+	rateLimiter    *RateLimiter
 
 	indexTmpl         *template.Template
 	logsTmpl          *template.Template
@@ -37,6 +40,11 @@ func NewWebServer(processManager *process.ProcessManager, logDir string) (*WebSe
 
 // NewWebServerWithAuth creates a WebServer with optional HTTP Basic Auth.
 func NewWebServerWithAuth(processManager *process.ProcessManager, logDir, user, pass string, apiAuth bool) (*WebServer, error) {
+	return NewWebServerFull(processManager, logDir, user, pass, apiAuth, "", 0)
+}
+
+// NewWebServerFull creates a WebServer with all options including CORS and rate limiting.
+func NewWebServerFull(processManager *process.ProcessManager, logDir, user, pass string, apiAuth bool, corsOrigin string, rateLimitRPS int) (*WebServer, error) {
 	funcs := template.FuncMap{
 		"lower": func(s interface{}) string {
 			return strings.ToLower(fmt.Sprintf("%v", s))
@@ -49,6 +57,10 @@ func NewWebServerWithAuth(processManager *process.ProcessManager, logDir, user, 
 	processDetailTmpl := template.Must(template.New("process").Funcs(funcs).Parse(processDetailTemplate))
 
 	mux := http.NewServeMux()
+	var rl *RateLimiter
+	if rateLimitRPS > 0 {
+		rl = NewRateLimiter(rateLimitRPS, rateLimitRPS*2)
+	}
 	ws := &WebServer{
 		processManager:    processManager,
 		logDir:            logDir,
@@ -56,6 +68,8 @@ func NewWebServerWithAuth(processManager *process.ProcessManager, logDir, user, 
 		authUser:          user,
 		authPass:          pass,
 		apiAuth:           apiAuth,
+		corsOrigin:        corsOrigin,
+		rateLimiter:       rl,
 		indexTmpl:         indexTmpl,
 		logsTmpl:          logsTmpl,
 		systemInfoTmpl:    systemInfoTmpl,
@@ -67,6 +81,9 @@ func NewWebServerWithAuth(processManager *process.ProcessManager, logDir, user, 
 	mux.HandleFunc("/api/v1/processes", ws.handleAPIV1Processes)
 	mux.HandleFunc("/api/v1/processes/", ws.handleAPIV1ProcessAction)
 	mux.HandleFunc("/api/v1/groups/", ws.handleAPIV1GroupAction)
+	mux.HandleFunc("/api/v1/system", ws.handleAPIV1System)
+	mux.HandleFunc("/api/v1/config", ws.handleAPIV1Config)
+	mux.HandleFunc("/api/v1/events", ws.handleAPIV1Events)
 	mux.HandleFunc("/start", ws.handleStart)
 	mux.HandleFunc("/stop", ws.handleStop)
 	mux.HandleFunc("/restart", ws.handleRestart)
@@ -141,7 +158,39 @@ func (ws *WebServer) Start(addr string) error {
 		handler = ws.authMiddleware(ws.mux)
 		fmt.Println("Web界面已启用 HTTP Basic Auth 认证")
 	}
+	if ws.corsOrigin != "" {
+		handler = ws.corsMiddleware(handler)
+		fmt.Printf("Web界面已启用 CORS (origin=%s)\n", ws.corsOrigin)
+	}
+	if ws.rateLimiter != nil {
+		handler = ws.rateLimiter.Middleware(handler)
+		fmt.Println("Web界面已启用 API 速率限制")
+	}
 	return http.ListenAndServe(addr, handler)
+}
+
+// corsMiddleware adds CORS headers for /api/ routes and handles OPTIONS preflight.
+func (ws *WebServer) corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		origin := ws.corsOrigin
+		if origin == "*" {
+			origin = r.Header.Get("Origin")
+		}
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (ws *WebServer) authMiddleware(next http.Handler) http.Handler {
@@ -208,9 +257,40 @@ func (ws *WebServer) handleAPIV1Processes(w http.ResponseWriter, r *http.Request
 		return
 	}
 	snapshots := make([]process.Snapshot, 0)
+	stateFilter := strings.ToUpper(r.URL.Query().Get("state"))
+	groupFilter := r.URL.Query().Get("group")
 	ws.processManager.RangeProcesses(func(name string, p *process.Process) {
-		snapshots = append(snapshots, p.Snapshot())
+		s := p.Snapshot()
+		if stateFilter != "" && string(s.State) != stateFilter {
+			return
+		}
+		if groupFilter != "" && s.Config.Group != groupFilter {
+			return
+		}
+		snapshots = append(snapshots, s)
 	})
+
+	// Pagination via ?offset= and ?limit=
+	var offset, limit int
+	if v, err := fmt.Sscanf(r.URL.Query().Get("offset"), "%d", &offset); v != 1 || err != nil {
+		offset = 0
+	}
+	if v, err := fmt.Sscanf(r.URL.Query().Get("limit"), "%d", &limit); v != 1 || err != nil {
+		limit = 0
+	}
+	total := len(snapshots)
+	if limit > 0 || offset > 0 {
+		if offset >= len(snapshots) {
+			snapshots = nil
+		} else {
+			end := offset + limit
+			if limit <= 0 || end > len(snapshots) {
+				end = len(snapshots)
+			}
+			snapshots = snapshots[offset:end]
+		}
+	}
+	w.Header().Set("X-Total-Count", fmt.Sprintf("%d", total))
 	jsonResponse(w, http.StatusOK, apiV1ProcessesList{Status: "ok", Processes: snapshots})
 }
 
@@ -265,6 +345,16 @@ func (ws *WebServer) handleAPIV1ProcessAction(w http.ResponseWriter, r *http.Req
 		jsonResponse(w, http.StatusOK, apiV1Status{Status: "ok", Message: "Process restarted"})
 	case action == "logs" && r.Method == http.MethodGet:
 		ws.handleProcessLogsStream(w, r, name)
+	case action == "logs/tail" && r.Method == http.MethodGet:
+		ws.handleProcessLogsTail(w, r, name)
+	case action == "logs/stderr" && r.Method == http.MethodGet:
+		ws.handleProcessLogsTailStream(w, r, name, "stderr")
+	case action == "resources" && r.Method == http.MethodGet:
+		ws.handleProcessResources(w, r, p)
+	case action == "reload" && r.Method == http.MethodPost:
+		ws.handleProcessReload(w, r, p)
+	case action == "signal" && r.Method == http.MethodPost:
+		ws.handleProcessSignal(w, r, p)
 	default:
 		jsonResponse(w, http.StatusMethodNotAllowed, apiV1Status{Status: "error", Message: "Method Not Allowed"})
 	}
@@ -415,9 +505,14 @@ func (ws *WebServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use the process's configured stdout log path, falling back to default.
+	// Use the process's configured log path, falling back to default.
+	// Support ?stream=stderr for stderr log access.
 	s := p.Snapshot()
+	stream := r.URL.Query().Get("stream")
 	logPath := s.Config.StdoutLogFile
+	if stream == "stderr" {
+		logPath = s.Config.StderrLogFile
+	}
 	if logPath == "" {
 		logPath = filepath.Join(ws.logDir, fmt.Sprintf("%s.log", processName))
 	}
@@ -430,9 +525,11 @@ func (ws *WebServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 	data := struct {
 		ProcessName string
 		LogContent  string
+		Stream      string
 	}{
 		ProcessName: processName,
 		LogContent:  string(logContent),
+		Stream:      stream,
 	}
 
 	if err := ws.logsTmpl.Execute(w, data); err != nil {
@@ -490,7 +587,7 @@ func (ws *WebServer) handleProcessLogsStream(w http.ResponseWriter, r *http.Requ
 }
 
 func (ws *WebServer) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
-	systemInfo := getSystemInfo()
+	systemInfo := getSystemInfo(ws.processManager)
 	if err := ws.systemInfoTmpl.Execute(w, systemInfo); err != nil {
 		http.Error(w, fmt.Sprintf("渲染模板失败: %v", err), http.StatusInternalServerError)
 	}
@@ -510,28 +607,263 @@ func (ws *WebServer) handleProcessDetail(w http.ResponseWriter, r *http.Request)
 	}
 
 	snap := p.Snapshot()
-	if err := ws.processDetailTmpl.Execute(w, snap); err != nil {
+	type detailData struct {
+		process.Snapshot
+		Uptime string
+	}
+	data := detailData{Snapshot: snap}
+	if snap.State == process.StateRunning && !snap.StartTime.IsZero() {
+		d := time.Since(snap.StartTime)
+		h := int(d.Hours())
+		m := int(d.Minutes()) % 60
+		s := int(d.Seconds()) % 60
+		if h > 0 {
+			data.Uptime = fmt.Sprintf("%dh %dm", h, m)
+		} else if m > 0 {
+			data.Uptime = fmt.Sprintf("%dm %ds", m, s)
+		} else {
+			data.Uptime = fmt.Sprintf("%ds", s)
+		}
+	} else {
+		data.Uptime = "-"
+	}
+	if err := ws.processDetailTmpl.Execute(w, data); err != nil {
 		http.Error(w, fmt.Sprintf("渲染模板失败: %v", err), http.StatusInternalServerError)
 	}
 }
 
+// --- new API v1 handlers ---
+
+func (ws *WebServer) handleAPIV1System(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonResponse(w, http.StatusMethodNotAllowed, apiV1Status{Status: "error", Message: "Method Not Allowed"})
+		return
+	}
+	si := getSystemInfo(ws.processManager)
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"status": "ok",
+		"system": si,
+	})
+}
+
+func (ws *WebServer) handleAPIV1Config(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonResponse(w, http.StatusMethodNotAllowed, apiV1Status{Status: "error", Message: "Method Not Allowed"})
+		return
+	}
+	configs := make([]map[string]interface{}, 0)
+	ws.processManager.RangeProcesses(func(name string, p *process.Process) {
+		s := p.Snapshot()
+		configs = append(configs, map[string]interface{}{
+			"name":      s.Config.Name,
+			"command":   s.Config.Command,
+			"directory": s.Config.Directory,
+			"autostart": s.Config.AutoStart,
+			"autorestart": s.Config.AutoRestart,
+			"startsecs": s.Config.StartSecs,
+			"startretries": s.Config.StartRetries,
+			"stopsecs": s.Config.StopSecs,
+			"stopsignal": s.Config.StopSignal,
+			"user": s.Config.User,
+			"priority": s.Config.Priority,
+			"group": s.Config.Group,
+			"dependson": s.Config.DependsOn,
+			"healthcheckurl": s.Config.HealthCheckURL,
+		})
+	})
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"status":    "ok",
+		"processes": configs,
+	})
+}
+
+func (ws *WebServer) handleAPIV1Events(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonResponse(w, http.StatusMethodNotAllowed, apiV1Status{Status: "error", Message: "Method Not Allowed"})
+		return
+	}
+	var limit int
+	if v := r.URL.Query().Get("limit"); v != "" {
+		fmt.Sscanf(v, "%d", &limit)
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	events := process.GlobalEventBuffer.Snapshot(limit)
+	if events == nil {
+		events = []process.Event{}
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"status": "ok",
+		"events": events,
+	})
+}
+
+func (ws *WebServer) handleProcessLogsTail(w http.ResponseWriter, r *http.Request, name string) {
+	var maxLines, maxBytes int64
+	maxLines = int64(tailMaxLines)
+	maxBytes = int64(tailMaxBytes)
+	if v := r.URL.Query().Get("lines"); v != "" {
+		fmt.Sscanf(v, "%d", &maxLines)
+	}
+	if v := r.URL.Query().Get("maxBytes"); v != "" {
+		fmt.Sscanf(v, "%d", &maxBytes)
+	}
+
+	p := ws.processManager.GetProcess(name)
+	logPath := ""
+	if p != nil {
+		s := p.Snapshot()
+		logPath = s.Config.StdoutLogFile
+	}
+	if logPath == "" {
+		logPath = filepath.Join(ws.logDir, fmt.Sprintf("%s.log", name))
+	}
+
+	content, err := readTailLines(logPath, int(maxLines), maxBytes)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: err.Error()})
+		return
+	}
+
+	// Get file size
+	var fileSize int64
+	if fi, err := os.Stat(logPath); err == nil {
+		fileSize = fi.Size()
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"status":   "ok",
+		"name":     name,
+		"content":  string(content),
+		"fileSize": fileSize,
+	})
+}
+
+func (ws *WebServer) handleProcessSignal(w http.ResponseWriter, r *http.Request, p *process.Process) {
+	var body struct {
+		Signal string `json:"signal"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonResponse(w, http.StatusBadRequest, apiV1Status{Status: "error", Message: "Invalid JSON body"})
+		return
+	}
+
+	sig, ok := process.ParseSignal(body.Signal)
+	if !ok {
+		jsonResponse(w, http.StatusBadRequest, apiV1Status{Status: "error", Message: "Unknown signal: " + body.Signal})
+		return
+	}
+
+	if err := p.Signal(sig); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, apiV1Status{Status: "ok", Message: "Signal sent"})
+}
+
+func (ws *WebServer) handleProcessLogsTailStream(w http.ResponseWriter, r *http.Request, name string, stream string) {
+	var maxLines, maxBytes int64
+	maxLines = int64(tailMaxLines)
+	maxBytes = int64(tailMaxBytes)
+	if v := r.URL.Query().Get("lines"); v != "" {
+		fmt.Sscanf(v, "%d", &maxLines)
+	}
+	if v := r.URL.Query().Get("maxBytes"); v != "" {
+		fmt.Sscanf(v, "%d", &maxBytes)
+	}
+
+	p := ws.processManager.GetProcess(name)
+	logPath := ""
+	if p != nil {
+		s := p.Snapshot()
+		if stream == "stderr" {
+			logPath = s.Config.StderrLogFile
+		} else {
+			logPath = s.Config.StdoutLogFile
+		}
+	}
+	if logPath == "" {
+		logPath = filepath.Join(ws.logDir, fmt.Sprintf("%s.log", name))
+	}
+
+	content, err := readTailLines(logPath, int(maxLines), maxBytes)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: err.Error()})
+		return
+	}
+
+	var fileSize int64
+	if fi, err := os.Stat(logPath); err == nil {
+		fileSize = fi.Size()
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"status":   "ok",
+		"name":     name,
+		"stream":   stream,
+		"content":  string(content),
+		"fileSize": fileSize,
+	})
+}
+
+func (ws *WebServer) handleProcessReload(w http.ResponseWriter, r *http.Request, p *process.Process) {
+	if err := p.Signal(syscall.SIGHUP); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, apiV1Status{Status: "ok", Message: "Process reload signal sent"})
+}
+
+func (ws *WebServer) handleProcessResources(w http.ResponseWriter, r *http.Request, p *process.Process) {
+	if p.ResourceHistory == nil {
+		jsonResponse(w, http.StatusNotFound, apiV1Status{Status: "error", Message: "Resource history not available"})
+		return
+	}
+	minutes := 5
+	if m := r.URL.Query().Get("minutes"); m != "" {
+		if parsed, err := fmt.Sscanf(m, "%d", &minutes); err != nil || parsed != 1 {
+			jsonResponse(w, http.StatusBadRequest, apiV1Status{Status: "error", Message: "Invalid minutes parameter"})
+			return
+		}
+	}
+	var since time.Duration
+	if minutes > 0 {
+		since = time.Duration(minutes) * time.Minute
+	}
+	samples := p.ResourceHistory.Snapshot(since)
+	if samples == nil {
+		samples = []process.ResourceSample{}
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"status":  "ok",
+		"name":    p.Name,
+		"samples": samples,
+	})
+}
+
 // SystemInfo 系统信息结构体
 type SystemInfo struct {
-	OS           string
-	Arch         string
-	Hostname     string
-	CPUCount     int
-	MemoryTotal  uint64
-	MemoryUsed   uint64
-	DiskTotal    uint64
-	DiskUsed     uint64
-	Uptime       string
-	GoVersion    string
-	ProcessCount int
+	OS                  string
+	Arch                string
+	Hostname            string
+	CPUCount            int
+	MemoryTotal         uint64
+	MemoryUsed          uint64
+	DiskTotal           uint64
+	DiskUsed            uint64
+	Uptime              string
+	GoVersion           string
+	ProcessCount        int
+	Version             string
+	DaemonPID           int
+	DaemonUptime        string
+	ManagedProcessCount int
+	TotalLogSize        int64
 }
 
 // getSystemInfo 获取系统信息
-func getSystemInfo() *SystemInfo {
+func getSystemInfo(pm *process.ProcessManager) *SystemInfo {
 	hostname, _ := os.Hostname()
 	info := &SystemInfo{
 		OS:           runtime.GOOS,
@@ -540,6 +872,45 @@ func getSystemInfo() *SystemInfo {
 		CPUCount:     runtime.NumCPU(),
 		GoVersion:    runtime.Version(),
 		ProcessCount: countProcesses(),
+		Version:      "1.0.0",
+		DaemonPID:    os.Getpid(),
+	}
+
+	// Supervisor daemon uptime
+	if procUptime, err := os.ReadFile("/proc/self/stat"); err == nil {
+		fields := strings.Fields(string(procUptime))
+		if len(fields) >= 22 {
+			var startTicks uint64
+			fmt.Sscanf(fields[21], "%d", &startTicks)
+			// jiffies per second, typically 100 on Linux
+			ticksPerSec := int64(100)
+			uptimeSecs := time.Now().Unix() - int64(startTicks)/ticksPerSec
+			if uptimeSecs >= 0 {
+				h := int(uptimeSecs) / 3600
+				m := (int(uptimeSecs) % 3600) / 60
+				info.DaemonUptime = fmt.Sprintf("%dh %dm", h, m)
+			}
+		}
+	}
+	if info.DaemonUptime == "" {
+		info.DaemonUptime = "unknown"
+	}
+
+	// Managed process count and total log disk usage
+	if pm != nil {
+		info.ManagedProcessCount = pm.Len()
+		pm.RangeProcesses(func(name string, p *process.Process) {
+			s := p.Snapshot()
+			cfg := s.Config
+			for _, path := range []string{cfg.StdoutLogFile, cfg.StderrLogFile} {
+				if path == "" {
+					continue
+				}
+				if fi, err := os.Stat(path); err == nil {
+					info.TotalLogSize += fi.Size()
+				}
+			}
+		})
 	}
 
 	// 从 /proc/meminfo 读取内存信息
@@ -749,11 +1120,16 @@ const indexTemplate = `<!DOCTYPE html>
 </head>
 <body>
 	<h1>GoSupervisor 进程管理</h1>
+		<div style="margin-bottom:10px">
+			<label>状态过滤: <select id="filter-state" onchange="applyFilters()"><option value="">全部</option><option value="RUNNING">RUNNING</option><option value="STOPPED">STOPPED</option><option value="STARTING">STARTING</option><option value="STOPPING">STOPPING</option><option value="EXITED">EXITED</option><option value="FATAL">FATAL</option></select></label>
+			<label style="margin-left:10px">组过滤: <input type="text" id="filter-group" placeholder="进程组名称" style="width:120px" oninput="applyFilters()"></label>
+		</div>
 	<table>
 		<tr>
 			<th>进程名称</th>
 			<th>状态</th>
 			<th>PID</th>
+			<th>运行时间</th>
 			<th>启动时间</th>
 			<th>停止时间</th>
 			<th>退出码</th>
@@ -820,6 +1196,33 @@ const indexTemplate = `<!DOCTYPE html>
 				String(d.getMinutes()).padStart(2,'0') + ':' +
 				String(d.getSeconds()).padStart(2,'0');
 		}
+		function fmtUptime(ts, state) {
+			if (!ts || state !== 'RUNNING') return '-';
+			var d = new Date(ts);
+			if (d.getFullYear() <= 1) return '-';
+			var diff = Math.floor((Date.now() - d.getTime()) / 1000);
+			if (diff < 0) return '-';
+			var h = Math.floor(diff / 3600);
+			var m = Math.floor((diff % 3600) / 60);
+			var s = diff % 60;
+			if (h > 0) return h + 'h ' + m + 'm';
+			if (m > 0) return m + 'm ' + s + 's';
+			return s + 's';
+		}
+		function applyFilters() {
+			var state = document.getElementById('filter-state').value;
+			var group = document.getElementById('filter-group').value.toLowerCase();
+			var rows = document.querySelectorAll('#process-table-body tr');
+			for (var i = 0; i < rows.length; i++) {
+				var row = rows[i];
+				var stateCell = (row.cells[1] && row.cells[1].textContent || '').trim();
+				var nameCell = (row.cells[0] && row.cells[0].textContent || '').trim();
+				var show = true;
+				if (state && stateCell.toUpperCase() !== state.toUpperCase()) show = false;
+				if (group && nameCell.toLowerCase().indexOf(group) === -1) show = false;
+				row.style.display = show ? '' : 'none';
+			}
+		}
 		function updateTable() {
 			fetch('/api/processes')
 				.then(function(r) { return r.json(); })
@@ -831,12 +1234,14 @@ const indexTemplate = `<!DOCTYPE html>
 						var pid = p.PID > 0 ? String(p.PID) : '-';
 						var start = fmtTime(p.StartTime);
 						var stop  = fmtTime(p.StopTime);
+						var uptime = fmtUptime(p.StartTime, p.State);
 						var ec    = p.ExitCode !== 0 ? p.ExitCode : '-';
 
 						h += '<tr>' +
 							'<td>' + esc(p.Name) + '</td>' +
 							'<td class="status-' + st + '">' + esc(p.State) + '</td>' +
 							'<td>' + pid + '</td>' +
+							'<td>' + uptime + '</td>' +
 							'<td>' + start + '</td>' +
 							'<td>' + stop + '</td>' +
 							'<td>' + ec + '</td>' +
@@ -1049,9 +1454,29 @@ const systemInfoTemplate = `<!DOCTYPE html>
 			<span>{{.GoVersion}}</span>
 		</div>
 		<div class="info-item">
-			<span class="info-label">进程数量:</span>
+			<span class="info-label">系统进程总数:</span>
 			<span>{{.ProcessCount}}</span>
 		</div>
+			<div class="info-item">
+				<span class="info-label">Supervisor版本:</span>
+				<span>{{.Version}}</span>
+			</div>
+			<div class="info-item">
+				<span class="info-label">Supervisor PID:</span>
+				<span>{{.DaemonPID}}</span>
+			</div>
+			<div class="info-item">
+				<span class="info-label">Supervisor运行时间:</span>
+				<span>{{.DaemonUptime}}</span>
+			</div>
+			<div class="info-item">
+				<span class="info-label">托管进程数:</span>
+				<span>{{.ManagedProcessCount}}</span>
+			</div>
+			<div class="info-item">
+				<span class="info-label">日志磁盘使用:</span>
+				<span>{{.TotalLogSize}} bytes</span>
+			</div>
 	</div>
 	<button class="back-button" onclick="window.location.href='/'">返回首页</button>
 	<div class="footer">
@@ -1191,6 +1616,10 @@ const processDetailTemplate = `<!DOCTYPE html>
 		<div class="detail-item">
 			<span class="detail-label">工作目录:</span>
 			<span>{{.Config.Directory}}</span>
+		</div>
+		<div class="detail-item">
+			<span class="detail-label">运行时间:</span>
+			<span>{{.Uptime}}</span>
 		</div>
 		<div class="detail-item">
 			<span class="detail-label">启动时间:</span>

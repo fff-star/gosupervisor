@@ -23,6 +23,9 @@ const (
 	ProgramName = "gosupervisor"
 )
 
+// metricsManagerRef holds the current metrics manager for use by reloadConfiguration.
+var metricsManagerRef *metrics.MetricsManager
+
 func main() {
 	var exitCode int
 	defer func() { os.Exit(exitCode) }()
@@ -85,6 +88,33 @@ func main() {
 	// Validate config
 	for _, warn := range cfg.ValidateConfig() {
 		fmt.Printf("配置警告: %s\n", warn)
+	}
+
+	// Apply server config from [supervisord] section (CLI flags take precedence)
+	explicitFlags := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) { explicitFlags[f.Name] = true })
+	if cfg.Server != nil {
+		if !explicitFlags["web-addr"] && cfg.Server.WebAddr != "" {
+			*webAddr = cfg.Server.WebAddr
+		}
+		if !explicitFlags["web-user"] && cfg.Server.WebUser != "" {
+			*webUser = cfg.Server.WebUser
+		}
+		if !explicitFlags["web-pass"] && cfg.Server.WebPass != "" {
+			*webPass = cfg.Server.WebPass
+		}
+		if !explicitFlags["metrics-addr"] && cfg.Server.MetricsAddr != "" {
+			*metricsAddr = cfg.Server.MetricsAddr
+		}
+		if !explicitFlags["socket"] && cfg.Server.SocketPath != "" {
+			*socketPath = cfg.Server.SocketPath
+		}
+		if !explicitFlags["state-file"] && cfg.Server.StateFile != "" {
+			*stateFile = cfg.Server.StateFile
+		}
+		if !explicitFlags["l"] && cfg.Server.LogDir != "" {
+			*logDir = cfg.Server.LogDir
+		}
 	}
 
 	// 处理守护进程模式
@@ -173,7 +203,17 @@ func main() {
 
 			// 如果启用了Web界面，启动Web服务器
 			if *webEnable {
-				webServer, err := web.NewWebServerWithAuth(processManager, *logDir, *webUser, *webPass, *webAPIAuth)
+				corsOrigin := ""
+				rateLimitRPS := 0
+				if cfg.Server != nil {
+					if !explicitFlags["web-addr"] && cfg.Server.CORSOrigin != "" {
+						corsOrigin = cfg.Server.CORSOrigin
+					}
+					if !explicitFlags["web-addr"] && cfg.Server.RateLimitRPS > 0 {
+						rateLimitRPS = cfg.Server.RateLimitRPS
+					}
+				}
+				webServer, err := web.NewWebServerFull(processManager, *logDir, *webUser, *webPass, *webAPIAuth, corsOrigin, rateLimitRPS)
 				if err != nil {
 					fmt.Printf("初始化Web服务器失败: %v\n", err)
 					exitCode = 1
@@ -191,14 +231,20 @@ func main() {
 			// 如果启用了Prometheus指标导出
 			if *metricsEnable {
 				// 创建指标管理器
-				metricsManager := metrics.NewMetricsManager(processManager)
+				mm := metrics.NewMetricsManager(processManager)
+				metricsManagerRef = mm
+
+				// Wire health check failure callback
+				processManager.RangeProcesses(func(name string, p *process.Process) {
+					p.OnHealthCheckFailure = mm.RecordHealthCheckFailure
+				})
 
 				// 启动指标收集器
-				metricsManager.StartMetricsCollector(5 * time.Second)
+				mm.StartMetricsCollector(5 * time.Second)
 
 				// 在goroutine中启动指标服务器
 				go func() {
-					if err := metricsManager.StartMetricsServer(*metricsAddr); err != nil {
+					if err := mm.StartMetricsServer(*metricsAddr); err != nil {
 						fmt.Printf("启动指标服务器失败: %v\n", err)
 					}
 				}()
@@ -413,6 +459,14 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 	// 添加新进程
 	for _, programCfg := range cfg.Programs {
 		processManager.AddProcess(programCfg)
+	}
+
+	// Re-wire metrics callback
+	if metricsManagerRef != nil {
+		processManager.RangeProcesses(func(name string, p *process.Process) {
+			p.OnHealthCheckFailure = metricsManagerRef.RecordHealthCheckFailure
+		})
+		metricsManagerRef.RecordConfigReload()
 	}
 
 	// 重新启动所有进程

@@ -63,28 +63,45 @@ type ProgramConfig struct {
 	CgroupPath string `yaml:"cgrouppath" json:"cgrouppath"`
 
 	// Webhook notifications
-	WebhookURL string `yaml:"webhookurl" json:"webhookurl"`
+	WebhookURL     string `yaml:"webhookurl" json:"webhookurl"`
+	WebhookRetries int    `yaml:"webhookretries" json:"webhookretries"`
+	WebhookTimeout int    `yaml:"webhooktimeout" json:"webhooktimeout"`
 
 	// Stdin
 	StdinFile string `yaml:"stdinfile" json:"stdinfile"`
+}
+
+// ServerConfig holds global server settings (typically from [supervisord] section).
+type ServerConfig struct {
+	WebAddr     string `yaml:"webaddr" json:"webaddr"`
+	WebUser     string `yaml:"webuser" json:"webuser"`
+	WebPass     string `yaml:"webpass" json:"webpass"`
+	MetricsAddr string `yaml:"metricsaddr" json:"metricsaddr"`
+	SocketPath  string `yaml:"socketpath" json:"socketpath"`
+	StateFile   string `yaml:"statefile" json:"statefile"`
+	LogDir      string `yaml:"logdir" json:"logdir"`
+	CORSOrigin  string `yaml:"corsorigin" json:"corsorigin"`
+	RateLimitRPS int   `yaml:"ratelimitrps" json:"ratelimitrps"`
 }
 
 // Config 表示整个配置文件的结构
 type Config struct {
 	// Programs 存储所有进程的配置，键为进程名称
 	Programs map[string]*ProgramConfig
+	// Server contains optional global server settings (from [supervisord] section)
+	Server *ServerConfig
 }
 
 // YAMLConfig 用于解析YAML格式的配置文件
 type YAMLConfig struct {
-	// Programs 存储所有进程的配置，键为进程名称
 	Programs map[string]*ProgramConfig `yaml:"programs"`
+	Server   *ServerConfig            `yaml:"supervisord"`
 }
 
 // JSONConfig 用于解析JSON格式的配置文件
 type JSONConfig struct {
-	// Programs 存储所有进程的配置，键为进程名称
 	Programs map[string]*ProgramConfig `json:"programs"`
+	Server   *ServerConfig            `json:"supervisord"`
 }
 
 // LoadConfig 加载配置文件，根据文件扩展名自动检测格式
@@ -128,6 +145,7 @@ func loadINIConfig(configPath string) (*Config, error) {
 
 	scanner := bufio.NewScanner(file)
 	var currentProgram *ProgramConfig
+	var currentSection string
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -137,6 +155,8 @@ func loadINIConfig(configPath string) (*Config, error) {
 
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
 			section := strings.TrimSpace(line[1 : len(line)-1])
+			currentSection = section
+			currentProgram = nil
 			if strings.HasPrefix(section, "program:") {
 				programName := strings.TrimPrefix(section, "program:")
 				currentProgram = &ProgramConfig{
@@ -168,6 +188,8 @@ func loadINIConfig(configPath string) (*Config, error) {
 					RestartWindowSecs:             60,
 				}
 				config.Programs[programName] = currentProgram
+			} else if section == "supervisord" {
+				config.Server = &ServerConfig{}
 			}
 			continue
 		}
@@ -277,8 +299,38 @@ func loadINIConfig(configPath string) (*Config, error) {
 					currentProgram.CgroupPath = value
 				case "webhookurl":
 					currentProgram.WebhookURL = value
+				case "webhookretries":
+					fmt.Sscanf(value, "%d", &currentProgram.WebhookRetries)
+				case "webhooktimeout":
+					fmt.Sscanf(value, "%d", &currentProgram.WebhookTimeout)
 				case "stdinfile":
 					currentProgram.StdinFile = value
+				}
+			}
+		} else if config.Server != nil && currentSection == "supervisord" {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+				switch key {
+				case "webaddr":
+					config.Server.WebAddr = value
+				case "webuser":
+					config.Server.WebUser = value
+				case "webpass":
+					config.Server.WebPass = value
+				case "metricsaddr":
+					config.Server.MetricsAddr = value
+				case "socketpath":
+					config.Server.SocketPath = value
+				case "statefile":
+					config.Server.StateFile = value
+				case "logdir":
+					config.Server.LogDir = value
+				case "corsorigin":
+					config.Server.CORSOrigin = value
+				case "ratelimitrps":
+					fmt.Sscanf(value, "%d", &config.Server.RateLimitRPS)
 				}
 			}
 		}
@@ -308,7 +360,12 @@ func loadYAMLConfig(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("解析YAML配置文件错误: %v", err)
 	}
 
-	return applyDefaults(yamlConfig.Programs, rawPrograms)
+	cfg, err := applyDefaults(yamlConfig.Programs, rawPrograms)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Server = yamlConfig.Server
+	return cfg, nil
 }
 
 func applyDefaults(programs map[string]*ProgramConfig, rawPrograms map[string]map[string]interface{}) (*Config, error) {
@@ -432,7 +489,12 @@ func loadJSONConfig(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("解析JSON配置文件错误: %v", err)
 	}
 
-	return applyDefaults(jsonConfig.Programs, rawPrograms)
+	cfg, err := applyDefaults(jsonConfig.Programs, rawPrograms)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Server = jsonConfig.Server
+	return cfg, nil
 }
 
 // ValidateConfig validates config consistency — missing DependsOn references, etc.

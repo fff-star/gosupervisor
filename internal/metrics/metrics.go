@@ -3,6 +3,7 @@ package metrics
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"runtime"
 	"sync"
 	"time"
@@ -31,10 +32,14 @@ type MetricsManager struct {
 	supervisorGoroutines prometheus.Gauge
 	supervisorMemory     prometheus.Gauge
 	configReloads        prometheus.Counter
+	processLogSize       *prometheus.GaugeVec
+	healthCheckLastOK    *prometheus.GaugeVec
+	processStartCount    *prometheus.CounterVec
 
 	// Track previous restart counts for CounterVec delta
-	prevRestarts map[string]float64
-	startTime    time.Time
+	prevRestarts    map[string]float64
+	prevStartCounts map[string]float64
+	startTime       time.Time
 
 	// 内部状态
 	mu   sync.Mutex
@@ -46,11 +51,12 @@ func NewMetricsManager(processManager *process.ProcessManager) *MetricsManager {
 	registry := prometheus.NewRegistry()
 
 	mm := &MetricsManager{
-		processManager: processManager,
-		registry:       registry,
-		prevRestarts:   make(map[string]float64),
-		startTime:      time.Now(),
-		stop:           make(chan struct{}),
+		processManager:  processManager,
+		registry:        registry,
+		prevRestarts:    make(map[string]float64),
+		prevStartCounts: make(map[string]float64),
+		startTime:       time.Now(),
+		stop:            make(chan struct{}),
 	}
 
 	// 注册指标
@@ -133,6 +139,24 @@ func (mm *MetricsManager) registerMetrics() {
 		Help: "配置重载总次数",
 	})
 
+	// 进程日志大小
+	mm.processLogSize = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "gosupervisor_process_log_size_bytes",
+		Help: "进程日志文件大小（字节）",
+	}, []string{"name"})
+
+	// 上次健康检查成功时间戳
+	mm.healthCheckLastOK = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "gosupervisor_healthcheck_last_success_timestamp",
+		Help: "进程上次健康检查成功的Unix时间戳",
+	}, []string{"name"})
+
+	// 进程启动总次数（包括首次启动和重启）
+	mm.processStartCount = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "gosupervisor_process_start_count_total",
+		Help: "进程启动总次数（包括首次启动和重启）",
+	}, []string{"name"})
+
 	// 注册到注册表
 	mm.registry.MustRegister(
 		mm.processCount,
@@ -147,6 +171,9 @@ func (mm *MetricsManager) registerMetrics() {
 		mm.supervisorGoroutines,
 		mm.supervisorMemory,
 		mm.configReloads,
+		mm.processLogSize,
+		mm.healthCheckLastOK,
+		mm.processStartCount,
 	)
 }
 
@@ -207,8 +234,24 @@ func (mm *MetricsManager) UpdateMetrics() {
 		// Health check metrics
 		if s.Healthy {
 			mm.healthCheckStatus.WithLabelValues(name).Set(1)
+			mm.healthCheckLastOK.WithLabelValues(name).Set(float64(time.Now().Unix()))
 		} else {
 			mm.healthCheckStatus.WithLabelValues(name).Set(0)
+		}
+
+		// Process start count (delta-based CounterVec)
+		currentStarts := float64(s.RestartCount + 1) // initial start + restarts
+		prevStarts := mm.prevStartCounts[name]
+		if currentStarts > prevStarts {
+			mm.processStartCount.WithLabelValues(name).Add(currentStarts - prevStarts)
+		}
+		mm.prevStartCounts[name] = currentStarts
+
+		// Log size: approximate from configured log path
+		if s.Config.StdoutLogFile != "" {
+			if fi, err := os.Stat(s.Config.StdoutLogFile); err == nil {
+				mm.processLogSize.WithLabelValues(name).Set(float64(fi.Size()))
+			}
 		}
 	})
 }

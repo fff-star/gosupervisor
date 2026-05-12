@@ -1613,3 +1613,238 @@ func FuzzValidateProcessName(f *testing.F) {
 		_ = result
 	})
 }
+
+// --- New API v1 endpoint tests ---
+
+func TestAPIV1System(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupTestEnvironment()
+	ws, _ := NewWebServer(processManager, "./test_logs")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/system", nil)
+	w := httptest.NewRecorder()
+	ws.handleAPIV1System(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse JSON: %v", err)
+	}
+	if resp["status"] != "ok" {
+		t.Errorf("expected status ok, got %v", resp["status"])
+	}
+	si, ok := resp["system"].(map[string]interface{})
+	if !ok {
+		t.Fatal("system field missing or not an object")
+	}
+	// Verify new supervisor fields exist
+	for _, key := range []string{"Version", "DaemonPID", "DaemonUptime", "ManagedProcessCount", "TotalLogSize"} {
+		if _, exists := si[key]; !exists {
+			t.Errorf("missing system field: %s", key)
+		}
+	}
+}
+
+func TestAPIV1Config(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupTestEnvironment()
+	ws, _ := NewWebServer(processManager, "./test_logs")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
+	w := httptest.NewRecorder()
+	ws.handleAPIV1Config(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse JSON: %v", err)
+	}
+	if resp["status"] != "ok" {
+		t.Errorf("expected status ok, got %v", resp["status"])
+	}
+}
+
+func TestAPIV1Events(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupTestEnvironment()
+	ws, _ := NewWebServer(processManager, "./test_logs")
+
+	process.RecordEvent("test1", process.EventStart, 1, 0, "test")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/events?limit=10", nil)
+	w := httptest.NewRecorder()
+	ws.handleAPIV1Events(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse JSON: %v", err)
+	}
+	if resp["status"] != "ok" {
+		t.Errorf("expected status ok, got %v", resp["status"])
+	}
+}
+
+func TestAPIV1ProcessesPagination(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupTestEnvironment()
+	ws, _ := NewWebServer(processManager, "./test_logs")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/processes?limit=1", nil)
+	w := httptest.NewRecorder()
+	ws.handleAPIV1Processes(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse JSON: %v", err)
+	}
+
+	if totalHeader := w.Header().Get("X-Total-Count"); totalHeader != "1" {
+		t.Errorf("expected X-Total-Count 1, got %s", totalHeader)
+	}
+}
+
+func TestAPIV1SystemMethodNotAllowed(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupTestEnvironment()
+	ws, _ := NewWebServer(processManager, "./test_logs")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/system", nil)
+	w := httptest.NewRecorder()
+	ws.handleAPIV1System(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestAPIV1ConfigMethodNotAllowed(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupTestEnvironment()
+	ws, _ := NewWebServer(processManager, "./test_logs")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/config", nil)
+	w := httptest.NewRecorder()
+	ws.handleAPIV1Config(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestAPIV1ProcessResources(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupTestEnvironment()
+	ws, _ := NewWebServer(processManager, "./test_logs")
+
+	var name string
+	processManager.RangeProcesses(func(n string, p *process.Process) { name = n })
+	if name == "" {
+		t.Fatal("no processes available")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/processes/"+name+"/resources", nil)
+	w := httptest.NewRecorder()
+	ws.handleAPIV1ProcessAction(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse JSON: %v", err)
+	}
+	if resp["status"] != "ok" {
+		t.Errorf("expected status ok, got %v", resp["status"])
+	}
+	if resp["name"] != name {
+		t.Errorf("expected name %q, got %v", name, resp["name"])
+	}
+	samples, ok := resp["samples"].([]interface{})
+	if !ok {
+		t.Fatal("samples field missing or not an array")
+	}
+	if len(samples) != 0 {
+		t.Logf("initial samples count: %d", len(samples))
+	}
+}
+
+func TestAPIV1ProcessResourcesWithMinutes(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupTestEnvironment()
+	ws, _ := NewWebServer(processManager, "./test_logs")
+
+	var name string
+	processManager.RangeProcesses(func(n string, p *process.Process) { name = n })
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/processes/"+name+"/resources?minutes=10", nil)
+	w := httptest.NewRecorder()
+	ws.handleAPIV1ProcessAction(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if resp["status"] != "ok" {
+		t.Errorf("expected status ok, got %v", resp["status"])
+	}
+}
+
+func TestAPIV1ProcessResourcesInvalidMinutes(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupTestEnvironment()
+	ws, _ := NewWebServer(processManager, "./test_logs")
+
+	var name string
+	processManager.RangeProcesses(func(n string, p *process.Process) { name = n })
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/processes/"+name+"/resources?minutes=abc", nil)
+	w := httptest.NewRecorder()
+	ws.handleAPIV1ProcessAction(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}

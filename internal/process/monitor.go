@@ -72,9 +72,11 @@ func (m *Monitor) handleExitedProcess(process *Process) {
 	if !process.shouldRestartOnExitCode() {
 		process.State = StateFatal
 		name := process.Name
+		exitCode := process.ExitCode
 		process.mu.Unlock()
-		fmt.Printf("进程 %s 因退出码策略不重启 (exit=%d)\n", name, process.ExitCode)
+		fmt.Printf("进程 %s 因退出码策略不重启 (exit=%d)\n", name, exitCode)
 		process.sendWebhook()
+		RecordEvent(name, EventFatal, process.PID, exitCode, "exit code policy")
 		return
 	}
 
@@ -85,6 +87,7 @@ func (m *Monitor) handleExitedProcess(process *Process) {
 		process.mu.Unlock()
 		fmt.Printf("进程 %s 达到重启速率限制，进入FATAL状态\n", name)
 		process.sendWebhook()
+		RecordEvent(name, EventFatal, process.PID, process.ExitCode, "restart rate exceeded")
 		return
 	}
 
@@ -94,6 +97,7 @@ func (m *Monitor) handleExitedProcess(process *Process) {
 		process.mu.Unlock()
 		fmt.Printf("进程 %s 达到最大重启次数，进入FATAL状态\n", name)
 		process.sendWebhook()
+		RecordEvent(name, EventFatal, process.PID, process.ExitCode, "max retries")
 		return
 	}
 
@@ -142,11 +146,14 @@ func (m *Monitor) checkRunningProcess(process *Process) {
 
 	// Health check restart: unhealthy process with HealthCheckRestart enabled
 	if process.Config.HealthCheckRestart && !process.Healthy && process.Config.HealthCheckURL != "" {
-		process.State = StateStarting
+		if process.State != StateRunning {
+			process.mu.Unlock()
+			return
+		}
 		name := process.Name
 		process.mu.Unlock()
 		fmt.Printf("进程 %s 健康检查失败，触发重启...\n", name)
-		if err := process.Start(); err != nil {
+		if err := process.Restart(); err != nil {
 			fmt.Printf("健康检查重启进程 %s 失败: %v\n", name, err)
 			process.mu.Lock()
 			if process.StartRetries > process.Config.StartRetries {

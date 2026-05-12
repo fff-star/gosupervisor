@@ -603,3 +603,77 @@ func FuzzLoadJSON(f *testing.F) {
 		}
 	})
 }
+
+func TestLoadINISupervisordSection(t *testing.T) {
+	tmpDir := t.TempDir()
+	iniPath := filepath.Join(tmpDir, "test_supervisord.ini")
+	content := `[supervisord]
+webaddr = :9000
+webuser = admin
+webpass = secret
+metricsaddr = :9100
+socketpath = /tmp/test.sock
+statefile = /tmp/state.json
+logdir = /var/log/gosupervisor
+
+[program:app]
+command = sleep 60
+`
+	if err := os.WriteFile(iniPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write test INI: %v", err)
+	}
+
+	cfg, err := LoadConfig(iniPath)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if cfg.Server == nil {
+		t.Fatal("expected Server config, got nil")
+	}
+	if cfg.Server.WebAddr != ":9000" {
+		t.Errorf("expected WebAddr :9000, got %s", cfg.Server.WebAddr)
+	}
+	if cfg.Server.WebUser != "admin" {
+		t.Errorf("expected WebUser admin, got %s", cfg.Server.WebUser)
+	}
+	if cfg.Server.WebPass != "secret" {
+		t.Errorf("expected WebPass secret, got %s", cfg.Server.WebPass)
+	}
+	if cfg.Server.MetricsAddr != ":9100" {
+		t.Errorf("expected MetricsAddr :9100, got %s", cfg.Server.MetricsAddr)
+	}
+	if cfg.Server.SocketPath != "/tmp/test.sock" {
+		t.Errorf("expected SocketPath /tmp/test.sock, got %s", cfg.Server.SocketPath)
+	}
+	if cfg.Server.StateFile != "/tmp/state.json" {
+		t.Errorf("expected StateFile /tmp/state.json, got %s", cfg.Server.StateFile)
+	}
+	if cfg.Server.LogDir != "/var/log/gosupervisor" {
+		t.Errorf("expected LogDir /var/log/gosupervisor, got %s", cfg.Server.LogDir)
+	}
+	// Verify program still correctly parsed
+	if _, ok := cfg.Programs["app"]; !ok {
+		t.Error("expected program 'app' to still be parsed")
+	}
+}
+
+func TestLoadINIWithoutSupervisordSection(t *testing.T) {
+	tmpDir := t.TempDir()
+	iniPath := filepath.Join(tmpDir, "test_noserver.ini")
+	content := `[program:app]
+command = sleep 60
+`
+	if err := os.WriteFile(iniPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write test INI: %v", err)
+	}
+
+	cfg, err := LoadConfig(iniPath)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if cfg.Server != nil {
+		t.Error("expected nil Server when no [supervisord] section")
+	}
+}

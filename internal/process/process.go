@@ -33,6 +33,11 @@ const (
 	StateFatal    ProcessState = "FATAL"
 )
 
+// Logf is the package-level log function. Set to t.Logf in tests to silence output.
+var Logf = func(format string, args ...interface{}) {
+	fmt.Printf(format, args...)
+}
+
 // umaskMu prevents races when setting umask before fork.
 var umaskMu sync.Mutex
 
@@ -44,6 +49,12 @@ var stopSignals = map[string]syscall.Signal{
 	"SIGUSR1": syscall.SIGUSR1,
 	"SIGUSR2": syscall.SIGUSR2,
 	"SIGKILL": syscall.SIGKILL,
+}
+
+// ParseSignal returns the syscall.Signal for a signal name string.
+func ParseSignal(name string) (syscall.Signal, bool) {
+	sig, ok := stopSignals[name]
+	return sig, ok
 }
 
 type Process struct {
@@ -95,6 +106,12 @@ type Process struct {
 
 	// System-wide CPU ticks for accurate percentage
 	prevSysTicks int64
+
+	// Callback for external systems (metrics, etc.)
+	OnHealthCheckFailure func(name string)
+
+	// Resource history ring buffer (60 samples at 5s = 5 minutes)
+	ResourceHistory *ResourceHistory
 }
 
 type ProcessManager struct {
@@ -113,13 +130,14 @@ func NewProcessManager(logger *logger.Logger) *ProcessManager {
 func (pm *ProcessManager) AddProcess(cfg *config.ProgramConfig) *Process {
 	ctx, cancel := context.WithCancel(context.Background())
 	process := &Process{
-		Name:       cfg.Name,
-		Config:     cfg,
-		State:      StateStopped,
-		Context:    ctx,
-		CancelFunc: cancel,
-		Logger:     pm.Logger,
-		Group:      cfg.Group,
+		Name:            cfg.Name,
+		Config:          cfg,
+		State:           StateStopped,
+		Context:         ctx,
+		CancelFunc:      cancel,
+		Logger:          pm.Logger,
+		Group:           cfg.Group,
+		ResourceHistory: NewResourceHistory(60),
 	}
 	pm.mu.Lock()
 	pm.Processes[cfg.Name] = process
@@ -288,6 +306,7 @@ func (p *Process) Start() error {
 	p.mu.Unlock()
 
 	p.sendWebhook()
+	RecordEvent(p.Name, EventStart, p.PID, 0, "started")
 
 	go p.monitor()
 	go p.monitorResources()
@@ -368,14 +387,51 @@ done:
 	p.mu.Unlock()
 
 	p.sendWebhook()
+	RecordEvent(p.Name, EventStop, p.PID, p.ExitCode, "stopped")
 	return nil
 }
 
 func (p *Process) Restart() error {
+	p.mu.Lock()
+	if p.State == StateStopping || p.State == StateStarting {
+		p.mu.Unlock()
+		return nil // already restarting
+	}
+	// Atomically transition RUNNING → STOPPING so concurrent Restart() calls skip.
+	if p.State == StateRunning {
+		p.State = StateStopping
+	}
+	p.mu.Unlock()
 	if err := p.Stop(); err != nil {
 		return err
 	}
+	// If another caller already started the process between Stop and Start,
+	// the restart is effectively done — don't fail with "already running".
+	p.mu.Lock()
+	if p.State == StateRunning {
+		p.mu.Unlock()
+		return nil
+	}
+	p.mu.Unlock()
 	return p.Start()
+}
+
+// Signal sends a signal to a running process.
+func (p *Process) Signal(sig syscall.Signal) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.Cmd == nil || p.Cmd.Process == nil {
+		return fmt.Errorf("process %s is not running", p.Name)
+	}
+	if p.State != StateRunning {
+		return fmt.Errorf("process %s is not running (state=%s)", p.Name, p.State)
+	}
+	if err := p.Cmd.Process.Signal(sig); err != nil {
+		return fmt.Errorf("failed to send signal %s to %s: %v", sig, p.Name, err)
+	}
+	RecordEvent(p.Name, EventSignal, p.PID, 0, fmt.Sprintf("signal %s", sig))
+	return nil
 }
 
 func (p *Process) GetState() ProcessState {
@@ -451,6 +507,9 @@ func (p *Process) monitor() {
 		}
 	} else {
 		p.ExitCode = 0
+	}
+	if p.State == StateExited {
+		RecordEvent(p.Name, EventExit, p.PID, p.ExitCode, "exited")
 	}
 	p.mu.Unlock()
 
@@ -560,6 +619,15 @@ func (p *Process) readProcStats(pid int) {
 	p.prevSysTicks = sysTicks
 
 	p.Healthy = p.CPUUsage < p.Config.CPUThresholdPercent && p.MemoryUsage < uint64(p.Config.MemoryThresholdBytes)
+
+	// Push resource sample for history
+	if p.ResourceHistory != nil {
+		p.ResourceHistory.Push(ResourceSample{
+			Timestamp: now,
+			CPU:       p.CPUUsage,
+			Memory:    p.MemoryUsage,
+		})
+	}
 	p.mu.Unlock()
 }
 
@@ -607,13 +675,29 @@ func (p *Process) runHealthCheck(ctx context.Context) {
 
 			ok := checkHealth(url, timeout)
 			p.mu.Lock()
+			wasHealthy := p.Healthy
 			if ok {
 				p.healthCheckFailures = 0
 				p.Healthy = true
+				if !wasHealthy {
+					RecordEvent(p.Name, EventHealthRestore, p.PID, 0, "health restored")
+					p.mu.Unlock()
+					p.sendWebhook()
+					p.mu.Lock()
+				}
 			} else {
 				p.healthCheckFailures++
+				if p.OnHealthCheckFailure != nil {
+					p.OnHealthCheckFailure(p.Name)
+				}
 				if p.healthCheckFailures >= threshold {
 					p.Healthy = false
+					if wasHealthy {
+						RecordEvent(p.Name, EventHealthFail, p.PID, 0, "health check failed")
+						p.mu.Unlock()
+						p.sendWebhook()
+						p.mu.Lock()
+					}
 				}
 			}
 			p.mu.Unlock()
@@ -801,23 +885,46 @@ func (pm *ProcessManager) RestoreState(path string) error {
 }
 
 // sendWebhook POSTs process state change to the configured webhook URL.
+// Supports configurable retries with exponential backoff.
 func (p *Process) sendWebhook() {
 	if p.Config.WebhookURL == "" {
 		return
 	}
+	timeout := time.Duration(p.Config.WebhookTimeout) * time.Second
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	retries := p.Config.WebhookRetries
+	if retries < 0 {
+		retries = 0
+	}
+
 	payload := fmt.Sprintf(
 		`{"name":"%s","group":"%s","state":"%s","pid":%d,"exitCode":%d,"timestamp":"%s"}`,
 		p.Name, p.Config.Group, p.State, p.PID, p.ExitCode,
 		time.Now().Format(time.RFC3339),
 	)
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(p.Config.WebhookURL, "application/json",
-		strings.NewReader(payload))
-	if err != nil {
-		fmt.Printf("进程 %s webhook 发送失败: %v\n", p.Name, err)
+
+	var lastErr error
+	for attempt := 0; attempt <= retries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(1<<(attempt-1)) * time.Second
+			if backoff > 30*time.Second {
+				backoff = 30 * time.Second
+			}
+			time.Sleep(backoff)
+		}
+		client := &http.Client{Timeout: timeout}
+		resp, err := client.Post(p.Config.WebhookURL, "application/json",
+			strings.NewReader(payload))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp.Body.Close()
 		return
 	}
-	resp.Body.Close()
+		Logf("进程 %s webhook 发送失败 (已重试 %d 次): %v\n", p.Name, retries, lastErr)
 }
 
 // RestartGroup restarts all processes in a group.

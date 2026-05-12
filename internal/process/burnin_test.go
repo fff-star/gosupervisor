@@ -4,7 +4,10 @@ package process
 
 import (
 	"math/rand"
+	"os"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +17,10 @@ import (
 	"gosupervisor/internal/logger"
 )
 
+func init() {
+	Logf = func(format string, args ...interface{}) {}
+}
+
 // TestBurnIn runs a 5-hour stress test cycling through random start/stop/restart
 // operations on multiple managed processes, checking for goroutine leaks, memory
 // growth, and deadlocks.
@@ -22,8 +29,14 @@ import (
 //
 //	go test -tags burnin -run TestBurnIn -timeout 5h ./internal/process/
 func TestBurnIn(t *testing.T) {
-	const duration = 5 * time.Hour
-	const processCount = 6
+	duration := 5 * time.Hour
+	if s := os.Getenv("BURNIN_TIME"); s != "" {
+		s = strings.TrimSuffix(s, "h")
+		if h, err := strconv.Atoi(s); err == nil && h > 0 {
+			duration = time.Duration(h) * time.Hour
+		}
+	}
+	const processCount = 7
 
 	// --- Setup ---
 	logDir := t.TempDir()
@@ -35,33 +48,58 @@ func TestBurnIn(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 
-	names := []string{"sleep", "echo", "cat", "shloop", "date", "yes"}
-	for _, name := range names {
-		var cmd string
-		switch name {
-		case "sleep":
-			cmd = "sleep 60"
-		case "echo":
-			cmd = "echo 'burn-in test running'"
-		case "cat":
-			cmd = "cat /dev/null"
-		case "shloop":
-			cmd = "while true; do sleep 1; done"
-		case "date":
-			cmd = "date"
-		case "yes":
-			cmd = "yes | head -n 1000000 > /dev/null"
+	type procDef struct {
+		name, cmd, group string
+		healthCheck      string
+		webhook          string
+		autoRestart      bool
+		restartMaxCount  int
+	}
+	procs := []procDef{
+		{name: "sleep", cmd: "sleep 60", group: "g1"},
+		{name: "echo", cmd: "echo 'burn-in test running'", group: "g1"},
+		{name: "cat", cmd: "cat /dev/null", group: "g2"},
+		{name: "shloop", cmd: "while true; do sleep 1; done", group: "g2"},
+		{name: "date", cmd: "date", group: ""},
+		{name: "yes", cmd: "yes | head -n 1000000 > /dev/null", group: ""},
+		{
+			name:            "healthcheck",
+			cmd:             "while true; do sleep 1; done",
+			group:           "g3",
+			healthCheck:     "http://127.0.0.1:19999/health",
+			webhook:         "http://127.0.0.1:19999/webhook",
+			autoRestart:     true,
+			restartMaxCount: 2,
+		},
+	}
+	names := make([]string, len(procs))
+	groups := make(map[string][]string)
+	for i, d := range procs {
+		names[i] = d.name
+		if d.group != "" {
+			groups[d.group] = append(groups[d.group], d.name)
 		}
 		pm.AddProcess(&config.ProgramConfig{
-			Name:         name,
-			Command:      cmd,
-			AutoStart:    false,
-			AutoRestart:  false,
-			StartSecs:    0,
-			StartRetries: 3,
-			StopSecs:     2,
-			StopSignal:   "SIGTERM",
-			Environment:  make(map[string]string),
+			Name:             d.name,
+			Command:          d.cmd,
+			AutoStart:        false,
+			AutoRestart:      d.autoRestart,
+			StartSecs:        0,
+			StartRetries:     3,
+			StopSecs:         2,
+			StopSignal:       "SIGTERM",
+			Group:            d.group,
+			HealthCheckURL:                d.healthCheck,
+			HealthCheckInterval:           5,
+			HealthCheckTimeout:            1,
+			HealthCheckUnhealthyThreshold: 2,
+			HealthCheckRestart:            true,
+			WebhookURL:                    d.webhook,
+			WebhookTimeout:                1,
+			WebhookRetries:                1,
+			RestartWindowSecs:             60,
+			RestartMaxCount:               d.restartMaxCount,
+			Environment:      make(map[string]string),
 		})
 	}
 
@@ -73,23 +111,26 @@ func TestBurnIn(t *testing.T) {
 	var memStatsStart runtime.MemStats
 	runtime.ReadMemStats(&memStatsStart)
 
-	t.Logf("Burn-in 测试启动: duration=%v, processes=%d, start_goroutines=%d",
-		duration, processCount, startGoroutines)
+	t.Logf("Burn-in 测试启动: duration=%v, processes=%d, groups=%d, start_goroutines=%d",
+		duration, processCount, len(groups), startGoroutines)
 
 	// --- Run ---
 	startTime := time.Now()
 	deadline := startTime.Add(duration)
 	iteration := 0
 	failures := 0
-	stats := map[string]int{"start": 0, "stop": 0, "restart": 0, "kill": 0, "status": 0}
+	stats := map[string]int{
+		"start": 0, "stop": 0, "restart": 0, "kill": 0, "status": 0,
+		"signal": 0, "group": 0, "event": 0, "resource": 0,
+	}
 
 	for time.Now().Before(deadline) {
 		iteration++
-		name := names[rand.Intn(len(names))]
-		action := rand.Intn(5) // 0=start, 1=stop, 2=restart, 3=kill, 4=status
+		action := rand.Intn(9) // 0-8
 
 		switch action {
-		case 0:
+		case 0: // start
+			name := names[rand.Intn(len(names))]
 			p := pm.GetProcess(name)
 			if p != nil {
 				st := p.GetState()
@@ -100,7 +141,8 @@ func TestBurnIn(t *testing.T) {
 				}
 			}
 			stats["start"]++
-		case 1:
+		case 1: // stop
+			name := names[rand.Intn(len(names))]
 			p := pm.GetProcess(name)
 			if p != nil {
 				st := p.GetState()
@@ -112,7 +154,8 @@ func TestBurnIn(t *testing.T) {
 			}
 			time.Sleep(50 * time.Millisecond)
 			stats["stop"]++
-		case 2:
+		case 2: // restart
+			name := names[rand.Intn(len(names))]
 			p := pm.GetProcess(name)
 			if p != nil {
 				st := p.GetState()
@@ -123,8 +166,8 @@ func TestBurnIn(t *testing.T) {
 				}
 			}
 			stats["restart"]++
-		case 3:
-			// Force kill: stop then restart
+		case 3: // kill (stop + restart)
+			name := names[rand.Intn(len(names))]
 			p := pm.GetProcess(name)
 			if p != nil {
 				p.Stop()
@@ -132,12 +175,47 @@ func TestBurnIn(t *testing.T) {
 				_ = p.Start()
 			}
 			stats["kill"]++
-		case 4:
-			// Read status (tests concurrent read safety)
+		case 4: // status (tests concurrent read safety)
 			pm.RangeProcesses(func(n string, p *Process) {
 				p.Snapshot()
 			})
 			stats["status"]++
+		case 5: // signal
+			name := names[rand.Intn(len(names))]
+			p := pm.GetProcess(name)
+			if p != nil && p.GetState() == StateRunning {
+				sigs := []string{"SIGHUP", "SIGUSR1"}
+				sig, _ := ParseSignal(sigs[rand.Intn(len(sigs))])
+				_ = p.Signal(sig)
+			}
+			stats["signal"]++
+		case 6: // group operation
+			if len(groups) > 0 {
+				groupNames := make([]string, 0, len(groups))
+				for g := range groups {
+					groupNames = append(groupNames, g)
+				}
+				g := groupNames[rand.Intn(len(groupNames))]
+				switch rand.Intn(3) {
+				case 0:
+					pm.StartGroup(g)
+				case 1:
+					pm.StopGroup(g)
+				case 2:
+					pm.RestartGroup(g)
+				}
+			}
+			stats["group"]++
+		case 7: // event buffer snapshot (concurrent read safety)
+			_ = GlobalEventBuffer.Snapshot(50)
+			stats["event"]++
+		case 8: // resource history snapshot (concurrent read safety)
+			name := names[rand.Intn(len(names))]
+			p := pm.GetProcess(name)
+			if p != nil && p.ResourceHistory != nil {
+				_ = p.ResourceHistory.Snapshot(5 * time.Minute)
+			}
+			stats["resource"]++
 		}
 
 		// Every 100 iterations, check health
@@ -171,8 +249,9 @@ func TestBurnIn(t *testing.T) {
 	// --- Final checks ---
 	t.Logf("Burn-in 完成: iterations=%d elapsed=%v failures=%d",
 		iteration, time.Since(startTime).Round(time.Second), failures)
-	t.Logf("stats: start=%d stop=%d restart=%d kill=%d status=%d",
-		stats["start"], stats["stop"], stats["restart"], stats["kill"], stats["status"])
+	t.Logf("stats: start=%d stop=%d restart=%d kill=%d status=%d signal=%d group=%d event=%d resource=%d",
+		stats["start"], stats["stop"], stats["restart"], stats["kill"], stats["status"],
+		stats["signal"], stats["group"], stats["event"], stats["resource"])
 
 	// Stop monitor first so it won't restart processes during shutdown
 	mon.Stop()
@@ -180,7 +259,7 @@ func TestBurnIn(t *testing.T) {
 	// Stop all remaining processes
 	pm.StopAll()
 
-	// Allow goroutines to settle (monitorResources ticker is 5s)
+	// Allow goroutines to settle (monitorResources ticker is 5s, webhook retry may be in-flight)
 	time.Sleep(6 * time.Second)
 
 	// Check for goroutine leaks

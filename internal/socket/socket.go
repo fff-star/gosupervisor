@@ -153,8 +153,57 @@ func (s *SocketServer) handleCommand(line string) string {
 		restarted := s.pm.RestartGroup(name)
 		return fmt.Sprintf("OK restarted %d: %s", len(restarted), strings.Join(restarted, ", "))
 
+	case "reload":
+		if name == "" {
+			return "ERR missing process name"
+		}
+		p := s.pm.GetProcess(name)
+		if p == nil {
+			return "ERR process not found"
+		}
+		sig, _ := process.ParseSignal("SIGHUP")
+		if err := p.Signal(sig); err != nil {
+			return fmt.Sprintf("ERR %v", err)
+		}
+		return "OK reload signal sent"
+
+	case "signal":
+		if len(parts) < 3 {
+			return "ERR usage: signal <name> <signal>"
+		}
+		sigName := parts[2]
+		sig, ok := process.ParseSignal(sigName)
+		if !ok {
+			return fmt.Sprintf("ERR unknown signal: %s", sigName)
+		}
+		p := s.pm.GetProcess(name)
+		if p == nil {
+			return "ERR process not found"
+		}
+		if err := p.Signal(sig); err != nil {
+			return fmt.Sprintf("ERR %v", err)
+		}
+		return fmt.Sprintf("OK signal %s sent to %s", sigName, name)
+
+	case "events":
+		limit := 50
+		if len(parts) > 1 {
+			fmt.Sscanf(parts[1], "%d", &limit)
+		}
+		events := process.GlobalEventBuffer.Snapshot(limit)
+		var b strings.Builder
+		for _, e := range events {
+			b.WriteString(fmt.Sprintf("%s %s %s pid=%d exit=%d",
+				e.Timestamp.Format("2006-01-02T15:04:05"), e.Type, e.Name, e.PID, e.ExitCode))
+			if e.Message != "" {
+				b.WriteString(fmt.Sprintf(" msg=%s", e.Message))
+			}
+			b.WriteString("\n")
+		}
+		return fmt.Sprintf("OK %d events\n%s", len(events), b.String())
+
 	case "help":
-		return "OK commands: status [name], start <name>, stop <name>, restart <name>, group-start <group>, group-stop <group>, group-restart <group>, help, quit"
+		return "OK commands: status [name], start <name>, stop <name>, restart <name>, signal <name> <sig>, group-start <group>, group-stop <group>, group-restart <group>, events [N], help, quit"
 
 	default:
 		return fmt.Sprintf("ERR unknown command: %s", cmd)
