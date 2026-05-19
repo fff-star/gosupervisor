@@ -261,6 +261,15 @@ func (mm *MetricsManager) RecordConfigReload() {
 	mm.configReloads.Inc()
 }
 
+// ResetTracking clears the delta-tracking maps. Call on config reload to avoid
+// stale previous values blocking counter increments for processes with the same name.
+func (mm *MetricsManager) ResetTracking() {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+	mm.prevRestarts = make(map[string]float64)
+	mm.prevStartCounts = make(map[string]float64)
+}
+
 // RecordHealthCheckFailure records a health check failure for a process.
 func (mm *MetricsManager) RecordHealthCheckFailure(name string) {
 	mm.healthCheckFailures.WithLabelValues(name).Inc()

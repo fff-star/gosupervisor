@@ -64,10 +64,6 @@ func NewLogger(logDir string, maxLogSize int64, maxBackupCount int, compress boo
 		maxBackupCount = 10
 	}
 
-	if maxBackupCount <= 0 {
-		maxBackupCount = 10
-	}
-
 	return &Logger{
 		logDir:               logDir,
 		processLogs:          make(map[string]*logStream),
@@ -183,7 +179,10 @@ func (l *Logger) getOrCreateWriter(key, filePath string, maxSize int64, backupCo
 		writer:  f,
 		maxSize: maxSize,
 		onExceed: func() {
-			go l.rotateIfNeeded(key)
+			go func() {
+				defer func() { recover() }()
+				l.rotateIfNeeded(key)
+			}()
 		},
 	}
 	ls.writer = cw
@@ -249,7 +248,10 @@ func (l *Logger) rotateLogByKey(key, filePath string, maxSize int64, backupCount
 		writer:  f,
 		maxSize: maxSize,
 		onExceed: func() {
-			go l.rotateIfNeeded(key)
+			go func() {
+				defer func() { recover() }()
+				l.rotateIfNeeded(key)
+			}()
 		},
 	}
 
@@ -367,37 +369,8 @@ func (l *Logger) cleanupBackups(basePath string, backupCount int) {
 }
 
 func (l *Logger) cleanupOldLogs(processName string) error {
-	pattern := filepath.Join(l.logDir, fmt.Sprintf("%s.log.*", processName))
-	files, err := filepath.Glob(pattern)
-	if err != nil || len(files) <= l.maxBackupCount {
-		return err
-	}
-
-	type fileWithTime struct {
-		path    string
-		modTime time.Time
-	}
-	var fileInfos []fileWithTime
-	for _, f := range files {
-		info, err := os.Stat(f)
-		if err != nil {
-			continue
-		}
-		fileInfos = append(fileInfos, fileWithTime{f, info.ModTime()})
-	}
-
-	for i := 0; i < len(fileInfos); i++ {
-		for j := i + 1; j < len(fileInfos); j++ {
-			if fileInfos[i].modTime.After(fileInfos[j].modTime) {
-				fileInfos[i], fileInfos[j] = fileInfos[j], fileInfos[i]
-			}
-		}
-	}
-
-	for i := 0; i < len(fileInfos)-l.maxBackupCount; i++ {
-		os.Remove(fileInfos[i].path)
-	}
-
+	basePath := filepath.Join(l.logDir, fmt.Sprintf("%s.log", processName))
+	l.cleanupBackups(basePath, l.maxBackupCount)
 	return nil
 }
 

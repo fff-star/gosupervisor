@@ -60,6 +60,26 @@ func main() {
 			return
 		}
 		sendCommand(conn, fmt.Sprintf("restart %s", args[1]))
+	case "signal":
+		if len(args) < 3 {
+			fmt.Fprintln(os.Stderr, "signal 命令需要进程名和信号名")
+			exitCode = 1
+			return
+		}
+		sendCommand(conn, fmt.Sprintf("signal %s %s", args[1], args[2]))
+	case "reload":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "reload 命令需要进程名")
+			exitCode = 1
+			return
+		}
+		sendCommand(conn, fmt.Sprintf("reload %s", args[1]))
+	case "events":
+		if len(args) > 1 {
+			sendCommand(conn, fmt.Sprintf("events %s", args[1]))
+		} else {
+			sendCommand(conn, "events")
+		}
 	case "group-start":
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "group-start 命令需要组名")
@@ -114,6 +134,9 @@ func printUsage() {
   start <name>      启动进程
   stop <name>       停止进程
   restart <name>    重启进程
+  signal <name> <sig> 向进程发送信号
+  reload <name>     向进程发送 SIGHUP 重载信号
+  events [N]        显示最近 N 条事件 (默认 50)
   group-start <g>   启动进程组
   group-stop <g>    停止进程组
   group-restart <g> 重启进程组

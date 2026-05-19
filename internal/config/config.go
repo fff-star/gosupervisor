@@ -352,7 +352,9 @@ func loadYAMLConfig(configPath string) (*Config, error) {
 
 	// First pass: detect which keys are present for each program
 	var rawDoc map[string]map[string]map[string]interface{}
-	yaml.Unmarshal(data, &rawDoc)
+	if err := yaml.Unmarshal(data, &rawDoc); err != nil {
+		rawDoc = nil
+	}
 	rawPrograms := rawDoc["programs"]
 
 	var yamlConfig YAMLConfig
@@ -481,7 +483,9 @@ func loadJSONConfig(configPath string) (*Config, error) {
 
 	// First pass: detect which keys are present
 	var rawDoc map[string]map[string]map[string]interface{}
-	json.Unmarshal(data, &rawDoc)
+	if err := json.Unmarshal(data, &rawDoc); err != nil {
+		rawDoc = nil
+	}
 	rawPrograms := rawDoc["programs"]
 
 	var jsonConfig JSONConfig

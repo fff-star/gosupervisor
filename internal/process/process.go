@@ -196,6 +196,11 @@ func (p *Process) Start() error {
 	}
 
 	p.mu.Lock()
+	// Re-check: another goroutine may have started the process while we waited
+	if p.State == StateRunning || p.State == StateStarting {
+		p.mu.Unlock()
+		return fmt.Errorf("进程 %s 已经在运行或启动中", p.Name)
+	}
 	if p.Cmd != nil && p.Cmd.Process != nil {
 		p.Cmd.Process.Kill()
 	}
@@ -273,8 +278,6 @@ func (p *Process) Start() error {
 		}
 	}
 
-	p.waitCh = make(chan struct{})
-	p.monitorDone = make(chan struct{})
 	p.mu.Unlock()
 
 	// Run pre-start hook
@@ -299,14 +302,20 @@ func (p *Process) Start() error {
 	umaskMu.Unlock()
 
 	p.mu.Lock()
+	// Create channels only after cmd.Start() succeeds so that
+	// a failed Start() does not leak unclosed channels that would
+	// block the next Start() on <-monDone.
+	p.waitCh = make(chan struct{})
+	p.monitorDone = make(chan struct{})
 	p.Cmd = cmd
 	p.PID = cmd.Process.Pid
 	p.StartTime = time.Now()
 	p.State = StateRunning
+	pid := p.PID
 	p.mu.Unlock()
 
-	p.sendWebhook()
-	RecordEvent(p.Name, EventStart, p.PID, 0, "started")
+	p.sendWebhook(StateRunning, pid, 0)
+	RecordEvent(p.Name, EventStart, pid, 0, "started")
 
 	go p.monitor()
 	go p.monitorResources()
@@ -318,7 +327,7 @@ func (p *Process) Start() error {
 
 	// Apply cgroup if configured
 	if p.Config.CgroupPath != "" {
-		p.applyCgroup()
+		p.applyCgroup(pid)
 	}
 
 	return nil
@@ -384,15 +393,21 @@ done:
 	if p.State == StateStopping {
 		p.State = StateStopped
 	}
+	pid := p.PID
+	exitCode := p.ExitCode
 	p.mu.Unlock()
 
-	p.sendWebhook()
-	RecordEvent(p.Name, EventStop, p.PID, p.ExitCode, "stopped")
+	p.sendWebhook(StateStopped, pid, exitCode)
+	RecordEvent(p.Name, EventStop, pid, exitCode, "stopped")
 	return nil
 }
 
 func (p *Process) Restart() error {
 	p.mu.Lock()
+	if p.State == StateFatal {
+		p.mu.Unlock()
+		return fmt.Errorf("进程 %s 处于FATAL状态，无法重启", p.Name)
+	}
 	if p.State == StateStopping || p.State == StateStarting {
 		p.mu.Unlock()
 		return nil // already restarting
@@ -492,24 +507,24 @@ func (p *Process) monitor() {
 		p.State = StateExited
 	}
 
-	if p.State == StateExited {
-		p.mu.Unlock()
-		p.sendWebhook()
-		p.mu.Lock()
-	}
+	p.mu.Unlock()
 
+	var exitCode int
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			p.ExitCode = exitErr.ExitCode()
+			exitCode = exitErr.ExitCode()
 		} else {
-			// Killed by signal or other abnormal exit
-			p.ExitCode = -1
+			exitCode = -1
 		}
-	} else {
-		p.ExitCode = 0
 	}
+	p.mu.Lock()
+	p.ExitCode = exitCode
 	if p.State == StateExited {
-		RecordEvent(p.Name, EventExit, p.PID, p.ExitCode, "exited")
+		pid := p.PID
+		p.mu.Unlock()
+		p.sendWebhook(StateExited, pid, exitCode)
+		RecordEvent(p.Name, EventExit, pid, exitCode, "exited")
+		p.mu.Lock()
 	}
 	p.mu.Unlock()
 
@@ -641,6 +656,7 @@ func runHook(script string) error {
 
 // startHealthCheck starts a health check goroutine for the process.
 func (p *Process) startHealthCheck() {
+	p.mu.Lock()
 	// Cancel previous health check if any
 	if p.healthCheckCancel != nil {
 		p.healthCheckCancel()
@@ -648,6 +664,7 @@ func (p *Process) startHealthCheck() {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.healthCheckCtx = ctx
 	p.healthCheckCancel = cancel
+	p.mu.Unlock()
 
 	go p.runHealthCheck(ctx)
 }
@@ -680,9 +697,10 @@ func (p *Process) runHealthCheck(ctx context.Context) {
 				p.healthCheckFailures = 0
 				p.Healthy = true
 				if !wasHealthy {
-					RecordEvent(p.Name, EventHealthRestore, p.PID, 0, "health restored")
+					pid := p.PID
+					RecordEvent(p.Name, EventHealthRestore, pid, 0, "health restored")
 					p.mu.Unlock()
-					p.sendWebhook()
+					p.sendWebhook(StateRunning, pid, 0)
 					p.mu.Lock()
 				}
 			} else {
@@ -693,9 +711,10 @@ func (p *Process) runHealthCheck(ctx context.Context) {
 				if p.healthCheckFailures >= threshold {
 					p.Healthy = false
 					if wasHealthy {
-						RecordEvent(p.Name, EventHealthFail, p.PID, 0, "health check failed")
+						pid := p.PID
+						RecordEvent(p.Name, EventHealthFail, pid, 0, "health check failed")
 						p.mu.Unlock()
-						p.sendWebhook()
+						p.sendWebhook(StateRunning, pid, 0)
 						p.mu.Lock()
 					}
 				}
@@ -726,8 +745,7 @@ func checkHealth(url string, timeout time.Duration) bool {
 }
 
 // applyCgroup writes the process PID to cgroup.procs for cgroup v2.
-func (p *Process) applyCgroup() {
-	pid := p.PID
+func (p *Process) applyCgroup(pid int) {
 	if pid <= 0 {
 		return
 	}
@@ -794,16 +812,21 @@ func (p *Process) shouldRestartOnExitCode() bool {
 
 // StartGroup starts all processes in a group.
 func (pm *ProcessManager) StartGroup(group string) []string {
-	var started []string
+	var procs []*Process
 	pm.mu.RLock()
-	defer pm.mu.RUnlock()
 	for _, p := range pm.Processes {
 		if p.Config.Group == group && p.Config.AutoStart {
-			if err := p.Start(); err != nil {
-				fmt.Printf("启动进程 %s 失败: %v\n", p.Name, err)
-			} else {
-				started = append(started, p.Name)
-			}
+			procs = append(procs, p)
+		}
+	}
+	pm.mu.RUnlock()
+
+	var started []string
+	for _, p := range procs {
+		if err := p.Start(); err != nil {
+			fmt.Printf("启动进程 %s 失败: %v\n", p.Name, err)
+		} else {
+			started = append(started, p.Name)
 		}
 	}
 	return started
@@ -811,16 +834,21 @@ func (pm *ProcessManager) StartGroup(group string) []string {
 
 // StopGroup stops all processes in a group (reverse dependency order within group).
 func (pm *ProcessManager) StopGroup(group string) []string {
-	var stopped []string
+	var procs []*Process
 	pm.mu.RLock()
-	defer pm.mu.RUnlock()
 	for _, p := range pm.Processes {
 		if p.Config.Group == group {
-			if err := p.Stop(); err != nil {
-				fmt.Printf("停止进程 %s 失败: %v\n", p.Name, err)
-			} else {
-				stopped = append(stopped, p.Name)
-			}
+			procs = append(procs, p)
+		}
+	}
+	pm.mu.RUnlock()
+
+	var stopped []string
+	for _, p := range procs {
+		if err := p.Stop(); err != nil {
+			fmt.Printf("停止进程 %s 失败: %v\n", p.Name, err)
+		} else {
+			stopped = append(stopped, p.Name)
 		}
 	}
 	return stopped
@@ -886,7 +914,8 @@ func (pm *ProcessManager) RestoreState(path string) error {
 
 // sendWebhook POSTs process state change to the configured webhook URL.
 // Supports configurable retries with exponential backoff.
-func (p *Process) sendWebhook() {
+// Caller must capture state, pid, and exitCode under lock before calling.
+func (p *Process) sendWebhook(state ProcessState, pid int, exitCode int) {
 	if p.Config.WebhookURL == "" {
 		return
 	}
@@ -899,11 +928,26 @@ func (p *Process) sendWebhook() {
 		retries = 0
 	}
 
-	payload := fmt.Sprintf(
-		`{"name":"%s","group":"%s","state":"%s","pid":%d,"exitCode":%d,"timestamp":"%s"}`,
-		p.Name, p.Config.Group, p.State, p.PID, p.ExitCode,
-		time.Now().Format(time.RFC3339),
-	)
+	payload := struct {
+		Name      string `json:"name"`
+		Group     string `json:"group"`
+		State     string `json:"state"`
+		PID       int    `json:"pid"`
+		ExitCode  int    `json:"exitCode"`
+		Timestamp string `json:"timestamp"`
+	}{
+		Name:      p.Name,
+		Group:     p.Config.Group,
+		State:     string(state),
+		PID:       pid,
+		ExitCode:  exitCode,
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		Logf("进程 %s webhook payload 序列化失败: %v\n", p.Name, err)
+		return
+	}
 
 	var lastErr error
 	for attempt := 0; attempt <= retries; attempt++ {
@@ -916,7 +960,7 @@ func (p *Process) sendWebhook() {
 		}
 		client := &http.Client{Timeout: timeout}
 		resp, err := client.Post(p.Config.WebhookURL, "application/json",
-			strings.NewReader(payload))
+			strings.NewReader(string(body)))
 		if err != nil {
 			lastErr = err
 			continue
@@ -929,16 +973,21 @@ func (p *Process) sendWebhook() {
 
 // RestartGroup restarts all processes in a group.
 func (pm *ProcessManager) RestartGroup(group string) []string {
-	var restarted []string
+	var procs []*Process
 	pm.mu.RLock()
-	defer pm.mu.RUnlock()
 	for _, p := range pm.Processes {
 		if p.Config.Group == group {
-			if err := p.Restart(); err != nil {
-				fmt.Printf("重启进程 %s 失败: %v\n", p.Name, err)
-			} else {
-				restarted = append(restarted, p.Name)
-			}
+			procs = append(procs, p)
+		}
+	}
+	pm.mu.RUnlock()
+
+	var restarted []string
+	for _, p := range procs {
+		if err := p.Restart(); err != nil {
+			fmt.Printf("重启进程 %s 失败: %v\n", p.Name, err)
+		} else {
+			restarted = append(restarted, p.Name)
 		}
 	}
 	return restarted

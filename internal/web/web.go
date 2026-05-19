@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -148,7 +149,11 @@ func isSameOrigin(r *http.Request) bool {
 	if r.Host == "" {
 		return false
 	}
-	return strings.Contains(origin, r.Host)
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return u.Host == r.Host
 }
 
 func (ws *WebServer) Start(addr string) error {
@@ -167,6 +172,13 @@ func (ws *WebServer) Start(addr string) error {
 		fmt.Println("Web界面已启用 API 速率限制")
 	}
 	return http.ListenAndServe(addr, handler)
+}
+
+// Stop cleans up resources held by the WebServer.
+func (ws *WebServer) Stop() {
+	if ws.rateLimiter != nil {
+		ws.rateLimiter.Stop()
+	}
 }
 
 // corsMiddleware adds CORS headers for /api/ routes and handles OPTIONS preflight.
@@ -577,9 +589,12 @@ func (ws *WebServer) handleProcessLogsStream(w http.ResponseWriter, r *http.Requ
 			}
 			if n > 0 {
 				// JSON-encode each chunk for clean SSE
-				escaped := strings.ReplaceAll(string(buf[:n]), "\n", "\\n")
-				escaped = strings.ReplaceAll(escaped, "\r", "")
-				fmt.Fprintf(w, "data: {\"text\": \"%s\"}\n\n", escaped)
+				payload := map[string]string{"text": string(buf[:n])}
+				jsonData, err := json.Marshal(payload)
+				if err != nil {
+					continue
+				}
+				fmt.Fprintf(w, "data: %s\n\n", jsonData)
 				flusher.Flush()
 			}
 		}

@@ -2,6 +2,7 @@ package web
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -95,7 +96,12 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := r.RemoteAddr
 		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-			ip = fwd
+			// X-Forwarded-For is a comma-separated list; use the original client IP
+			if i := strings.IndexByte(fwd, ','); i >= 0 {
+				ip = strings.TrimSpace(fwd[:i])
+			} else {
+				ip = fwd
+			}
 		}
 		if !rl.Allow(ip) {
 			w.Header().Set("Retry-After", "1")

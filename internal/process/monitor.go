@@ -40,9 +40,11 @@ func (m *Monitor) monitorLoop() {
 }
 
 func (m *Monitor) checkProcesses() {
-	m.Manager.mu.RLock()
-	defer m.Manager.mu.RUnlock()
-	for _, process := range m.Manager.Processes {
+	var procs []*Process
+	m.Manager.RangeProcesses(func(name string, p *Process) {
+		procs = append(procs, p)
+	})
+	for _, process := range procs {
 		m.checkProcess(process)
 	}
 }
@@ -72,11 +74,12 @@ func (m *Monitor) handleExitedProcess(process *Process) {
 	if !process.shouldRestartOnExitCode() {
 		process.State = StateFatal
 		name := process.Name
+		pid := process.PID
 		exitCode := process.ExitCode
 		process.mu.Unlock()
 		fmt.Printf("进程 %s 因退出码策略不重启 (exit=%d)\n", name, exitCode)
-		process.sendWebhook()
-		RecordEvent(name, EventFatal, process.PID, exitCode, "exit code policy")
+		process.sendWebhook(StateFatal, pid, exitCode)
+		RecordEvent(name, EventFatal, pid, exitCode, "exit code policy")
 		return
 	}
 
@@ -84,20 +87,24 @@ func (m *Monitor) handleExitedProcess(process *Process) {
 	if process.restartRateExceeded() {
 		process.State = StateFatal
 		name := process.Name
+		pid := process.PID
+		exitCode := process.ExitCode
 		process.mu.Unlock()
 		fmt.Printf("进程 %s 达到重启速率限制，进入FATAL状态\n", name)
-		process.sendWebhook()
-		RecordEvent(name, EventFatal, process.PID, process.ExitCode, "restart rate exceeded")
+		process.sendWebhook(StateFatal, pid, exitCode)
+		RecordEvent(name, EventFatal, pid, exitCode, "restart rate exceeded")
 		return
 	}
 
 	if process.StartRetries >= process.Config.StartRetries {
 		process.State = StateFatal
 		name := process.Name
+		pid := process.PID
+		exitCode := process.ExitCode
 		process.mu.Unlock()
 		fmt.Printf("进程 %s 达到最大重启次数，进入FATAL状态\n", name)
-		process.sendWebhook()
-		RecordEvent(name, EventFatal, process.PID, process.ExitCode, "max retries")
+		process.sendWebhook(StateFatal, pid, exitCode)
+		RecordEvent(name, EventFatal, pid, exitCode, "max retries")
 		return
 	}
 
@@ -120,9 +127,11 @@ func (m *Monitor) handleExitedProcess(process *Process) {
 			process.mu.Lock()
 			if process.StartRetries > process.Config.StartRetries {
 				process.State = StateFatal
+				pid := process.PID
+				exitCode := process.ExitCode
 				fmt.Printf("进程 %s 达到最大重启次数，进入FATAL状态\n", name)
 				process.mu.Unlock()
-				process.sendWebhook()
+				process.sendWebhook(StateFatal, pid, exitCode)
 				return
 			}
 			process.mu.Unlock()
@@ -158,8 +167,10 @@ func (m *Monitor) checkRunningProcess(process *Process) {
 			process.mu.Lock()
 			if process.StartRetries > process.Config.StartRetries {
 				process.State = StateFatal
+				pid := process.PID
+				exitCode := process.ExitCode
 				process.mu.Unlock()
-				process.sendWebhook()
+				process.sendWebhook(StateFatal, pid, exitCode)
 				return
 			}
 			process.mu.Unlock()

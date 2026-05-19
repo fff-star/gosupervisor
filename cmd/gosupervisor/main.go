@@ -165,6 +165,17 @@ func main() {
 	monitor.Start()
 	defer monitor.Stop()
 
+	// Deferred cleanup for web server and metrics manager (if started)
+	var webServer *web.WebServer
+	defer func() {
+		if webServer != nil {
+			webServer.Stop()
+		}
+		if metricsManagerRef != nil {
+			metricsManagerRef.Stop()
+		}
+	}()
+
 	// 处理命令
 	switch *command {
 	case "start":
@@ -206,14 +217,15 @@ func main() {
 				corsOrigin := ""
 				rateLimitRPS := 0
 				if cfg.Server != nil {
-					if !explicitFlags["web-addr"] && cfg.Server.CORSOrigin != "" {
+					if cfg.Server.CORSOrigin != "" {
 						corsOrigin = cfg.Server.CORSOrigin
 					}
-					if !explicitFlags["web-addr"] && cfg.Server.RateLimitRPS > 0 {
+					if cfg.Server.RateLimitRPS > 0 {
 						rateLimitRPS = cfg.Server.RateLimitRPS
 					}
 				}
-				webServer, err := web.NewWebServerFull(processManager, *logDir, *webUser, *webPass, *webAPIAuth, corsOrigin, rateLimitRPS)
+				var err error
+				webServer, err = web.NewWebServerFull(processManager, *logDir, *webUser, *webPass, *webAPIAuth, corsOrigin, rateLimitRPS)
 				if err != nil {
 					fmt.Printf("初始化Web服务器失败: %v\n", err)
 					exitCode = 1
@@ -231,20 +243,19 @@ func main() {
 			// 如果启用了Prometheus指标导出
 			if *metricsEnable {
 				// 创建指标管理器
-				mm := metrics.NewMetricsManager(processManager)
-				metricsManagerRef = mm
+				metricsManagerRef = metrics.NewMetricsManager(processManager)
 
 				// Wire health check failure callback
 				processManager.RangeProcesses(func(name string, p *process.Process) {
-					p.OnHealthCheckFailure = mm.RecordHealthCheckFailure
+					p.OnHealthCheckFailure = metricsManagerRef.RecordHealthCheckFailure
 				})
 
 				// 启动指标收集器
-				mm.StartMetricsCollector(5 * time.Second)
+				metricsManagerRef.StartMetricsCollector(5 * time.Second)
 
 				// 在goroutine中启动指标服务器
 				go func() {
-					if err := mm.StartMetricsServer(*metricsAddr); err != nil {
+					if err := metricsManagerRef.StartMetricsServer(*metricsAddr); err != nil {
 						fmt.Printf("启动指标服务器失败: %v\n", err)
 					}
 				}()
@@ -296,11 +307,11 @@ func main() {
 			fmt.Printf("进程 %s 重启成功\n", *processName)
 		} else {
 			// 重启所有进程
-			for _, p := range processManager.Processes {
+			processManager.RangeProcesses(func(name string, p *process.Process) {
 				if err := p.Restart(); err != nil {
-					fmt.Printf("重启进程 %s 失败: %v\n", p.Name, err)
+					fmt.Printf("重启进程 %s 失败: %v\n", name, err)
 				}
-			}
+			})
 			fmt.Println("所有进程重启成功")
 		}
 	case "status":
@@ -316,10 +327,10 @@ func main() {
 			printProcessStatus(p)
 		} else {
 			// 显示所有进程状态
-			for _, p := range processManager.Processes {
+			processManager.RangeProcesses(func(name string, p *process.Process) {
 				printProcessStatus(p)
 				fmt.Println()
-			}
+			})
 		}
 	case "reload":
 		// 重新加载配置
@@ -453,8 +464,20 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 	// 停止所有进程
 	processManager.StopAll()
 
+	// Verify all processes stopped before replacing the map
+	var stillRunning []string
+	processManager.RangeProcesses(func(name string, p *process.Process) {
+		s := p.GetState()
+		if s == process.StateRunning || s == process.StateStarting || s == process.StateStopping {
+			stillRunning = append(stillRunning, name)
+		}
+	})
+	if len(stillRunning) > 0 {
+		return fmt.Errorf("无法停止进程: %v", stillRunning)
+	}
+
 	// 清空现有进程
-	processManager.Processes = make(map[string]*process.Process)
+	processManager.ReplaceProcesses(make(map[string]*process.Process))
 
 	// 添加新进程
 	for _, programCfg := range cfg.Programs {
@@ -466,6 +489,7 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 		processManager.RangeProcesses(func(name string, p *process.Process) {
 			p.OnHealthCheckFailure = metricsManagerRef.RecordHealthCheckFailure
 		})
+		metricsManagerRef.ResetTracking()
 		metricsManagerRef.RecordConfigReload()
 	}
 
@@ -504,7 +528,7 @@ func updateProcessConfig(processManager *process.ProcessManager, configPath stri
 	}
 
 	// 移除旧进程
-	delete(processManager.Processes, processName)
+	processManager.RemoveProcess(processName)
 
 	// 添加新进程
 	processManager.AddProcess(programCfg)

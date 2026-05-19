@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2312,7 +2313,7 @@ func TestApplyCgroupInvalidPath(t *testing.T) {
 	}
 
 	// applyCgroup should not panic even with invalid path (prints error)
-	p.applyCgroup()
+	p.applyCgroup(pid)
 }
 
 func TestApplyCgroupNoPID(t *testing.T) {
@@ -2336,7 +2337,7 @@ func TestApplyCgroupNoPID(t *testing.T) {
 	}
 	p := pm.AddProcess(cfg)
 	// Don't start — PID should be 0, applyCgroup returns immediately
-	p.applyCgroup() // should not panic
+	p.applyCgroup(0) // should not panic
 }
 
 func TestSendWebhookEmptyURL(t *testing.T) {
@@ -2360,7 +2361,7 @@ func TestSendWebhookEmptyURL(t *testing.T) {
 	}
 	p := pm.AddProcess(cfg)
 	// Should be no-op when WebhookURL is empty
-	p.sendWebhook()
+	p.sendWebhook(StateExited, 0, 0)
 }
 
 func TestSendWebhookDeliversPayload(t *testing.T) {
@@ -2407,7 +2408,7 @@ func TestSendWebhookDeliversPayload(t *testing.T) {
 	p.State = StateExited
 	p.mu.Unlock()
 
-	p.sendWebhook()
+	p.sendWebhook(StateExited, 12345, 0)
 
 	select {
 	case body := <-received:
@@ -2456,7 +2457,7 @@ func TestSendWebhookServerError(t *testing.T) {
 	p.State = StateExited
 	p.mu.Unlock()
 	// Should not panic, just print error
-	p.sendWebhook()
+	p.sendWebhook(StateExited, 1, 0)
 }
 
 func TestStartHealthCheckAndRunHealthCheck(t *testing.T) {
@@ -2627,4 +2628,263 @@ func TestCheckHealthHTTP4xx(t *testing.T) {
 	if checkHealth("http://"+ln.Addr().String()+"/bad", 1*time.Second) {
 		t.Error("HTTP 404 检查应失败")
 	}
+}
+
+// TestConcurrentExitAndStart tests for data races between handleExitedProcess
+// and Start() on the same process. This catches PID/ExitCode/State races.
+func TestConcurrentExitAndStart(t *testing.T) {
+	logDir := "./test_logs_conc"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	for i := 0; i < 20; i++ {
+		pm := NewProcessManager(logManager)
+		cfg := &config.ProgramConfig{
+			Name:         fmt.Sprintf("conc_%d", i),
+			Command:      "sleep 60",
+			AutoStart:    true,
+			AutoRestart:  true,
+			StartSecs:    0,
+			StartRetries: 99,
+			Environment:  make(map[string]string),
+		}
+		pm.AddProcess(cfg)
+		p := pm.GetProcess(cfg.Name)
+		if err := p.Start(); err != nil {
+			t.Fatalf("start failed: %v", err)
+		}
+		defer p.Stop()
+
+		m := &Monitor{Manager: pm}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			time.Sleep(time.Duration(i%10) * time.Millisecond)
+			p.mu.Lock()
+			p.State = StateExited
+			p.ExitCode = 1
+			p.mu.Unlock()
+			m.handleExitedProcess(p)
+		}()
+
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				_ = p.Snapshot()
+				_ = p.GetState()
+				time.Sleep(10 * time.Millisecond)
+			}
+		}()
+
+		wg.Wait()
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// TestConcurrentSnapshotAndMonitor tests for races between Snapshot reads
+// and Monitor writes on the same process. This simulates web/socket/metrics
+// reads happening concurrently with process lifecycle transitions.
+func TestConcurrentSnapshotAndMonitor(t *testing.T) {
+	logDir := "./test_logs_concsm"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	for i := 0; i < 5; i++ {
+		pm.AddProcess(&config.ProgramConfig{
+			Name:         fmt.Sprintf("concsm_%d", i),
+			Command:      "sleep 60",
+			AutoStart:    true,
+			AutoRestart:  true,
+			StartSecs:    0,
+			StartRetries: 3,
+			RestartCodes: []int{1},
+			Environment:  make(map[string]string),
+		})
+	}
+
+	pm.RangeProcesses(func(name string, p *Process) {
+		p.Start()
+	})
+	defer pm.StopAll()
+
+	monitor := NewMonitor(pm)
+	monitor.Start()
+	defer monitor.Stop()
+
+	var wg sync.WaitGroup
+	for g := 0; g < 10; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 100; i++ {
+				pm.RangeProcesses(func(name string, p *Process) {
+					s := p.Snapshot()
+					_ = s.Name
+					_ = s.State
+					_ = s.PID
+					_ = s.ExitCode
+				})
+				_ = pm.Len()
+				time.Sleep(5 * time.Millisecond)
+			}
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 10; i++ {
+			pm.RangeProcesses(func(name string, p *Process) {
+				if p.GetState() == StateRunning {
+					p.Restart()
+				}
+			})
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
+
+	wg.Wait()
+}
+
+// TestStartFailureDoesNotDeadlockNextStart verifies that when Start() fails
+// (e.g., cmd.Start() fails), the leaked monitorDone/waitCh channels do not
+// block the next Start() call.
+func TestStartFailureDoesNotDeadlockNextStart(t *testing.T) {
+	logDir := "./test_logs_startfail"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	// Use a non-existent user to trigger lookup failure in Start()
+	cfg := &config.ProgramConfig{
+		Name:         "fail_then_ok",
+		Command:      "sleep 60",
+		User:         "nonexistent_user_xyz123",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 3,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("fail_then_ok")
+
+	// First Start() should fail (user lookup)
+	if err := p.Start(); err == nil {
+		t.Log("expected Start to fail with nonexistent user, but it succeeded")
+		// Clean up if it somehow succeeded
+		p.Stop()
+	}
+
+	// Verify process state is Exited (the error path in Start())
+	if state := p.GetState(); state != StateExited {
+		t.Errorf("after failed Start, expected StateExited, got %s", state)
+	}
+
+	// Fix the config so next Start() succeeds
+	p.Config.User = ""
+	p.Config.Command = "sleep 30"
+
+	// Second Start() MUST NOT deadlock. Use a timeout.
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Start()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("second Start() should succeed, got: %v", err)
+		}
+		p.Stop()
+	case <-time.After(5 * time.Second):
+		t.Fatal("DEADLOCK: second Start() blocked for 5 seconds after first Start() failure")
+	}
+}
+
+// TestRestartOnFatalReturnsError verifies Restart() rejects FATAL processes.
+func TestRestartOnFatalReturnsError(t *testing.T) {
+	logDir := "./test_logs_fatalrestart"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "fatal_test",
+		Command:      "sleep 60",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 3,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("fatal_test")
+
+	// Put process in FATAL state
+	p.mu.Lock()
+	p.State = StateFatal
+	p.mu.Unlock()
+
+	// Restart() should return an error
+	err := p.Restart()
+	if err == nil {
+		t.Error("Restart() on FATAL process should return error")
+	}
+	if p.GetState() == StateRunning {
+		t.Error("FATAL process should not be restarted")
+	}
+}
+
+// TestRestartOnFatalViaStopStart verifies that Stop-then-Start does NOT
+// bypass the FATAL check in Restart() — but a direct Start() from FATAL
+// should work (since Restart is the API that should gate, not Start).
+func TestStartFromFatalWorks(t *testing.T) {
+	logDir := "./test_logs_fatalstart"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "fatal_start",
+		Command:      "sleep 0.1",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 3,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("fatal_start")
+
+	p.mu.Lock()
+	p.State = StateFatal
+	p.mu.Unlock()
+
+	// Direct Start() from FATAL should still work (this is intentional —
+	// a manual Start() is an explicit recovery action)
+	if err := p.Start(); err != nil {
+		t.Errorf("direct Start() from FATAL should work: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	p.Stop()
 }
