@@ -223,3 +223,21 @@ func TestMetricsStopCollector(t *testing.T) {
 	// Should not panic on Stop
 	t.Log("Stop 完成，未发生 panic")
 }
+
+// TestMetricsStopDoubleClose verifies Stop is safe to call multiple times.
+func TestMetricsStopDoubleClose(t *testing.T) {
+	processManager, err := setupMetricsTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupMetricsTestEnvironment()
+
+	mm := NewMetricsManager(processManager)
+	mm.StartMetricsCollector(100 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond)
+
+	// Should not panic when called multiple times.
+	mm.Stop()
+	mm.Stop()
+	mm.Stop()
+}

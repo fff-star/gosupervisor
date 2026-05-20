@@ -735,3 +735,185 @@ func TestRotateLogFallbackCompressEnabled(t *testing.T) {
 		t.Error("期望找到压缩后的 .gz 文件")
 	}
 }
+
+// TestCleanupBackupsKeepsNewest verifies cleanupBackups removes old files
+// keeping only the most recent backupCount files.
+func TestCleanupBackupsKeepsNewest(t *testing.T) {
+	logDir := "./test_logs_cleanup"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logger, err := NewDefaultLogger(logDir)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logger.Close()
+
+	baseFile := filepath.Join(logDir, "test.log")
+	old := time.Now().Add(-3 * time.Hour)
+	mid := time.Now().Add(-2 * time.Hour)
+
+	os.WriteFile(baseFile+".100", []byte("old"), 0644)
+	os.Chtimes(baseFile+".100", old, old)
+	os.WriteFile(baseFile+".200", []byte("mid"), 0644)
+	os.Chtimes(baseFile+".200", mid, mid)
+	os.WriteFile(baseFile+".300", []byte("new"), 0644)
+
+	logger.cleanupBackups(baseFile, 2)
+
+	files, _ := filepath.Glob(baseFile + ".*")
+	if len(files) != 2 {
+		t.Errorf("expected 2 files after cleanup, got %d: %v", len(files), files)
+	}
+}
+
+// TestCleanupBackupsNoOpWhenUnderLimit verifies cleanupBackups is a no-op
+// when the number of backup files does not exceed backupCount.
+func TestCleanupBackupsNoOpWhenUnderLimit(t *testing.T) {
+	logDir := "./test_logs_cleanup_noop"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logger, _ := NewDefaultLogger(logDir)
+	defer logger.Close()
+
+	baseFile := filepath.Join(logDir, "keep.log")
+	os.WriteFile(baseFile+".1", []byte("a"), 0644)
+	os.WriteFile(baseFile+".2", []byte("b"), 0644)
+
+	logger.cleanupBackups(baseFile, 5)
+
+	files, _ := filepath.Glob(baseFile + ".*")
+	if len(files) != 2 {
+		t.Errorf("expected 2 files (under limit), got %d", len(files))
+	}
+}
+
+// TestRotateFileOutsideLock validates that rotateFileOutsideLock renames a
+// file, compresses it if enabled, and cleans up old backups.
+func TestRotateFileOutsideLock(t *testing.T) {
+	logDir := "./test_logs_rotate_outside"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logger, err := NewLogger(logDir, 10*1024*1024, 5, true)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logger.Close()
+
+	logFile := filepath.Join(logDir, "rotate_test.log")
+	os.WriteFile(logFile, []byte("test content for rotation\n"), 0644)
+
+	err = logger.rotateFileOutsideLock(logFile, 2)
+	if err != nil {
+		t.Fatalf("rotateFileOutsideLock failed: %v", err)
+	}
+
+	if _, err := os.Stat(logFile); !os.IsNotExist(err) {
+		t.Error("expected original file to be renamed (gone)")
+	}
+
+	gzFiles, _ := filepath.Glob(logFile + ".*.gz")
+	if len(gzFiles) == 0 {
+		t.Error("expected compressed .gz backup file after rotation")
+	}
+}
+
+// TestRotateFileOutsideLockNoCompress validates rotation without compression.
+func TestRotateFileOutsideLockNoCompress(t *testing.T) {
+	logDir := "./test_logs_rotate_nocompress"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logger, err := NewLogger(logDir, 10*1024*1024, 5, false)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logger.Close()
+
+	logFile := filepath.Join(logDir, "rotate_nc.log")
+	os.WriteFile(logFile, []byte("no compression test\n"), 0644)
+
+	err = logger.rotateFileOutsideLock(logFile, 2)
+	if err != nil {
+		t.Fatalf("rotateFileOutsideLock failed: %v", err)
+	}
+
+	backups, _ := filepath.Glob(logFile + ".*")
+	nonGz := 0
+	for _, b := range backups {
+		if !strings.HasSuffix(b, ".gz") {
+			nonGz++
+		}
+	}
+	if nonGz == 0 {
+		t.Error("expected non-compressed backup file")
+	}
+}
+
+// TestRotateFileOutsideLockFileNotExist validates behavior when the file
+// does not exist (should return nil, no error).
+func TestRotateFileOutsideLockFileNotExist(t *testing.T) {
+	logDir := "./test_logs_rotate_missing"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logger, _ := NewDefaultLogger(logDir)
+	defer logger.Close()
+
+	nonexistent := filepath.Join(logDir, "does_not_exist.log")
+	err := logger.rotateFileOutsideLock(nonexistent, 2)
+	if err != nil {
+		t.Errorf("expected nil error for non-existent file, got: %v", err)
+	}
+}
+
+// TestCloseProcessLog verifies CloseProcessLog removes the log stream.
+func TestCloseProcessLog(t *testing.T) {
+	logDir := "./test_logs_close"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logger, _ := NewDefaultLogger(logDir)
+	defer logger.Close()
+
+	logFile := filepath.Join(logDir, "close_test.log")
+	key := "close_test/stdout"
+	_, err := logger.getOrCreateWriter(key, logFile, 10*1024*1024, 5)
+	if err != nil {
+		t.Fatalf("getOrCreateWriter failed: %v", err)
+	}
+
+	logger.CloseProcessLog("close_test")
+
+	if _, exists := logger.processLogs[key]; exists {
+		t.Error("expected log stream to be removed after CloseProcessLog")
+	}
+}
+
+// TestLogSystemRotation verifies LogSystem triggers rotation when
+// system.log exceeds max size.
+func TestLogSystemRotation(t *testing.T) {
+	logDir := "./test_logs_system_rot"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logger, err := NewLogger(logDir, 10*1024*1024, 5, false)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
+	defer logger.Close()
+
+	logger.systemLogMaxBytes = 10
+	logger.systemLogBackupCount = 2
+
+	systemLog := filepath.Join(logDir, "system.log")
+	logger.LogSystem("first message")
+	logger.LogSystem("second message long enough to push over limit")
+
+	backups, _ := filepath.Glob(systemLog + ".*")
+	if len(backups) == 0 {
+		t.Error("expected backup file after system log rotation")
+	}
+}

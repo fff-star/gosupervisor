@@ -1,7 +1,6 @@
 package process
 
 import (
-	"sync"
 	"time"
 )
 
@@ -14,30 +13,12 @@ type ResourceSample struct {
 
 // ResourceHistory is a ring buffer of resource samples for a process.
 type ResourceHistory struct {
-	mu       sync.Mutex
-	samples  []ResourceSample
-	capacity int
-	pos      int
-	full     bool
+	*RingBuffer[ResourceSample]
 }
 
 // NewResourceHistory creates a ring buffer for the given number of samples.
 func NewResourceHistory(capacity int) *ResourceHistory {
-	return &ResourceHistory{
-		samples:  make([]ResourceSample, capacity),
-		capacity: capacity,
-	}
-}
-
-// Push adds a sample to the buffer.
-func (rh *ResourceHistory) Push(s ResourceSample) {
-	rh.mu.Lock()
-	defer rh.mu.Unlock()
-	rh.samples[rh.pos] = s
-	rh.pos = (rh.pos + 1) % rh.capacity
-	if rh.pos == 0 {
-		rh.full = true
-	}
+	return &ResourceHistory{RingBuffer: NewRingBuffer[ResourceSample](capacity)}
 }
 
 // Snapshot returns all samples in chronological order, optionally limited to a duration.
@@ -45,20 +26,7 @@ func (rh *ResourceHistory) Snapshot(since time.Duration) []ResourceSample {
 	rh.mu.Lock()
 	defer rh.mu.Unlock()
 
-	size := rh.pos
-	if rh.full {
-		size = rh.capacity
-	}
-
-	all := make([]ResourceSample, size)
-	if rh.full {
-		for i := 0; i < size; i++ {
-			all[i] = rh.samples[(rh.pos+i)%rh.capacity]
-		}
-	} else {
-		copy(all, rh.samples[:rh.pos])
-	}
-
+	all := rh.snapshotAll()
 	if since <= 0 {
 		return all
 	}

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -157,7 +158,7 @@ func (l *Logger) getOrCreateWriter(key, filePath string, maxSize int64, backupCo
 
 	if info, err := os.Stat(filePath); err == nil {
 		if info.Size() >= maxSize {
-			if err := l.rotateFileOutsideLock(filePath, maxSize, backupCount); err != nil {
+			if err := l.rotateFileOutsideLock(filePath, backupCount); err != nil {
 				return nil, err
 			}
 		}
@@ -203,13 +204,18 @@ func (l *Logger) rotateIfNeeded(key string) {
 }
 
 // rotateFileOutsideLock rotates a file that has no active writer stream yet.
-func (l *Logger) rotateFileOutsideLock(filePath string, maxSize int64, backupCount int) error {
+func (l *Logger) rotateFileOutsideLock(filePath string, backupCount int) error {
 	newPath := filePath + fmt.Sprintf(".%d", time.Now().UnixNano())
-	if err := os.Rename(filePath, newPath); err != nil && !os.IsNotExist(err) {
+	if err := os.Rename(filePath, newPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil // already rotated by another goroutine
+		}
 		return fmt.Errorf("重命名日志文件失败: %v", err)
 	}
 	if l.compress {
-		l.compressLog(newPath)
+		if err := l.compressLog(newPath); err != nil {
+			fmt.Printf("压缩日志文件失败: %v\n", err)
+		}
 	}
 	l.cleanupBackups(filePath, backupCount)
 	return nil
@@ -354,14 +360,9 @@ func (l *Logger) cleanupBackups(basePath string, backupCount int) {
 		fileInfos = append(fileInfos, fileWithTime{f, info.ModTime()})
 	}
 
-	// Sort oldest first
-	for i := 0; i < len(fileInfos); i++ {
-		for j := i + 1; j < len(fileInfos); j++ {
-			if fileInfos[i].modTime.After(fileInfos[j].modTime) {
-				fileInfos[i], fileInfos[j] = fileInfos[j], fileInfos[i]
-			}
-		}
-	}
+	sort.Slice(fileInfos, func(i, j int) bool {
+		return fileInfos[i].modTime.Before(fileInfos[j].modTime)
+	})
 
 	for i := 0; i < len(fileInfos)-backupCount; i++ {
 		os.Remove(fileInfos[i].path)
@@ -404,35 +405,8 @@ func (l *Logger) LogSystem(message string) {
 
 	// Rotate if file exceeds max size
 	if info, err := os.Stat(systemLog); err == nil && info.Size() >= l.systemLogMaxBytes {
-		newPath := systemLog + fmt.Sprintf(".%d", time.Now().UnixNano())
-		if err := os.Rename(systemLog, newPath); err == nil {
-			if l.compress {
-				l.compressLog(newPath)
-			}
-			basePattern := systemLog
-			pattern := basePattern + ".*"
-			files, _ := filepath.Glob(pattern)
-			type fileWithTime struct {
-				path    string
-				modTime time.Time
-			}
-			var fileInfos []fileWithTime
-			for _, f := range files {
-				info, _ := os.Stat(f)
-				if info != nil {
-					fileInfos = append(fileInfos, fileWithTime{f, info.ModTime()})
-				}
-			}
-			for i := 0; i < len(fileInfos); i++ {
-				for j := i + 1; j < len(fileInfos); j++ {
-					if fileInfos[i].modTime.After(fileInfos[j].modTime) {
-						fileInfos[i], fileInfos[j] = fileInfos[j], fileInfos[i]
-					}
-				}
-			}
-			for i := 0; i < len(fileInfos)-l.systemLogBackupCount; i++ {
-				os.Remove(fileInfos[i].path)
-			}
+		if err := l.rotateFileOutsideLock(systemLog, l.systemLogBackupCount); err != nil {
+			fmt.Printf("旋转系统日志文件失败: %v\n", err)
 		}
 	}
 

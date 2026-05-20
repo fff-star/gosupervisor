@@ -42,8 +42,9 @@ type MetricsManager struct {
 	startTime       time.Time
 
 	// 内部状态
-	mu   sync.Mutex
-	stop chan struct{}
+	mu       sync.Mutex
+	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 // NewMetricsManager 创建新的指标管理器
@@ -299,9 +300,9 @@ func (mm *MetricsManager) StartMetricsCollector(interval time.Duration) {
 	}()
 }
 
-// Stop stops the metrics collector.
+// Stop stops the metrics collector. Safe to call multiple times.
 func (mm *MetricsManager) Stop() {
-	close(mm.stop)
+	mm.stopOnce.Do(func() { close(mm.stop) })
 }
 
 // GetRegistry 获取Prometheus注册表

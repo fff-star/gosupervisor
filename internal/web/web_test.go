@@ -682,6 +682,36 @@ func TestReadTailLinesSmallMaxBytes(t *testing.T) {
 	}
 }
 
+// TestReadTailLinesSkipsPartialFirstLine verifies that when reading from a
+// non-BOF offset, the first partial line is skipped.
+func TestReadTailLinesSkipsPartialFirstLine(t *testing.T) {
+	os.MkdirAll("./test_logs", 0755)
+	defer os.RemoveAll("./test_logs")
+
+	tmpFile := "./test_logs/tail_partial_test.log"
+	// Write content larger than maxBytes so we start mid-file.
+	var content string
+	for i := 1; i <= 200; i++ {
+		content += fmt.Sprintf("line %d with some padding to make each line longer than a few bytes\n", i)
+	}
+	os.WriteFile(tmpFile, []byte(content), 0644)
+
+	// Use a small maxBytes to force starting mid-file (not at BOF).
+	result, err := readTailLines(tmpFile, 20, 500)
+	if err != nil {
+		t.Fatalf("readTailLines failed: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(result)), "\n")
+	if len(lines) == 0 {
+		t.Fatal("expected at least one line")
+	}
+	// The first line should be complete (starts with "line "), not a mid-line fragment.
+	if !strings.HasPrefix(lines[0], "line ") {
+		t.Errorf("first line should be complete (starts with 'line '), got: %q", lines[0])
+	}
+}
+
 // TestCSRFProtection tests that POST requests without Origin/Referer are rejected.
 func TestCSRFProtection(t *testing.T) {
 	processManager, err := setupTestEnvironment()
@@ -1595,7 +1625,6 @@ func TestAPIV1ProcessUnknownAction(t *testing.T) {
 	}
 }
 
-
 // --- Fuzz tests ---
 
 func FuzzValidateProcessName(f *testing.F) {
@@ -1847,4 +1876,141 @@ func TestAPIV1ProcessResourcesInvalidMinutes(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", w.Code)
 	}
+}
+
+// TestAPIV1ProcessSignalUnknownSignal verifies signal endpoint returns
+// 400 when given an unknown signal name.
+func TestAPIV1ProcessSignalUnknownSignal(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupTestEnvironment()
+	ws, _ := NewWebServer(processManager, "./test_logs")
+
+	body := strings.NewReader(`{"signal":"INVALID_SIGNAL_XYZ"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/processes/test_process/signal", body)
+	req.Header.Set("Origin", "http://localhost")
+	req.Host = "localhost"
+	w := httptest.NewRecorder()
+	ws.handleAPIV1ProcessAction(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for unknown signal, got %d", w.Code)
+	}
+}
+
+// TestAPIV1ProcessSignalBadJSON verifies signal endpoint returns
+// 400 when given invalid JSON.
+func TestAPIV1ProcessSignalBadJSON(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupTestEnvironment()
+	ws, _ := NewWebServer(processManager, "./test_logs")
+
+	body := strings.NewReader(`not json`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/processes/test_process/signal", body)
+	req.Header.Set("Origin", "http://localhost")
+	req.Host = "localhost"
+	w := httptest.NewRecorder()
+	ws.handleAPIV1ProcessAction(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for bad JSON, got %d", w.Code)
+	}
+}
+
+// TestAPIV1ProcessReload verifies the reload endpoint sends SIGHUP
+// (error expected since test process is not running).
+func TestAPIV1ProcessReload(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupTestEnvironment()
+	ws, _ := NewWebServer(processManager, "./test_logs")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/processes/test_process/reload", nil)
+	req.Header.Set("Origin", "http://localhost")
+	req.Host = "localhost"
+	w := httptest.NewRecorder()
+	ws.handleAPIV1ProcessAction(w, req)
+
+	// Should return 500 because the test process is not running.
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 (process not running), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestAPIV1ProcessLogsTail verifies the logs/tail endpoint.
+func TestAPIV1ProcessLogsTail(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupTestEnvironment()
+	ws, _ := NewWebServer(processManager, "./test_logs")
+
+	// Create a log file for the test process.
+	logPath := filepath.Join("./test_logs", "test_process.log")
+	os.WriteFile(logPath, []byte("line 1\nline 2\nline 3\n"), 0644)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/processes/test_process/logs/tail?lines=2", nil)
+	w := httptest.NewRecorder()
+	ws.handleAPIV1ProcessAction(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestCorsMiddleware verifies CORS headers are added when enabled.
+func TestCorsMiddleware(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupTestEnvironment()
+
+	ws, _ := NewWebServerFull(processManager, "./test_logs", "", "", false, "http://example.com", 0)
+
+	handler := ws.corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+	req.Header.Set("Origin", "http://example.com")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Header().Get("Access-Control-Allow-Origin") != "http://example.com" {
+		t.Errorf("expected CORS header, got: %v", w.Header())
+	}
+}
+
+// TestNewWebServerFullTLS verifies TLS web server creation with all options.
+func TestNewWebServerFullTLS(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("初始化测试环境失败: %v", err)
+	}
+	defer cleanupTestEnvironment()
+
+	ws, err := NewWebServerFullTLS(processManager, "./test_logs", "admin", "pass", true, "*", 10, "", "")
+	if err != nil {
+		t.Fatalf("NewWebServerFullTLS failed: %v", err)
+	}
+
+	if ws.authUser != "admin" {
+		t.Errorf("expected authUser=admin, got %s", ws.authUser)
+	}
+	if ws.corsOrigin != "*" {
+		t.Errorf("expected corsOrigin=*, got %s", ws.corsOrigin)
+	}
+	if ws.rateLimiter == nil {
+		t.Error("expected rateLimiter when rateLimitRPS > 0")
+	}
+	ws.Stop()
 }

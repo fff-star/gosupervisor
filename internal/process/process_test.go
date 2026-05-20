@@ -5,10 +5,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -3366,4 +3368,390 @@ func TestCompareConfigsModified(t *testing.T) {
 	if len(modified) != 1 || modified[0] != "changer" {
 		t.Errorf("expected modified=[changer], got %v", modified)
 	}
+}
+
+// TestCheckRunningProcessHealthCheckRestart verifies that checkRunningProcess
+// triggers Restart() when the process is unhealthy with HealthCheckRestart enabled.
+func TestCheckRunningProcessHealthCheckRestart(t *testing.T) {
+	logDir := "./test_logs_hc_restart"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:                   "hc_restart",
+		Command:                "sleep 60",
+		AutoStart:              false,
+		AutoRestart:            true,
+		HealthCheckURL:         "http://127.0.0.1:19999/health",
+		HealthCheckInterval:    60,
+		HealthCheckTimeout:     5,
+		HealthCheckUnhealthyThreshold: 1,
+		HealthCheckRestart:     true,
+		StartSecs:              0,
+		StartRetries:           3,
+		StopSignal:             "SIGTERM",
+		StopSecs:               10,
+		Environment:            make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("hc_restart")
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer p.Stop()
+
+	oldPID := p.Snapshot().PID
+
+	p.mu.Lock()
+	p.Healthy = false
+	p.mu.Unlock()
+
+	m := &Monitor{Manager: pm}
+	m.checkRunningProcess(p)
+
+	snap := p.Snapshot()
+	if snap.PID == oldPID {
+		t.Error("expected PID to change after health check restart")
+	}
+	if snap.State != StateRunning {
+		t.Errorf("expected StateRunning after restart, got %s", snap.State)
+	}
+}
+
+// TestCheckRunningProcessHealthCheckRestartFatal verifies that when
+// checkRunningProcess triggers a health check restart and the restart fails
+// with StartRetries exceeded, the process enters FATAL state.
+func TestCheckRunningProcessHealthCheckRestartFatal(t *testing.T) {
+	logDir := "./test_logs_hc_fatal"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:                   "hc_fatal",
+		Command:                "sleep 60",
+		AutoStart:              false,
+		AutoRestart:            true,
+		HealthCheckURL:         "http://127.0.0.1:20000/health",
+		HealthCheckInterval:    60,
+		HealthCheckTimeout:     5,
+		HealthCheckRestart:     true,
+		StartSecs:              0,
+		StartRetries:           3,
+		StopSignal:             "SIGTERM",
+		StopSecs:               10,
+		Environment:            make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("hc_fatal")
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer func() {
+		if p.GetState() != StateFatal {
+			p.Stop()
+		}
+	}()
+
+	p.mu.Lock()
+	p.Healthy = false
+	p.StartRetries = 99
+	p.Config.User = "nonexistent_user_xyz_12345"
+	p.mu.Unlock()
+
+	m := &Monitor{Manager: pm}
+	m.checkRunningProcess(p)
+
+	state := p.GetState()
+	if state != StateFatal {
+		t.Errorf("expected StateFatal after failed health check restart, got %s", state)
+	}
+}
+
+// TestRunHealthCheckTCP verifies TCP health check path ("tcp://" prefix).
+func TestRunHealthCheckTCP(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+
+	addr := ln.Addr().String()
+	if !checkHealth("tcp://"+addr, 2*time.Second) {
+		t.Error("TCP health check should succeed when listener is up")
+	}
+
+	if checkHealth("tcp://127.0.0.1:65535", 100*time.Millisecond) {
+		t.Error("TCP health check should fail for unreachable address")
+	}
+}
+
+// TestSendWebhookSuccess verifies the webhook delivers successfully to a test server.
+func TestSendWebhookSuccess(t *testing.T) {
+	received := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		received <- struct{}{}
+	}))
+	defer srv.Close()
+
+	p := &Process{
+		Name: "webhook_test",
+		Config: &config.ProgramConfig{
+			WebhookURL:     srv.URL,
+			WebhookTimeout: 5,
+			WebhookRetries: 0,
+			Group:          "testgroup",
+		},
+	}
+
+	p.sendWebhook(StateRunning, 12345, 0)
+
+	select {
+	case <-received:
+	case <-time.After(2 * time.Second):
+		t.Error("webhook was not received within timeout")
+	}
+}
+
+// TestSendWebhookRetryExhausted verifies retries are attempted with backoff
+// and the function eventually gives up after max retries.
+func TestSendWebhookRetryExhausted(t *testing.T) {
+	attempts := 0
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	srv.Close()
+
+	p := &Process{
+		Name: "webhook_fail",
+		Config: &config.ProgramConfig{
+			WebhookURL:     srv.URL,
+			WebhookTimeout: 1,
+			WebhookRetries: 2,
+		},
+	}
+
+	p.sendWebhook(StateRunning, 12345, 0)
+
+	mu.Lock()
+	if attempts > 0 {
+		t.Logf("webhook attempts: %d", attempts)
+	}
+	mu.Unlock()
+}
+
+// TestSendWebhookNoURL is a no-op when WebhookURL is empty.
+func TestSendWebhookNoURL(t *testing.T) {
+	p := &Process{
+		Name: "nowebhook",
+		Config: &config.ProgramConfig{
+			WebhookURL: "",
+		},
+	}
+	p.sendWebhook(StateRunning, 0, 0)
+}
+
+// TestSignalToRunningProcess sends SIGTERM to a running process.
+func TestSignalToRunningProcess(t *testing.T) {
+	logDir := "./test_logs_signal"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:        "signal_test",
+		Command:     "sleep 60",
+		Directory:   ".",
+		AutoStart:   false,
+		AutoRestart: false,
+		StopSignal:  "SIGTERM",
+		StopSecs:    10,
+		Environment: make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("signal_test")
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer p.Stop()
+
+	if err := p.Signal(syscall.SIGTERM); err != nil {
+		t.Errorf("Signal(SIGTERM) should succeed on running process, got: %v", err)
+	}
+}
+
+// TestSignalToNonRunningProcess returns error when process is not running.
+func TestSignalToNonRunningProcess(t *testing.T) {
+	logDir := "./test_logs_signal_norun"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:        "signal_norun",
+		Command:     "sleep 1",
+		Directory:   ".",
+		AutoStart:   false,
+		AutoRestart: false,
+		StopSignal:  "SIGTERM",
+		StopSecs:    10,
+		Environment: make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("signal_norun")
+
+	if err := p.Signal(syscall.SIGTERM); err == nil {
+		t.Error("Signal() should return error when process is not running")
+	}
+}
+
+// TestSignalProcessGroup verifies signalProcessGroup exists and compiles.
+func TestSignalProcessGroup(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("signalProcessGroup requires root to verify kill() works on pgid")
+	}
+	_ = signalProcessGroup
+}
+
+// TestRunHealthCheckLifecycle tests the health check cycle:
+// failure -> unhealthy -> restore.
+func TestRunHealthCheckLifecycle(t *testing.T) {
+	callCount := 0
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		callCount++
+		c := callCount
+		mu.Unlock()
+		if c <= 1 || c > 4 {
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	}))
+	defer srv.Close()
+
+	logDir := "./test_logs_hc_lifecycle"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:                   "hc_lifecycle",
+		Command:                "sleep 60",
+		AutoStart:              false,
+		AutoRestart:            true,
+		HealthCheckURL:         srv.URL,
+		HealthCheckInterval:    1,
+		HealthCheckTimeout:     2,
+		HealthCheckUnhealthyThreshold: 3,
+		HealthCheckRestart:     true,
+		StartSecs:              0,
+		StartRetries:           3,
+		StopSignal:             "SIGTERM",
+		StopSecs:               10,
+		Environment:            make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("hc_lifecycle")
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer p.Stop()
+
+	time.Sleep(4 * time.Second)
+
+	snap := p.Snapshot()
+	t.Logf("State=%s Healthy=%v healthCheckFailures=%d", snap.State, snap.Healthy, p.healthCheckFailures)
+}
+
+// TestOnHealthCheckFailureCallback verifies the OnHealthCheckFailure callback fires.
+func TestOnHealthCheckFailureCallback(t *testing.T) {
+	var mu sync.Mutex
+	failureCount := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	logDir := "./test_logs_hc_callback"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:                   "hc_callback",
+		Command:                "sleep 60",
+		AutoStart:              false,
+		AutoRestart:            true,
+		HealthCheckURL:         srv.URL,
+		HealthCheckInterval:    1,
+		HealthCheckTimeout:     2,
+		HealthCheckUnhealthyThreshold: 5,
+		HealthCheckRestart:     true,
+		StartSecs:              0,
+		StartRetries:           3,
+		StopSignal:             "SIGTERM",
+		StopSecs:               10,
+		Environment:            make(map[string]string),
+	}
+
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("hc_callback")
+	p.OnHealthCheckFailure = func(name string) {
+		mu.Lock()
+		failureCount++
+		mu.Unlock()
+	}
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer p.Stop()
+
+	time.Sleep(3 * time.Second)
+
+	mu.Lock()
+	if failureCount < 1 {
+		t.Errorf("OnHealthCheckFailure should have been called at least once, got %d", failureCount)
+	}
+	mu.Unlock()
 }

@@ -3,6 +3,7 @@ package web
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,6 +32,7 @@ type WebServer struct {
 	rateLimiter    *RateLimiter
 	certFile       string
 	keyFile        string
+	srv            *http.Server
 
 	indexTmpl         *template.Template
 	logsTmpl          *template.Template
@@ -181,17 +183,23 @@ func (ws *WebServer) Start(addr string) error {
 		handler = ws.rateLimiter.Middleware(handler)
 		fmt.Println("Web界面已启用 API 速率限制")
 	}
-		if ws.certFile != "" && ws.keyFile != "" {
-			fmt.Printf("Web服务器已启用 TLS (cert=%s, key=%s)\n", ws.certFile, ws.keyFile)
-		return http.ListenAndServeTLS(addr, ws.certFile, ws.keyFile, handler)
+	ws.srv = &http.Server{Addr: addr, Handler: handler}
+	if ws.certFile != "" && ws.keyFile != "" {
+		fmt.Printf("Web服务器已启用 TLS (cert=%s, key=%s)\n", ws.certFile, ws.keyFile)
+		return ws.srv.ListenAndServeTLS(ws.certFile, ws.keyFile)
 	}
-	return http.ListenAndServe(addr, handler)
+	return ws.srv.ListenAndServe()
 }
 
 // Stop cleans up resources held by the WebServer.
 func (ws *WebServer) Stop() {
 	if ws.rateLimiter != nil {
 		ws.rateLimiter.Stop()
+	}
+	if ws.srv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		ws.srv.Shutdown(ctx)
 	}
 }
 
