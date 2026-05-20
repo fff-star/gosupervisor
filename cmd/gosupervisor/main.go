@@ -41,6 +41,8 @@ func main() {
 	webUser := flag.String("web-user", "", "Web界面HTTP Basic Auth用户名")
 	webPass := flag.String("web-pass", "", "Web界面HTTP Basic Auth密码")
 	webAPIAuth := flag.Bool("web-api-auth", false, "启用API v1的HTTP Basic Auth认证")
+	webCert := flag.String("web-cert", "", "TLS证书文件路径")
+	webKey := flag.String("web-key", "", "TLS私钥文件路径")
 	metricsEnable := flag.Bool("metrics", false, "启用Prometheus指标导出")
 	metricsAddr := flag.String("metrics-addr", ":9090", "Prometheus指标导出地址")
 	socketPath := flag.String("socket", "", "Unix socket CLI 路径")
@@ -115,6 +117,12 @@ func main() {
 		if !explicitFlags["l"] && cfg.Server.LogDir != "" {
 			*logDir = cfg.Server.LogDir
 		}
+		if !explicitFlags["web-cert"] && cfg.Server.WebCert != "" {
+			*webCert = cfg.Server.WebCert
+		}
+		if !explicitFlags["web-key"] && cfg.Server.WebKey != "" {
+			*webKey = cfg.Server.WebKey
+		}
 	}
 
 	// 处理守护进程模式
@@ -150,7 +158,9 @@ func main() {
 
 	// 添加进程
 	for _, programCfg := range cfg.Programs {
-		processManager.AddProcess(programCfg)
+		for _, expandedCfg := range config.ExpandProgramConfig(programCfg) {
+			processManager.AddProcess(expandedCfg)
+		}
 	}
 
 	// Restore persistent state if configured
@@ -225,7 +235,7 @@ func main() {
 					}
 				}
 				var err error
-				webServer, err = web.NewWebServerFull(processManager, *logDir, *webUser, *webPass, *webAPIAuth, corsOrigin, rateLimitRPS)
+				webServer, err = web.NewWebServerFullTLS(processManager, *logDir, *webUser, *webPass, *webAPIAuth, corsOrigin, rateLimitRPS, *webCert, *webKey)
 				if err != nil {
 					fmt.Printf("初始化Web服务器失败: %v\n", err)
 					exitCode = 1
@@ -461,27 +471,60 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 		return err
 	}
 
-	// 停止所有进程
-	processManager.StopAll()
-
-	// Verify all processes stopped before replacing the map
-	var stillRunning []string
-	processManager.RangeProcesses(func(name string, p *process.Process) {
-		s := p.GetState()
-		if s == process.StateRunning || s == process.StateStarting || s == process.StateStopping {
-			stillRunning = append(stillRunning, name)
+	// Build expanded config map
+	newConfigs := make(map[string]*config.ProgramConfig)
+	for _, programCfg := range cfg.Programs {
+		for _, expandedCfg := range config.ExpandProgramConfig(programCfg) {
+			newConfigs[expandedCfg.Name] = expandedCfg
 		}
-	})
-	if len(stillRunning) > 0 {
-		return fmt.Errorf("无法停止进程: %v", stillRunning)
 	}
 
-	// 清空现有进程
-	processManager.ReplaceProcesses(make(map[string]*process.Process))
+	// Diff against current processes
+	added, removed, modified := processManager.CompareConfigs(newConfigs)
 
-	// 添加新进程
-	for _, programCfg := range cfg.Programs {
-		processManager.AddProcess(programCfg)
+	// Stop and remove processes that no longer exist
+	for _, name := range removed {
+		if p := processManager.GetProcess(name); p != nil {
+			p.Stop()
+			if p.CancelFunc != nil {
+				p.CancelFunc()
+			}
+		}
+		processManager.RemoveProcess(name)
+		logManager.Info("进程 %s", name)
+	}
+
+	// Stop, remove, re-add, and restart modified processes
+	for _, name := range modified {
+		if p := processManager.GetProcess(name); p != nil {
+			p.Stop()
+			if p.CancelFunc != nil {
+				p.CancelFunc()
+			}
+		}
+		processManager.RemoveProcess(name)
+		processManager.AddProcess(newConfigs[name])
+		if newConfigs[name].AutoStart {
+			if newP := processManager.GetProcess(name); newP != nil {
+				newP.Start()
+			}
+		}
+		logManager.Info("进程 %s", name)
+	}
+
+	// Add and start new processes
+	for _, name := range added {
+		processManager.AddProcess(newConfigs[name])
+		if newConfigs[name].AutoStart {
+			if newP := processManager.GetProcess(name); newP != nil {
+				newP.Start()
+			}
+		}
+		logManager.Info("进程 %s", name)
+	}
+
+	if len(added) == 0 && len(removed) == 0 && len(modified) == 0 {
+		logManager.Info("配置重载完成: 无变更")
 	}
 
 	// Re-wire metrics callback
@@ -493,8 +536,6 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 		metricsManagerRef.RecordConfigReload()
 	}
 
-	// 重新启动所有进程
-	processManager.StartAll()
 	return nil
 }
 
@@ -531,7 +572,9 @@ func updateProcessConfig(processManager *process.ProcessManager, configPath stri
 	processManager.RemoveProcess(processName)
 
 	// 添加新进程
-	processManager.AddProcess(programCfg)
+	for _, expandedCfg := range config.ExpandProgramConfig(programCfg) {
+		processManager.AddProcess(expandedCfg)
+	}
 
 	// 启动新进程
 	newProcess := processManager.GetProcess(processName)

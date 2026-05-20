@@ -2,12 +2,14 @@ package process
 
 import (
 	"fmt"
+	"sync"
 	"time"
 )
 
 type Monitor struct {
-	Manager *ProcessManager
-	Done    chan struct{}
+	Manager  *ProcessManager
+	Done     chan struct{}
+	stopOnce sync.Once
 }
 
 func NewMonitor(manager *ProcessManager) *Monitor {
@@ -22,7 +24,7 @@ func (m *Monitor) Start() {
 }
 
 func (m *Monitor) Stop() {
-	close(m.Done)
+	m.stopOnce.Do(func() { close(m.Done) })
 }
 
 func (m *Monitor) monitorLoop() {
@@ -108,9 +110,6 @@ func (m *Monitor) handleExitedProcess(process *Process) {
 		return
 	}
 
-	// Record restart timestamp for rate limiting
-	process.addRestartTimestamp(process.Config.RestartWindowSecs)
-
 	// 标记为 STARTING 防止 monitor 重复调度
 	process.State = StateStarting
 	name := process.Name
@@ -165,6 +164,11 @@ func (m *Monitor) checkRunningProcess(process *Process) {
 		if err := process.Restart(); err != nil {
 			fmt.Printf("健康检查重启进程 %s 失败: %v\n", name, err)
 			process.mu.Lock()
+			// If another path already started a restart, ignore this failure.
+			if process.State == StateRunning || process.State == StateStarting {
+				process.mu.Unlock()
+				return
+			}
 			if process.StartRetries > process.Config.StartRetries {
 				process.State = StateFatal
 				pid := process.PID

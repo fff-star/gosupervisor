@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"reflect"
 	"fmt"
 	"net"
 	"net/http"
@@ -76,8 +77,9 @@ type Process struct {
 	MemoryUsage  uint64
 	RestartCount int
 	LastRestart  time.Time
-	Healthy      bool
-	Group        string
+	Healthy         bool
+	ResourceHealthy bool
+	Group           string
 
 	// Restart rate limiting
 	restartTimestamps []time.Time
@@ -212,6 +214,8 @@ func (p *Process) Start() error {
 	}
 	p.LastRestart = time.Now()
 	p.Healthy = false
+	p.ResourceHealthy = false
+	p.healthCheckFailures = 0
 
 	ctx, cancel := context.WithCancel(p.Context)
 	p.startCtx = ctx
@@ -311,6 +315,8 @@ func (p *Process) Start() error {
 	p.PID = cmd.Process.Pid
 	p.StartTime = time.Now()
 	p.State = StateRunning
+	// Record restart timestamp for rate limiting (only after successful start).
+	p.addRestartTimestamp(p.Config.RestartWindowSecs)
 	pid := p.PID
 	p.mu.Unlock()
 
@@ -351,6 +357,13 @@ func (p *Process) Stop() error {
 	}
 
 	p.State = StateStopping
+	// Cancel health check and resource monitor contexts for clean shutdown.
+	if p.healthCheckCancel != nil {
+		p.healthCheckCancel()
+	}
+	if p.startCancel != nil {
+		p.startCancel()
+	}
 	waitCh := p.waitCh
 	p.mu.Unlock()
 
@@ -359,7 +372,11 @@ func (p *Process) Stop() error {
 	if !ok {
 		sig = syscall.SIGTERM
 	}
-	cmd.Process.Signal(sig)
+	if p.Config.StopAsGroup || p.Config.KillsAsGroup {
+		signalProcessGroup(cmd.Process.Pid, sig)
+	} else {
+		cmd.Process.Signal(sig)
+	}
 
 	// Wait for graceful exit
 	if waitCh != nil {
@@ -379,7 +396,11 @@ func (p *Process) Stop() error {
 	}
 
 	// Force kill if still alive
-	cmd.Process.Kill()
+	if p.Config.StopAsGroup || p.Config.KillsAsGroup {
+		signalProcessGroup(cmd.Process.Pid, syscall.SIGKILL)
+	} else {
+		cmd.Process.Kill()
+	}
 	if waitCh != nil {
 		select {
 		case <-waitCh:
@@ -423,7 +444,7 @@ func (p *Process) Restart() error {
 	// If another caller already started the process between Stop and Start,
 	// the restart is effectively done — don't fail with "already running".
 	p.mu.Lock()
-	if p.State == StateRunning {
+	if p.State == StateRunning || p.State == StateStarting {
 		p.mu.Unlock()
 		return nil
 	}
@@ -442,8 +463,14 @@ func (p *Process) Signal(sig syscall.Signal) error {
 	if p.State != StateRunning {
 		return fmt.Errorf("process %s is not running (state=%s)", p.Name, p.State)
 	}
-	if err := p.Cmd.Process.Signal(sig); err != nil {
-		return fmt.Errorf("failed to send signal %s to %s: %v", sig, p.Name, err)
+	if p.Config.StopAsGroup || p.Config.KillsAsGroup {
+		if err := signalProcessGroup(p.Cmd.Process.Pid, sig); err != nil {
+			return fmt.Errorf("failed to send signal %s to process group of %s: %v", sig, p.Name, err)
+		}
+	} else {
+		if err := p.Cmd.Process.Signal(sig); err != nil {
+			return fmt.Errorf("failed to send signal %s to %s: %v", sig, p.Name, err)
+		}
 	}
 	RecordEvent(p.Name, EventSignal, p.PID, 0, fmt.Sprintf("signal %s", sig))
 	return nil
@@ -474,6 +501,14 @@ type Snapshot struct {
 func (p *Process) Snapshot() Snapshot {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// Combined health: AND across all configured health sources.
+	healthy := true
+	if p.Config.HealthCheckURL != "" {
+		healthy = healthy && p.Healthy
+	}
+	if p.Config.CPUThresholdPercent > 0 || p.Config.MemoryThresholdBytes > 0 {
+		healthy = healthy && p.ResourceHealthy
+	}
 	return Snapshot{
 		Name:         p.Name,
 		State:        p.State,
@@ -486,7 +521,7 @@ func (p *Process) Snapshot() Snapshot {
 		LastRestart:  p.LastRestart,
 		CPUUsage:     p.CPUUsage,
 		MemoryUsage:  p.MemoryUsage,
-		Healthy:      p.Healthy,
+		Healthy:      healthy,
 		Config:       p.Config,
 	}
 }
@@ -633,7 +668,7 @@ func (p *Process) readProcStats(pid int) {
 	p.prevCPUTime = now
 	p.prevSysTicks = sysTicks
 
-	p.Healthy = p.CPUUsage < p.Config.CPUThresholdPercent && p.MemoryUsage < uint64(p.Config.MemoryThresholdBytes)
+	p.ResourceHealthy = p.CPUUsage < p.Config.CPUThresholdPercent && p.MemoryUsage < uint64(p.Config.MemoryThresholdBytes)
 
 	// Push resource sample for history
 	if p.ResourceHistory != nil {
@@ -661,7 +696,7 @@ func (p *Process) startHealthCheck() {
 	if p.healthCheckCancel != nil {
 		p.healthCheckCancel()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(p.Context)
 	p.healthCheckCtx = ctx
 	p.healthCheckCancel = cancel
 	p.mu.Unlock()
@@ -968,7 +1003,7 @@ func (p *Process) sendWebhook(state ProcessState, pid int, exitCode int) {
 		resp.Body.Close()
 		return
 	}
-		Logf("进程 %s webhook 发送失败 (已重试 %d 次): %v\n", p.Name, retries, lastErr)
+	Logf("进程 %s webhook 发送失败 (已重试 %d 次): %v\n", p.Name, retries, lastErr)
 }
 
 // RestartGroup restarts all processes in a group.
@@ -1015,6 +1050,27 @@ func (pm *ProcessManager) GetProcess(name string) *Process {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 	return pm.Processes[name]
+}
+
+// CompareConfigs compares the current process map against new configs and returns
+// lists of added, removed, and modified process names.
+func (pm *ProcessManager) CompareConfigs(newConfigs map[string]*config.ProgramConfig) (added, removed, modified []string) {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	for name := range pm.Processes {
+		if _, exists := newConfigs[name]; !exists {
+			removed = append(removed, name)
+		}
+	}
+	for name, newCfg := range newConfigs {
+		if oldProc, exists := pm.Processes[name]; !exists {
+			added = append(added, name)
+		} else if !reflect.DeepEqual(oldProc.Config, newCfg) {
+			modified = append(modified, name)
+		}
+	}
+	return
 }
 
 func (pm *ProcessManager) StartAll() {

@@ -29,7 +29,13 @@ GoSupervisor is a process management tool written in Go, inspired by Python's Su
 - **Stdin support**: pipe file content to managed process stdin
 - **Webhook notifications**: POST process state transitions to external URLs
 - **Live reload**: SIGHUP signal or `-cmd reload` to reload configuration without restarting the supervisor
+- **Incremental reload**: config diff-based reload — only restarts changed/new/removed processes, unchanged processes keep running
 - **Daemon mode**: fork with setsid for background operation (`-d` flag)
+- **Config includes**: `[include]` section with `files=` glob patterns to split config across multiple files
+- **Process templates**: `numprocs` and `process_name` expression (e.g. `worker_%(process_num)02d`) to launch N identical workers
+- **Process group signaling**: `killasgroup`/`stopasgroup` options to signal entire process groups, preventing orphan processes
+- **Web TLS/SSL**: `-web-cert`/`-web-key` flags and `[inet_http_server]` config section for HTTPS support
+- **Interactive REPL**: `gosupervisorctl` (no args) enters an interactive shell with tab completion and command history
 
 ## Installation
 
@@ -74,6 +80,8 @@ sudo cp gosupervisor /usr/local/bin/
 | `-web-api-auth` | `false` | Enable API v1 Basic Auth (off by default) |
 | `-socket` | `""` | Unix socket path for CLI control |
 | `-state-file` | `""` | Path to persist process state as JSON |
+| `-web-cert` | `""` | TLS certificate file path |
+| `-web-key` | `""` | TLS private key file path |
 | `-version` | `false` | Print version and exit |
 
 ### Basic commands

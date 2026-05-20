@@ -69,6 +69,14 @@ type ProgramConfig struct {
 
 	// Stdin
 	StdinFile string `yaml:"stdinfile" json:"stdinfile"`
+
+	// Process templates
+	NumProcs    int    `yaml:"numprocs" json:"numprocs"`
+	ProcessName string `yaml:"processname" json:"processname"`
+
+	// Process group signaling
+	KillsAsGroup bool `yaml:"killasgroup" json:"killasgroup"`
+	StopAsGroup  bool `yaml:"stopasgroup" json:"stopasgroup"`
 }
 
 // ServerConfig holds global server settings (typically from [supervisord] section).
@@ -82,6 +90,8 @@ type ServerConfig struct {
 	LogDir      string `yaml:"logdir" json:"logdir"`
 	CORSOrigin  string `yaml:"corsorigin" json:"corsorigin"`
 	RateLimitRPS int   `yaml:"ratelimitrps" json:"ratelimitrps"`
+	WebCert     string `yaml:"webcert" json:"webcert"`
+	WebKey      string `yaml:"webkey" json:"webkey"`
 }
 
 // Config 表示整个配置文件的结构
@@ -90,18 +100,23 @@ type Config struct {
 	Programs map[string]*ProgramConfig
 	// Server contains optional global server settings (from [supervisord] section)
 	Server *ServerConfig
+
+	// includeFiles stores include glob patterns collected during parsing (private).
+	includeFiles []string
 }
 
 // YAMLConfig 用于解析YAML格式的配置文件
 type YAMLConfig struct {
 	Programs map[string]*ProgramConfig `yaml:"programs"`
 	Server   *ServerConfig            `yaml:"supervisord"`
+	Includes []string                 `yaml:"includes"`
 }
 
 // JSONConfig 用于解析JSON格式的配置文件
 type JSONConfig struct {
 	Programs map[string]*ProgramConfig `json:"programs"`
 	Server   *ServerConfig            `json:"supervisord"`
+	Includes []string                 `json:"includes"`
 }
 
 // LoadConfig 加载配置文件，根据文件扩展名自动检测格式
@@ -115,18 +130,67 @@ func LoadConfig(configPath string) (*Config, error) {
 		}
 		configPath = absPath
 	}
+	return loadConfigWithIncludes(configPath, make(map[string]bool))
+}
+
+// loadConfigWithIncludes loads a config file and recursively processes includes.
+func loadConfigWithIncludes(configPath string, visited map[string]bool) (*Config, error) {
+	absPath, err := filepath.Abs(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("无法获取配置文件绝对路径: %v", err)
+	}
+	if visited[absPath] {
+		return nil, fmt.Errorf("循环包含配置文件: %s", absPath)
+	}
+	visited[absPath] = true
 
 	// 根据文件扩展名选择解析器
 	ext := strings.ToLower(filepath.Ext(configPath))
+	var cfg *Config
 	switch ext {
 	case ".yaml", ".yml":
-		return loadYAMLConfig(configPath)
+		cfg, err = loadYAMLConfig(configPath)
 	case ".json":
-		return loadJSONConfig(configPath)
+		cfg, err = loadJSONConfig(configPath)
 	default:
-		// 默认使用INI格式
-		return loadINIConfig(configPath)
+		cfg, err = loadINIConfig(configPath)
 	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Process includes
+	baseDir := filepath.Dir(absPath)
+	for _, pattern := range cfg.includeFiles {
+		if !filepath.IsAbs(pattern) {
+			pattern = filepath.Join(baseDir, pattern)
+		}
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("无效的include模式 %s: %v", pattern, err)
+		}
+		for _, match := range matches {
+			incCfg, err := loadConfigWithIncludes(match, visited)
+			if err != nil {
+				return nil, fmt.Errorf("包含文件 %s 错误: %v", match, err)
+			}
+			// Merge programs, warn on duplicates
+			for name, prog := range incCfg.Programs {
+				if _, exists := cfg.Programs[name]; exists {
+					fmt.Printf("警告: 进程 %s 在include文件 %s 中重复定义，将被覆盖\n", name, match)
+				}
+				cfg.Programs[name] = prog
+			}
+			// Merge server config from included file (first one wins if not already set)
+			if incCfg.Server != nil && cfg.Server == nil {
+				cfg.Server = incCfg.Server
+			}
+		}
+	}
+
+	// Don't return includeFiles to caller
+	cfg.includeFiles = nil
+	return cfg, nil
 }
 
 // loadINIConfig 加载INI格式的配置文件
@@ -189,7 +253,15 @@ func loadINIConfig(configPath string) (*Config, error) {
 				}
 				config.Programs[programName] = currentProgram
 			} else if section == "supervisord" {
-				config.Server = &ServerConfig{}
+				if config.Server == nil {
+					config.Server = &ServerConfig{}
+				}
+			} else if section == "inet_http_server" {
+				if config.Server == nil {
+					config.Server = &ServerConfig{}
+				}
+			} else if section == "include" {
+				// [include] section — patterns are collected on the Config
 			}
 			continue
 		}
@@ -305,6 +377,14 @@ func loadINIConfig(configPath string) (*Config, error) {
 					fmt.Sscanf(value, "%d", &currentProgram.WebhookTimeout)
 				case "stdinfile":
 					currentProgram.StdinFile = value
+				case "numprocs":
+					fmt.Sscanf(value, "%d", &currentProgram.NumProcs)
+				case "process_name":
+					currentProgram.ProcessName = value
+				case "killasgroup":
+					currentProgram.KillsAsGroup = value == "true"
+				case "stopasgroup":
+					currentProgram.StopAsGroup = value == "true"
 				}
 			}
 		} else if config.Server != nil && currentSection == "supervisord" {
@@ -331,6 +411,42 @@ func loadINIConfig(configPath string) (*Config, error) {
 					config.Server.CORSOrigin = value
 				case "ratelimitrps":
 					fmt.Sscanf(value, "%d", &config.Server.RateLimitRPS)
+				case "webcert":
+					config.Server.WebCert = value
+				case "webkey":
+					config.Server.WebKey = value
+				}
+			}
+		} else if config.Server != nil && currentSection == "inet_http_server" {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+				switch key {
+				case "port":
+					config.Server.WebAddr = value
+				case "username":
+					config.Server.WebUser = value
+				case "password":
+					config.Server.WebPass = value
+				case "cert":
+					config.Server.WebCert = value
+				case "key":
+					config.Server.WebKey = value
+				}
+			}
+		} else if currentSection == "include" {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+				if key == "files" {
+					for _, pattern := range strings.Split(value, ",") {
+						pattern = strings.TrimSpace(pattern)
+						if pattern != "" {
+							config.includeFiles = append(config.includeFiles, pattern)
+						}
+					}
 				}
 			}
 		}
@@ -367,6 +483,7 @@ func loadYAMLConfig(configPath string) (*Config, error) {
 		return nil, err
 	}
 	cfg.Server = yamlConfig.Server
+	cfg.includeFiles = yamlConfig.Includes
 	return cfg, nil
 }
 
@@ -446,6 +563,12 @@ func applyDefaults(programs map[string]*ProgramConfig, rawPrograms map[string]ma
 		if prog.RestartWindowSecs == 0 {
 			prog.RestartWindowSecs = 60
 		}
+		if prog.NumProcs == 0 {
+			prog.NumProcs = 1
+		}
+		if prog.ProcessName == "" {
+			prog.ProcessName = "%(program_name)s"
+		}
 
 		// Bool defaults: use raw map to distinguish "absent" from "explicitly false"
 		if raw == nil {
@@ -498,6 +621,7 @@ func loadJSONConfig(configPath string) (*Config, error) {
 		return nil, err
 	}
 	cfg.Server = jsonConfig.Server
+	cfg.includeFiles = jsonConfig.Includes
 	return cfg, nil
 }
 
@@ -515,4 +639,96 @@ func (c *Config) ValidateConfig() []string {
 		}
 	}
 	return warnings
+}
+
+
+// expandTemplate expands %(program_name)s and %(process_num)Xd in a string.
+func expandTemplate(tmpl string, programName string, processNum int) string {
+	s := strings.ReplaceAll(tmpl, "%(program_name)s", programName)
+
+	// Replace %(process_num)Xd patterns: %(process_num)d, %(process_num)02d, etc.
+	// The marker is "%(process_num)" — the ")" is part of the marker.
+	// After the marker comes the format like "d", "02d", etc.
+	const marker = "%(process_num)"
+	for {
+		start := strings.Index(s, marker)
+		if start < 0 {
+			break
+		}
+		afterMarker := s[start+len(marker):]
+		dIdx := strings.Index(afterMarker, "d")
+		if dIdx < 0 {
+			break
+		}
+		// Extract printf format: everything after ) up to and including d
+		// For "%(process_num)d" → afterMarker="d" → format="%d"
+		// For "%(process_num)02d" → afterMarker="02d" → format="%02d"
+		fmtPart := afterMarker[:dIdx+1]          // "d" or "02d"
+		fmtStr := "%" + fmtPart                  // "%d" or "%02d"
+		s = s[:start] + fmt.Sprintf(fmtStr, processNum) + s[start+len(marker)+dIdx+1:]
+	}
+	return s
+}
+
+// copyProgramConfig returns a deep copy of the given ProgramConfig.
+func copyProgramConfig(cfg *ProgramConfig) *ProgramConfig {
+	copyCfg := *cfg
+	// Deep copy maps
+	if cfg.Environment != nil {
+		copyCfg.Environment = make(map[string]string, len(cfg.Environment))
+		for k, v := range cfg.Environment {
+			copyCfg.Environment[k] = v
+		}
+	}
+	// Deep copy slices
+	if cfg.DependsOn != nil {
+		copyCfg.DependsOn = make([]string, len(cfg.DependsOn))
+		copy(copyCfg.DependsOn, cfg.DependsOn)
+	}
+	if cfg.RestartCodes != nil {
+		copyCfg.RestartCodes = make([]int, len(cfg.RestartCodes))
+		copy(copyCfg.RestartCodes, cfg.RestartCodes)
+	}
+	if cfg.NoRestartCodes != nil {
+		copyCfg.NoRestartCodes = make([]int, len(cfg.NoRestartCodes))
+		copy(copyCfg.NoRestartCodes, cfg.NoRestartCodes)
+	}
+	return &copyCfg
+}
+
+// ExpandProgramConfig expands a single ProgramConfig into multiple instances
+// based on NumProcs and ProcessName template. Returns a slice with one element
+// when NumProcs <= 1 (no expansion needed).
+func ExpandProgramConfig(cfg *ProgramConfig) []*ProgramConfig {
+	if cfg.NumProcs <= 1 {
+		cfg.NumProcs = 1
+		return []*ProgramConfig{cfg}
+	}
+
+	var result []*ProgramConfig
+	for i := 0; i < cfg.NumProcs; i++ {
+		processNum := i + 1 // 1-based numbering like supervisord
+		copyCfg := copyProgramConfig(cfg)
+
+		// Expand name from template
+		copyCfg.Name = expandTemplate(cfg.ProcessName, cfg.Name, processNum)
+
+		// Expand templates in other string fields
+		copyCfg.Command = expandTemplate(cfg.Command, cfg.Name, processNum)
+		copyCfg.Directory = expandTemplate(cfg.Directory, cfg.Name, processNum)
+		copyCfg.StdoutLogFile = expandTemplate(cfg.StdoutLogFile, cfg.Name, processNum)
+		copyCfg.StderrLogFile = expandTemplate(cfg.StderrLogFile, cfg.Name, processNum)
+		copyCfg.StdinFile = expandTemplate(cfg.StdinFile, cfg.Name, processNum)
+
+		// Expand environment values
+		for k, v := range copyCfg.Environment {
+			copyCfg.Environment[k] = expandTemplate(v, cfg.Name, processNum)
+		}
+
+		// Reset NumProcs on the copy
+		copyCfg.NumProcs = 1
+
+		result = append(result, copyCfg)
+	}
+	return result
 }

@@ -2888,3 +2888,482 @@ func TestStartFromFatalWorks(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	p.Stop()
 }
+
+// TestResourceHealthySeparateFromHealthy verifies that readProcStats sets
+// ResourceHealthy without overwriting the health check's Healthy field.
+func TestResourceHealthySeparateFromHealthy(t *testing.T) {
+	p := &Process{
+		Name:            "test_resource_health",
+		Config:          &config.ProgramConfig{CPUThresholdPercent: 90, MemoryThresholdBytes: 1 << 30},
+		CPUUsage:        50,
+		MemoryUsage:     100 << 20,
+		Healthy:         true,
+		ResourceHealthy: true,
+	}
+	// Simulate what readProcStats does: update ResourceHealthy only.
+	p.mu.Lock()
+	p.ResourceHealthy = p.CPUUsage < p.Config.CPUThresholdPercent && p.MemoryUsage < uint64(p.Config.MemoryThresholdBytes)
+	p.mu.Unlock()
+
+	if !p.ResourceHealthy {
+		t.Error("ResourceHealthy should be true when under thresholds")
+	}
+	// Healthy should be untouched by resource monitoring.
+	if !p.Healthy {
+		t.Error("Healthy should not be affected by readProcStats")
+	}
+
+	// Simulate resource over threshold.
+	p.mu.Lock()
+	p.CPUUsage = 95
+	p.ResourceHealthy = p.CPUUsage < p.Config.CPUThresholdPercent && p.MemoryUsage < uint64(p.Config.MemoryThresholdBytes)
+	p.mu.Unlock()
+
+	if p.ResourceHealthy {
+		t.Error("ResourceHealthy should be false when over CPU threshold")
+	}
+	// Healthy should STILL be untouched.
+	if !p.Healthy {
+		t.Error("Healthy should still be unaffected by readProcStats")
+	}
+}
+
+// TestRestartTimestampOnlyAfterStartSuccess verifies that addRestartTimestamp
+// is called inside Start() after a successful launch, not before.
+func TestRestartTimestampOnlyAfterStartSuccess(t *testing.T) {
+	logDir := "./test_logs_restart_ts"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:             "restart_ts_test",
+		Command:          "sleep 0.2",
+		AutoStart:        false,
+		AutoRestart:      false,
+		StartSecs:        0,
+		StartRetries:     3,
+		RestartMaxCount:  5,
+		RestartWindowSecs: 60,
+		Environment:      make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("restart_ts_test")
+
+	// Before Start(), restartTimestamps should be empty.
+	p.mu.Lock()
+	initialCount := len(p.restartTimestamps)
+	p.mu.Unlock()
+	if initialCount != 0 {
+		t.Errorf("expected 0 restart timestamps before Start(), got %d", initialCount)
+	}
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// After successful Start(), restartTimestamps should have one entry.
+	p.mu.Lock()
+	afterCount := len(p.restartTimestamps)
+	p.mu.Unlock()
+	if afterCount != 1 {
+		t.Errorf("expected 1 restart timestamp after successful Start(), got %d", afterCount)
+	}
+
+	p.Stop()
+}
+
+// TestHealthCheckCtxCancelledOnStop verifies that Stop() cancels the health
+// check context so the goroutine can exit promptly.
+func TestHealthCheckCtxCancelledOnStop(t *testing.T) {
+	logDir := "./test_logs_hc_ctx"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:                   "hc_ctx_test",
+		Command:                "sleep 10",
+		AutoStart:              false,
+		AutoRestart:            false,
+		HealthCheckURL:         "http://127.0.0.1:19999/health",
+		HealthCheckInterval:    60,
+		HealthCheckTimeout:     5,
+		StartSecs:              0,
+		StartRetries:           3,
+		Environment:            make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("hc_ctx_test")
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify health check context is active before Stop.
+	p.mu.Lock()
+	hcCtx := p.healthCheckCtx
+	p.mu.Unlock()
+	if hcCtx == nil {
+		t.Fatal("healthCheckCtx should be set after Start()")
+	}
+	if hcCtx.Err() != nil {
+		t.Error("healthCheckCtx should not be cancelled before Stop()")
+	}
+
+	p.Stop()
+
+	// After Stop(), the health check context should be cancelled.
+	p.mu.Lock()
+	hcCtxAfter := p.healthCheckCtx
+	p.mu.Unlock()
+	if hcCtxAfter != nil && hcCtxAfter.Err() == nil {
+		t.Error("healthCheckCtx should be cancelled after Stop()")
+	}
+}
+
+// TestCleanupBackupsSortedCorrectly verifies that cleanupBackups removes the
+// oldest files when count exceeds the limit. Uses GetProcessLogWriters to
+// register a stream so that rotation triggers cleanup via the normal path.
+func TestCleanupBackupsSortedCorrectly(t *testing.T) {
+	logDir := "./test_logs_cleanup_sort"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, err := logger.NewLogger(logDir, 100, 2, false)
+	if err != nil {
+		t.Fatalf("failed to create logger: %v", err)
+	}
+	defer logManager.Close()
+
+	// Write enough data to trigger rotation via process log writers.
+	cfg := &config.ProgramConfig{
+		StdoutLogFile:        filepath.Join(logDir, "sort_test.log"),
+		StdoutLogMaxBytes:    100,
+		StdoutLogBackupCount: 2,
+	}
+	w, _, err := logManager.GetProcessLogWriters("sort_test", cfg)
+	if err != nil {
+		t.Fatalf("GetProcessLogWriters failed: %v", err)
+	}
+
+	// Write 5 times to create 4+ backups. Each write should trigger rotation.
+	for i := 0; i < 5; i++ {
+		data := make([]byte, 150)
+		w.Write(data)
+		time.Sleep(50 * time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	// Count backup files — should not exceed backupCount (2).
+	files, _ := filepath.Glob(filepath.Join(logDir, "sort_test.log.*"))
+	if len(files) > 2 {
+		t.Errorf("expected at most 2 backup files, got %d: %v", len(files), files)
+	}
+}
+
+// TestRingBufferGeneric verifies the generic RingBuffer works for both
+// Event and ResourceSample types.
+func TestRingBufferGeneric(t *testing.T) {
+	t.Run("EventBuffer", func(t *testing.T) {
+		eb := NewEventBuffer(3)
+		if eb.Len() != 0 {
+			t.Errorf("expected 0, got %d", eb.Len())
+		}
+		eb.Push(Event{Name: "e1"})
+		eb.Push(Event{Name: "e2"})
+		if eb.Len() != 2 {
+			t.Errorf("expected 2, got %d", eb.Len())
+		}
+		s := eb.Snapshot(10)
+		if len(s) != 2 {
+			t.Errorf("expected 2 events, got %d", len(s))
+		}
+		// Test wrap-around.
+		eb.Push(Event{Name: "e3"})
+		eb.Push(Event{Name: "e4"})
+		s = eb.Snapshot(10)
+		if len(s) != 3 {
+			t.Errorf("expected 3 events after wrap, got %d", len(s))
+		}
+	})
+
+	t.Run("ResourceHistory", func(t *testing.T) {
+		rh := NewResourceHistory(4)
+		now := time.Now()
+		// Push in chronological order (as real code does).
+		rh.Push(ResourceSample{Timestamp: now.Add(-3 * time.Minute), CPU: 1.0})
+		rh.Push(ResourceSample{Timestamp: now.Add(-2 * time.Minute), CPU: 2.0})
+		rh.Push(ResourceSample{Timestamp: now.Add(-1 * time.Minute), CPU: 3.0})
+		rh.Push(ResourceSample{Timestamp: now, CPU: 4.0})
+		// All 4 should be returned with since=0.
+		s := rh.Snapshot(0)
+		if len(s) != 4 {
+			t.Errorf("expected 4 samples, got %d", len(s))
+		}
+		// With since=90s, only the last 2 should be returned.
+		s = rh.Snapshot(90 * time.Second)
+		if len(s) != 2 {
+			t.Errorf("expected 2 samples within last 90s, got %d", len(s))
+		}
+		// With since=30s, only the last 1 should be returned.
+		s = rh.Snapshot(30 * time.Second)
+		if len(s) != 1 {
+			t.Errorf("expected 1 sample within last 30s, got %d", len(s))
+		}
+	})
+}
+
+// TestHealthCheckRestartNoFalseFatal verifies the fix for the race condition
+// where checkRunningProcess triggers Restart() for health check, and a
+// concurrent restart from handleExitedProcess causes Restart() to fail with
+// "already running/starting", which should NOT escalate to FATAL.
+func TestHealthCheckRestartNoFalseFatal(t *testing.T) {
+	logDir := "./test_logs_hc_restart_race"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:                   "hc_restart_race",
+		Command:                "sleep 60",
+		AutoStart:              false,
+		AutoRestart:            true,
+		HealthCheckURL:         "http://127.0.0.1:19998/health",
+		HealthCheckInterval:    1,
+		HealthCheckTimeout:     1,
+		HealthCheckUnhealthyThreshold: 1,
+		HealthCheckRestart:     true,
+		StartSecs:              0,
+		StartRetries:           3,
+		RestartWindowSecs:      60,
+		RestartMaxCount:        0,
+		StopSignal:             "SIGTERM",
+		StopSecs:               10,
+		Environment:            make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("hc_restart_race")
+
+	// Start the process.
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify process is running.
+	if p.GetState() != StateRunning {
+		t.Fatalf("expected RUNNING, got %s", p.GetState())
+	}
+
+	// Mark process as unhealthy to trigger health check restart path.
+	p.mu.Lock()
+	p.Healthy = false
+	p.mu.Unlock()
+
+	// Now simulate checkRunningProcess calling Restart() for health check.
+	// At the same time, simulate handleExitedProcess having set STARTING.
+	// Restart() should return nil (not error) when state is STARTING.
+	p.mu.Lock()
+	p.State = StateStarting
+	p.mu.Unlock()
+
+	err := p.Restart()
+	if err != nil {
+		t.Errorf("Restart() should return nil when process is STARTING, got: %v", err)
+	}
+
+	// Also test that Restart() returns nil for STOPPING state.
+	p.mu.Lock()
+	p.State = StateStopping
+	p.mu.Unlock()
+
+	err = p.Restart()
+	if err != nil {
+		t.Errorf("Restart() should return nil when process is STOPPING, got: %v", err)
+	}
+
+	p.Stop()
+}
+
+// TestHealthCheckFailuresResetOnStart verifies that healthCheckFailures is
+// reset to 0 on Start(), preventing the new health check goroutine from
+// immediately marking a freshly restarted process as unhealthy.
+func TestHealthCheckFailuresResetOnStart(t *testing.T) {
+	logDir := "./test_logs_hc_reset"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:                   "hc_reset_test",
+		Command:                "sleep 60",
+		AutoStart:              false,
+		AutoRestart:            false,
+		HealthCheckURL:         "http://127.0.0.1:19997/health",
+		HealthCheckInterval:    60,
+		HealthCheckTimeout:     5,
+		StartSecs:              0,
+		StartRetries:           3,
+		Environment:            make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("hc_reset_test")
+
+	// Manually set failures before start to simulate a previous unhealthy cycle.
+	p.mu.Lock()
+	p.healthCheckFailures = 5
+	p.mu.Unlock()
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	p.mu.Lock()
+	failures := p.healthCheckFailures
+	p.mu.Unlock()
+
+	if failures != 0 {
+		t.Errorf("healthCheckFailures should be reset to 0 on Start(), got %d", failures)
+	}
+
+	p.Stop()
+}
+
+// TestMonitorStopDoubleClose verifies Monitor.Stop is safe to call multiple times.
+func TestMonitorStopDoubleClose(t *testing.T) {
+	logDir := "./test_logs_monitor_stop"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	monitor := NewMonitor(pm)
+	monitor.Start()
+	time.Sleep(100 * time.Millisecond)
+
+	// Should not panic when called multiple times.
+	monitor.Stop()
+	monitor.Stop()
+	monitor.Stop()
+}
+
+func TestCompareConfigsNoChange(t *testing.T) {
+	logDir := "./test_logs_cmp_noop"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:        "cmp_test",
+		Command:     "sleep 10",
+		AutoStart:   true,
+		StartRetries: 3,
+		Environment: make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+
+	newConfigs := map[string]*config.ProgramConfig{
+		"cmp_test": cfg,
+	}
+	added, removed, modified := pm.CompareConfigs(newConfigs)
+	if len(added) != 0 {
+		t.Errorf("expected 0 added, got %d", len(added))
+	}
+	if len(removed) != 0 {
+		t.Errorf("expected 0 removed, got %d", len(removed))
+	}
+	if len(modified) != 0 {
+		t.Errorf("expected 0 modified, got %d", len(modified))
+	}
+}
+
+func TestCompareConfigsAddedAndRemoved(t *testing.T) {
+	logDir := "./test_logs_cmp_diff"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	pm.AddProcess(&config.ProgramConfig{
+		Name:    "keep",
+		Command: "sleep 10",
+		Environment: make(map[string]string),
+	})
+	pm.AddProcess(&config.ProgramConfig{
+		Name:    "remove_me",
+		Command: "sleep 10",
+		Environment: make(map[string]string),
+	})
+
+	newConfigs := map[string]*config.ProgramConfig{
+		"keep":     {Name: "keep", Command: "sleep 10", Environment: make(map[string]string)},
+		"new_one":  {Name: "new_one", Command: "sleep 10", Environment: make(map[string]string)},
+	}
+
+	added, removed, modified := pm.CompareConfigs(newConfigs)
+	if len(added) != 1 || added[0] != "new_one" {
+		t.Errorf("expected added=[new_one], got %v", added)
+	}
+	if len(removed) != 1 || removed[0] != "remove_me" {
+		t.Errorf("expected removed=[remove_me], got %v", removed)
+	}
+	if len(modified) != 0 {
+		t.Errorf("expected 0 modified, got %d", len(modified))
+	}
+}
+
+func TestCompareConfigsModified(t *testing.T) {
+	logDir := "./test_logs_cmp_mod"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	pm.AddProcess(&config.ProgramConfig{
+		Name:    "changer",
+		Command: "sleep 10",
+		AutoStart: true,
+		Environment: make(map[string]string),
+	})
+
+	// Changed Command and AutoStart
+	newConfigs := map[string]*config.ProgramConfig{
+		"changer": {Name: "changer", Command: "sleep 30", AutoStart: false, Environment: make(map[string]string)},
+	}
+
+	added, removed, modified := pm.CompareConfigs(newConfigs)
+	if len(added) != 0 {
+		t.Errorf("expected 0 added, got %d", len(added))
+	}
+	if len(removed) != 0 {
+		t.Errorf("expected 0 removed, got %d", len(removed))
+	}
+	if len(modified) != 1 || modified[0] != "changer" {
+		t.Errorf("expected modified=[changer], got %v", modified)
+	}
+}

@@ -677,3 +677,181 @@ command = sleep 60
 		t.Error("expected nil Server when no [supervisord] section")
 	}
 }
+
+func TestLoadConfigWithIncludes(t *testing.T) {
+	iniPath := "./testdata/test_include.ini"
+	cfg, err := LoadConfig(iniPath)
+	if err != nil {
+		t.Fatalf("failed to load config with includes: %v", err)
+	}
+
+	// test_main from the main file
+	if _, ok := cfg.Programs["test_main"]; !ok {
+		t.Error("expected test_main from main config")
+	}
+	// app1 from conf.d/app.ini
+	if _, ok := cfg.Programs["app1"]; !ok {
+		t.Error("expected app1 from included conf.d/app.ini")
+	}
+	// worker1 from conf.d/worker.ini
+	if _, ok := cfg.Programs["worker1"]; !ok {
+		t.Error("expected worker1 from included conf.d/worker.ini")
+	}
+	// Total: 3 programs
+	if len(cfg.Programs) != 3 {
+		t.Errorf("expected 3 programs, got %d", len(cfg.Programs))
+	}
+
+	// Server config from main file
+	if cfg.Server == nil {
+		t.Fatal("expected Server config")
+	}
+	if cfg.Server.WebAddr != ":9090" {
+		t.Errorf("expected :9090, got %s", cfg.Server.WebAddr)
+	}
+}
+
+func TestLoadConfigWithGlobIncludes(t *testing.T) {
+	iniPath := "./testdata/test_include_glob.ini"
+	cfg, err := LoadConfig(iniPath)
+	if err != nil {
+		t.Fatalf("failed to load config with glob includes: %v", err)
+	}
+
+	if _, ok := cfg.Programs["test_glob"]; !ok {
+		t.Error("expected test_glob from main config")
+	}
+	if _, ok := cfg.Programs["app1"]; !ok {
+		t.Error("expected app1 from glob-included conf.d/*.ini")
+	}
+	if _, ok := cfg.Programs["worker1"]; !ok {
+		t.Error("expected worker1 from glob-included conf.d/*.ini")
+	}
+}
+
+func TestLoadConfigWithIncludeCycle(t *testing.T) {
+	iniPath := "./testdata/test_include_cycle.ini"
+	_, err := LoadConfig(iniPath)
+	if err == nil {
+		t.Fatal("expected error for cyclic include, got nil")
+	}
+}
+
+func TestLoadConfigWithoutIncludes(t *testing.T) {
+	iniPath := "./testdata/test_config.ini"
+	cfg, err := LoadConfig(iniPath)
+	if err != nil {
+		t.Fatalf("failed to load config without includes: %v", err)
+	}
+	// Should still work normally — at least the known programs
+	if _, ok := cfg.Programs["test1"]; !ok {
+		t.Error("expected test1 in normal config")
+	}
+}
+
+func TestConfigIgnoreIncludeFilesInOutput(t *testing.T) {
+	iniPath := "./testdata/test_include_glob.ini"
+	cfg, err := LoadConfig(iniPath)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	// includeFiles should be nil after loadConfigWithIncludes clears it
+	if cfg.includeFiles != nil {
+		t.Errorf("includeFiles should be nil after load, got %v", cfg.includeFiles)
+	}
+}
+
+func TestExpandTemplate(t *testing.T) {
+	tests := []struct {
+		tmpl        string
+		name        string
+		num         int
+		expected    string
+	}{
+		{"%(program_name)s", "test", 1, "test"},
+		{"worker_%(process_num)d", "test", 5, "worker_5"},
+		{"worker_%(process_num)02d", "test", 3, "worker_03"},
+		{"worker_%(process_num)03d", "test", 42, "worker_042"},
+		{"%(program_name)s_%(process_num)d", "app", 7, "app_7"},
+		{"no_template_here", "app", 1, "no_template_here"},
+		{"%(program_name)s_%(process_num)02d_suffix", "svc", 12, "svc_12_suffix"},
+		{"", "app", 1, ""},
+	}
+	for _, tt := range tests {
+		result := expandTemplate(tt.tmpl, tt.name, tt.num)
+		if result != tt.expected {
+			t.Errorf("expandTemplate(%q, %q, %d) = %q, want %q", tt.tmpl, tt.name, tt.num, result, tt.expected)
+		}
+	}
+}
+
+func TestExpandProgramConfig(t *testing.T) {
+	cfg := &ProgramConfig{
+		Name:        "worker",
+		Command:     "python worker.py --id=%(process_num)d",
+		ProcessName: "%(program_name)s_%(process_num)02d",
+		NumProcs:    3,
+		Environment: map[string]string{"WORKER_ID": "%(process_num)d"},
+	}
+	result := ExpandProgramConfig(cfg)
+	if len(result) != 3 {
+		t.Fatalf("expected 3 configs, got %d", len(result))
+	}
+	if result[0].Name != "worker_01" {
+		t.Errorf("expected worker_01, got %s", result[0].Name)
+	}
+	if result[1].Name != "worker_02" {
+		t.Errorf("expected worker_02, got %s", result[1].Name)
+	}
+	if result[2].Name != "worker_03" {
+		t.Errorf("expected worker_03, got %s", result[2].Name)
+	}
+	if result[0].Command != "python worker.py --id=1" {
+		t.Errorf("unexpected command: %s", result[0].Command)
+	}
+	if result[2].Command != "python worker.py --id=3" {
+		t.Errorf("unexpected command: %s", result[2].Command)
+	}
+	if result[0].Environment["WORKER_ID"] != "1" {
+		t.Errorf("unexpected env: %s", result[0].Environment["WORKER_ID"])
+	}
+	// Original should not be modified
+	if cfg.Name != "worker" {
+		t.Errorf("original config name was modified: %s", cfg.Name)
+	}
+	// Copies should have NumProcs=1
+	if result[0].NumProcs != 1 {
+		t.Errorf("expanded config NumProcs should be 1, got %d", result[0].NumProcs)
+	}
+}
+
+func TestExpandProgramConfigNoExpansion(t *testing.T) {
+	cfg := &ProgramConfig{
+		Name:        "single",
+		Command:     "run",
+		ProcessName: "%(program_name)s",
+		NumProcs:    1,
+	}
+	result := ExpandProgramConfig(cfg)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 config, got %d", len(result))
+	}
+	if result[0].Name != "single" {
+		t.Errorf("expected single, got %s", result[0].Name)
+	}
+}
+
+func TestExpandProgramConfigZeroProcs(t *testing.T) {
+	cfg := &ProgramConfig{
+		Name:     "zero",
+		Command:  "run",
+		NumProcs: 0,
+	}
+	result := ExpandProgramConfig(cfg)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 config for NumProcs=0, got %d", len(result))
+	}
+	if result[0].NumProcs != 1 {
+		t.Errorf("expected NumProcs=1 after normalization, got %d", result[0].NumProcs)
+	}
+}

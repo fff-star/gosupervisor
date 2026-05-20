@@ -2,6 +2,7 @@ package web
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,6 +29,8 @@ type WebServer struct {
 	apiAuth        bool
 	corsOrigin     string
 	rateLimiter    *RateLimiter
+	certFile       string
+	keyFile        string
 
 	indexTmpl         *template.Template
 	logsTmpl          *template.Template
@@ -46,6 +49,11 @@ func NewWebServerWithAuth(processManager *process.ProcessManager, logDir, user, 
 
 // NewWebServerFull creates a WebServer with all options including CORS and rate limiting.
 func NewWebServerFull(processManager *process.ProcessManager, logDir, user, pass string, apiAuth bool, corsOrigin string, rateLimitRPS int) (*WebServer, error) {
+	return NewWebServerFullTLS(processManager, logDir, user, pass, apiAuth, corsOrigin, rateLimitRPS, "", "")
+}
+
+// NewWebServerFullTLS creates a WebServer with all options including TLS cert/key.
+func NewWebServerFullTLS(processManager *process.ProcessManager, logDir, user, pass string, apiAuth bool, corsOrigin string, rateLimitRPS int, certFile, keyFile string) (*WebServer, error) {
 	funcs := template.FuncMap{
 		"lower": func(s interface{}) string {
 			return strings.ToLower(fmt.Sprintf("%v", s))
@@ -71,6 +79,8 @@ func NewWebServerFull(processManager *process.ProcessManager, logDir, user, pass
 		apiAuth:           apiAuth,
 		corsOrigin:        corsOrigin,
 		rateLimiter:       rl,
+		certFile:          certFile,
+		keyFile:           keyFile,
 		indexTmpl:         indexTmpl,
 		logsTmpl:          logsTmpl,
 		systemInfoTmpl:    systemInfoTmpl,
@@ -170,6 +180,10 @@ func (ws *WebServer) Start(addr string) error {
 	if ws.rateLimiter != nil {
 		handler = ws.rateLimiter.Middleware(handler)
 		fmt.Println("Web界面已启用 API 速率限制")
+	}
+		if ws.certFile != "" && ws.keyFile != "" {
+			fmt.Printf("Web服务器已启用 TLS (cert=%s, key=%s)\n", ws.certFile, ws.keyFile)
+		return http.ListenAndServeTLS(addr, ws.certFile, ws.keyFile, handler)
 	}
 	return http.ListenAndServe(addr, handler)
 }
@@ -891,19 +905,22 @@ func getSystemInfo(pm *process.ProcessManager) *SystemInfo {
 		DaemonPID:    os.Getpid(),
 	}
 
-	// Supervisor daemon uptime
+	// Supervisor daemon uptime (handle process name with spaces in /proc/self/stat)
 	if procUptime, err := os.ReadFile("/proc/self/stat"); err == nil {
-		fields := strings.Fields(string(procUptime))
-		if len(fields) >= 22 {
-			var startTicks uint64
-			fmt.Sscanf(fields[21], "%d", &startTicks)
-			// jiffies per second, typically 100 on Linux
-			ticksPerSec := int64(100)
-			uptimeSecs := time.Now().Unix() - int64(startTicks)/ticksPerSec
-			if uptimeSecs >= 0 {
-				h := int(uptimeSecs) / 3600
-				m := (int(uptimeSecs) % 3600) / 60
-				info.DaemonUptime = fmt.Sprintf("%dh %dm", h, m)
+		content := string(procUptime)
+		idx := strings.LastIndex(content, ")")
+		if idx >= 0 && idx+2 < len(content) {
+			rest := strings.Fields(content[idx+2:])
+			if len(rest) >= 20 {
+				var startTicks uint64
+				fmt.Sscanf(rest[19], "%d", &startTicks)
+				ticksPerSec := int64(100)
+				uptimeSecs := time.Now().Unix() - int64(startTicks)/ticksPerSec
+				if uptimeSecs >= 0 {
+					h := int(uptimeSecs) / 3600
+					m := (int(uptimeSecs) % 3600) / 60
+					info.DaemonUptime = fmt.Sprintf("%dh %dm", h, m)
+				}
 			}
 		}
 	}
@@ -1020,8 +1037,14 @@ func readTailLines(path string, maxLines int, maxBytes int64) ([]byte, error) {
 	}
 	buf = buf[:n]
 
-	// Find the start position: skip the first partial line (if we didn't start at BOF)
-	// and keep at most maxLines
+	// If we didn't start at BOF, skip the first partial line.
+	if readSize > 0 && readSize < fileSize && len(buf) > 0 {
+		if idx := bytes.IndexByte(buf, '\n'); idx >= 0 {
+			buf = buf[idx+1:]
+		}
+	}
+
+	// Keep at most maxLines from the end.
 	lines := 0
 	for i := len(buf) - 1; i >= 0; i-- {
 		if buf[i] == '\n' {
