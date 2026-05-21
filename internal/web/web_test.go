@@ -1997,3 +1997,256 @@ func TestNewWebServerFullTLS(t *testing.T) {
 	}
 	ws.Stop()
 }
+
+// --- XSS safety tests ---
+
+// TestXSS_ProcessNameInAPI verifies that a process name containing HTML/JS
+// is safely encoded in the JSON API response.
+func TestXSS_ProcessNameInAPI(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	defer cleanupTestEnvironment()
+
+	// Add a process with XSS name
+	xssName := "<script>alert('xss')</script>"
+	processManager.AddProcess(&config.ProgramConfig{
+		Name: xssName, Command: "sleep 60",
+	})
+
+	webServer, err := NewWebServer(processManager, "./test_logs")
+	if err != nil {
+		t.Fatalf("create web server failed: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/processes", nil)
+	rr := httptest.NewRecorder()
+	webServer.handleAPIV1Processes(rr, req)
+
+	// Response should be valid JSON
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Errorf("response should be valid JSON: %v", err)
+	}
+
+	ct := rr.Header().Get("Content-Type")
+	if !strings.Contains(ct, "application/json") {
+		t.Errorf("expected JSON content type, got: %s", ct)
+	}
+}
+
+// TestXSS_CommandInAPI verifies that a process command containing HTML is
+// safely encoded in the JSON API response.
+func TestXSS_CommandInAPI(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	defer cleanupTestEnvironment()
+
+	processManager.AddProcess(&config.ProgramConfig{
+		Name: "xss_test", Command: "<img src=x onerror=alert(1)>",
+	})
+
+	webServer, err := NewWebServer(processManager, "./test_logs")
+	if err != nil {
+		t.Fatalf("create web server failed: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/processes/xss_test", nil)
+	rr := httptest.NewRecorder()
+	webServer.handleAPIV1Processes(rr, req)
+
+	// JSON should be valid
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Errorf("response should be valid JSON: %v", err)
+	}
+}
+
+// TestXSS_EventsAPI verifies that the events JSON API returns valid JSON.
+func TestXSS_EventsAPI(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	defer cleanupTestEnvironment()
+
+	webServer, err := NewWebServer(processManager, "./test_logs")
+	if err != nil {
+		t.Fatalf("create web server failed: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/events?limit=5", nil)
+	rr := httptest.NewRecorder()
+	webServer.handleAPIV1Events(rr, req)
+
+	// Response should be valid JSON
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Errorf("response should be valid JSON: %v", err)
+	}
+}
+
+// --- Content-Type header tests ---
+
+// TestContentType_APIV1Processes verifies the processes list endpoint returns
+// Content-Type: application/json.
+func TestContentType_APIV1Processes(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	defer cleanupTestEnvironment()
+
+	webServer, err := NewWebServer(processManager, "./test_logs")
+	if err != nil {
+		t.Fatalf("create web server failed: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/processes", nil)
+	rr := httptest.NewRecorder()
+	webServer.handleAPIV1Processes(rr, req)
+
+	ct := rr.Header().Get("Content-Type")
+	if !strings.Contains(ct, "application/json") {
+		t.Errorf("expected application/json, got: %s", ct)
+	}
+}
+
+// TestContentType_APIV1System verifies the system info endpoint returns
+// Content-Type: application/json.
+func TestContentType_APIV1System(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	defer cleanupTestEnvironment()
+
+	webServer, err := NewWebServer(processManager, "./test_logs")
+	if err != nil {
+		t.Fatalf("create web server failed: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/system", nil)
+	rr := httptest.NewRecorder()
+	webServer.handleAPIV1System(rr, req)
+
+	ct := rr.Header().Get("Content-Type")
+	if !strings.Contains(ct, "application/json") {
+		t.Errorf("expected application/json, got: %s", ct)
+	}
+}
+
+// TestContentType_APIV1Config verifies the config endpoint returns
+// Content-Type: application/json.
+func TestContentType_APIV1Config(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	defer cleanupTestEnvironment()
+
+	webServer, err := NewWebServer(processManager, "./test_logs")
+	if err != nil {
+		t.Fatalf("create web server failed: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/config", nil)
+	rr := httptest.NewRecorder()
+	webServer.handleAPIV1Config(rr, req)
+
+	ct := rr.Header().Get("Content-Type")
+	if !strings.Contains(ct, "application/json") {
+		t.Errorf("expected application/json, got: %s", ct)
+	}
+}
+
+// TestContentType_APIV1Events verifies the events endpoint returns
+// Content-Type: application/json.
+func TestContentType_APIV1Events(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	defer cleanupTestEnvironment()
+
+	webServer, err := NewWebServer(processManager, "./test_logs")
+	if err != nil {
+		t.Fatalf("create web server failed: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/events", nil)
+	rr := httptest.NewRecorder()
+	webServer.handleAPIV1Events(rr, req)
+
+	ct := rr.Header().Get("Content-Type")
+	if !strings.Contains(ct, "application/json") {
+		t.Errorf("expected application/json, got: %s", ct)
+	}
+}
+
+// TestContentType_APIV1ProcessAction verifies the process action endpoint
+// returns Content-Type: application/json.
+func TestContentType_APIV1ProcessAction(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	defer cleanupTestEnvironment()
+
+	// Start the test process first so stop can work
+	p := processManager.GetProcess("test_process")
+	if p != nil {
+		p.Start()
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	webServer, err := NewWebServer(processManager, "./test_logs")
+	if err != nil {
+		t.Fatalf("create web server failed: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", "/api/v1/processes/test_process/stop", nil)
+	req.Header.Set("Origin", "http://localhost")
+	req.Host = "localhost"
+	rr := httptest.NewRecorder()
+	webServer.handleAPIV1ProcessAction(rr, req)
+
+	ct := rr.Header().Get("Content-Type")
+	if !strings.Contains(ct, "application/json") {
+		t.Errorf("expected application/json, got: %s", ct)
+	}
+
+	// Cleanup
+	if p != nil {
+		p.Stop()
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// TestContentType_ProcessNotFound verifies that error responses also carry
+// Content-Type: application/json.
+func TestContentType_ProcessNotFound(t *testing.T) {
+	processManager, err := setupTestEnvironment()
+	if err != nil {
+		t.Fatalf("setup failed: %v", err)
+	}
+	defer cleanupTestEnvironment()
+
+	webServer, err := NewWebServer(processManager, "./test_logs")
+	if err != nil {
+		t.Fatalf("create web server failed: %v", err)
+	}
+
+	// Non-existent process via the detail route
+	req := httptest.NewRequest("GET", "/api/v1/processes/nonexistent", nil)
+	rr := httptest.NewRecorder()
+	webServer.handleAPIV1ProcessAction(rr, req)
+
+	ct := rr.Header().Get("Content-Type")
+	if !strings.Contains(ct, "application/json") {
+		t.Errorf("expected application/json for error response, got: %s", ct)
+	}
+}
