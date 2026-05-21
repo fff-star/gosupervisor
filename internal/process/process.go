@@ -85,9 +85,10 @@ type Process struct {
 	restartTimestamps []time.Time
 
 	// Health check tracking
-	healthCheckFailures int
-	healthCheckCtx      context.Context
-	healthCheckCancel   context.CancelFunc
+	healthCheckFailures     int
+	healthCheckRestartFired bool // suppress repeat health-check restarts until next success
+	healthCheckCtx          context.Context
+	healthCheckCancel       context.CancelFunc
 
 	// waitCh is closed by monitor() after cmd.Wait() returns.
 	// Stop() waits on it instead of calling cmd.Wait() directly.
@@ -216,11 +217,23 @@ func (p *Process) Start() error {
 	p.Healthy = false
 	p.ResourceHealthy = false
 	p.healthCheckFailures = 0
+	p.healthCheckRestartFired = false
 
 	ctx, cancel := context.WithCancel(p.Context)
 	p.startCtx = ctx
 	p.startCancel = cancel
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", p.Config.Command)
+	var cmd *exec.Cmd
+	if !needsShell(p.Config.Command) {
+		parts := strings.Fields(p.Config.Command)
+		if len(parts) > 0 {
+			if _, err := exec.LookPath(parts[0]); err == nil {
+				cmd = exec.CommandContext(ctx, parts[0], parts[1:]...)
+			}
+		}
+	}
+	if cmd == nil {
+		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", p.Config.Command)
+	}
 
 	if p.Config.Directory != "" {
 		cmd.Dir = p.Config.Directory
@@ -696,6 +709,11 @@ func (p *Process) readProcStats(pid int) {
 	p.mu.Unlock()
 }
 
+// needsShell reports whether cmd contains shell metacharacters and requires /bin/sh -c.
+func needsShell(cmd string) bool {
+	return strings.ContainsAny(cmd, "|;&$`(){}<>*?!~#'\"\\")
+}
+
 // runHook executes a shell script hook.
 func runHook(script string) error {
 	cmd := exec.Command("/bin/sh", "-c", script)
@@ -754,6 +772,7 @@ func (p *Process) runHealthCheck(ctx context.Context) {
 			if ok {
 				p.healthCheckFailures = 0
 				p.Healthy = true
+				p.healthCheckRestartFired = false
 				if !wasHealthy {
 					pid := p.PID
 					RecordEvent(p.Name, EventHealthRestore, pid, 0, "health restored")

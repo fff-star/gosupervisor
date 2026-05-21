@@ -119,9 +119,10 @@ func (m *Monitor) handleExitedProcess(process *Process) {
 	go func() {
 		time.Sleep(1 * time.Second)
 
-		// Re-check state: Stop() may have been called during the sleep.
+		// Re-check state: Stop() may have been called, or another restart path
+		// (health check) may have already set STARTING.
 		st := process.GetState()
-		if st == StateStopped || st == StateStopping {
+		if st == StateStopped || st == StateStopping || st == StateStarting {
 			return
 		}
 
@@ -131,7 +132,7 @@ func (m *Monitor) handleExitedProcess(process *Process) {
 			fmt.Printf("重启进程 %s 失败: %v\n", name, err)
 
 			process.mu.Lock()
-			if process.State == StateStopped || process.State == StateStopping {
+			if process.State == StateStopped || process.State == StateStopping || process.State == StateStarting {
 				process.mu.Unlock()
 				return
 			}
@@ -163,12 +164,18 @@ func (m *Monitor) checkRunningProcess(process *Process) {
 		process.StartRetries = 0
 	}
 
-	// Health check restart: unhealthy process with HealthCheckRestart enabled
+	// Health check restart: unhealthy process with HealthCheckRestart enabled.
+	// Only fire once per unhealthy cycle to prevent restart storms.
 	if process.Config.HealthCheckRestart && !process.Healthy && process.Config.HealthCheckURL != "" {
 		if process.State != StateRunning {
 			process.mu.Unlock()
 			return
 		}
+		if process.healthCheckRestartFired {
+			process.mu.Unlock()
+			return
+		}
+		process.healthCheckRestartFired = true
 		name := process.Name
 		process.mu.Unlock()
 		fmt.Printf("进程 %s 健康检查失败，触发重启...\n", name)
