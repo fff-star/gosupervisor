@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -416,7 +415,6 @@ func (ws *WebServer) handleAPIV1GroupAction(w http.ResponseWriter, r *http.Reque
 	}
 
 	var result []string
-	var errMsg string
 	switch {
 	case action == "start" && r.Method == http.MethodPost:
 		result = ws.processManager.StartGroup(group)
@@ -429,10 +427,6 @@ func (ws *WebServer) handleAPIV1GroupAction(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if errMsg != "" {
-		jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: errMsg})
-		return
-	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "processes": result})
 }
 
@@ -922,7 +916,7 @@ func getSystemInfo(pm *process.ProcessManager) *SystemInfo {
 			if len(rest) >= 20 {
 				var startTicks uint64
 				fmt.Sscanf(rest[19], "%d", &startTicks)
-				ticksPerSec := int64(100)
+				ticksPerSec := int64(100) // USER_HZ is always 100 on Linux
 				uptimeSecs := time.Now().Unix() - int64(startTicks)/ticksPerSec
 				if uptimeSecs >= 0 {
 					h := int(uptimeSecs) / 3600
@@ -987,20 +981,12 @@ func getSystemInfo(pm *process.ProcessManager) *SystemInfo {
 		info.Uptime = fmt.Sprintf("%dh %dm", hours, mins)
 	}
 
-	// 从 df -B1 命令获取磁盘信息（POSIX 兼容，字节输出）
-	cmd := exec.Command("df", "-B1", "/")
-	if output, err := cmd.Output(); err == nil {
-		lines := strings.Split(string(output), "\n")
-		if len(lines) > 1 {
-			fields := strings.Fields(lines[1])
-			if len(fields) >= 3 {
-				var total, used int64
-				fmt.Sscanf(fields[1], "%d", &total)
-				fmt.Sscanf(fields[2], "%d", &used)
-				info.DiskTotal = uint64(total)
-				info.DiskUsed = uint64(used)
-			}
-		}
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs("/", &stat); err == nil {
+		total := stat.Blocks * uint64(stat.Bsize)
+		free := stat.Bfree * uint64(stat.Bsize)
+		info.DiskTotal = total
+		info.DiskUsed = total - free
 	}
 
 	return info

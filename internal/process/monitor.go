@@ -118,12 +118,23 @@ func (m *Monitor) handleExitedProcess(process *Process) {
 	// 在独立 goroutine 中执行重启，不阻塞 monitor 循环
 	go func() {
 		time.Sleep(1 * time.Second)
+
+		// Re-check state: Stop() may have been called during the sleep.
+		st := process.GetState()
+		if st == StateStopped || st == StateStopping {
+			return
+		}
+
 		fmt.Printf("进程 %s 已退出，尝试重启...\n", name)
 
 		if err := process.Start(); err != nil {
 			fmt.Printf("重启进程 %s 失败: %v\n", name, err)
 
 			process.mu.Lock()
+			if process.State == StateStopped || process.State == StateStopping {
+				process.mu.Unlock()
+				return
+			}
 			if process.StartRetries > process.Config.StartRetries {
 				process.State = StateFatal
 				pid := process.PID

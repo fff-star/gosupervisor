@@ -18,6 +18,7 @@ import (
 type MetricsManager struct {
 	processManager *process.ProcessManager
 	registry       *prometheus.Registry
+	httpServer     *http.Server
 
 	// 指标定义
 	processCount         prometheus.Gauge
@@ -146,10 +147,10 @@ func (mm *MetricsManager) registerMetrics() {
 		Help: "进程日志文件大小（字节）",
 	}, []string{"name"})
 
-	// 上次健康检查成功时间戳
+	// 上次处于健康状态的时间戳
 	mm.healthCheckLastOK = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "gosupervisor_healthcheck_last_success_timestamp",
-		Help: "进程上次健康检查成功的Unix时间戳",
+		Help: "进程上次处于健康状态的Unix时间戳",
 	}, []string{"name"})
 
 	// 进程启动总次数（包括首次启动和重启）
@@ -280,8 +281,11 @@ func (mm *MetricsManager) RecordHealthCheckFailure(name string) {
 func (mm *MetricsManager) StartMetricsServer(addr string) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(mm.registry, promhttp.HandlerOpts{}))
+	mm.mu.Lock()
+	mm.httpServer = &http.Server{Addr: addr, Handler: mux}
+	mm.mu.Unlock()
 	fmt.Printf("Prometheus指标服务器启动在 %s\n", addr)
-	return http.ListenAndServe(addr, mux)
+	return mm.httpServer.ListenAndServe()
 }
 
 // StartMetricsCollector 启动指标收集器
@@ -300,9 +304,16 @@ func (mm *MetricsManager) StartMetricsCollector(interval time.Duration) {
 	}()
 }
 
-// Stop stops the metrics collector. Safe to call multiple times.
+// Stop stops the metrics collector and HTTP server. Safe to call multiple times.
 func (mm *MetricsManager) Stop() {
-	mm.stopOnce.Do(func() { close(mm.stop) })
+	mm.stopOnce.Do(func() {
+		close(mm.stop)
+		mm.mu.Lock()
+		if mm.httpServer != nil {
+			mm.httpServer.Close()
+		}
+		mm.mu.Unlock()
+	})
 }
 
 // GetRegistry 获取Prometheus注册表

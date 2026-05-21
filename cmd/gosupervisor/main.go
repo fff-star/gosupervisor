@@ -373,21 +373,22 @@ func main() {
 }
 
 func printProcessStatus(p *process.Process) {
-	fmt.Printf("进程名称: %s\n", p.Name)
-	fmt.Printf("状态: %s\n", p.State)
-	if p.PID > 0 {
-		fmt.Printf("PID: %d\n", p.PID)
+	s := p.Snapshot()
+	fmt.Printf("进程名称: %s\n", s.Name)
+	fmt.Printf("状态: %s\n", s.State)
+	if s.PID > 0 {
+		fmt.Printf("PID: %d\n", s.PID)
 	}
-	if !p.StartTime.IsZero() {
-		fmt.Printf("启动时间: %s\n", p.StartTime.Format("2006-01-02 15:04:05"))
+	if !s.StartTime.IsZero() {
+		fmt.Printf("启动时间: %s\n", s.StartTime.Format("2006-01-02 15:04:05"))
 	}
-	if !p.StopTime.IsZero() {
-		fmt.Printf("停止时间: %s\n", p.StopTime.Format("2006-01-02 15:04:05"))
+	if !s.StopTime.IsZero() {
+		fmt.Printf("停止时间: %s\n", s.StopTime.Format("2006-01-02 15:04:05"))
 	}
-	if p.ExitCode != 0 {
-		fmt.Printf("退出码: %d\n", p.ExitCode)
+	if s.ExitCode != 0 {
+		fmt.Printf("退出码: %d\n", s.ExitCode)
 	}
-	fmt.Printf("启动重试次数: %d\n", p.StartRetries)
+	fmt.Printf("启动重试次数: %d\n", s.RestartCount)
 }
 
 // printVersion 打印版本信息
@@ -491,7 +492,7 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 			}
 		}
 		processManager.RemoveProcess(name)
-		logManager.Info("进程 %s", name)
+		logManager.Info("进程 %s 已移除", name)
 	}
 
 	// Stop, remove, re-add, and restart modified processes
@@ -509,7 +510,7 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 				newP.Start()
 			}
 		}
-		logManager.Info("进程 %s", name)
+		logManager.Info("进程 %s 已修改", name)
 	}
 
 	// Add and start new processes
@@ -520,7 +521,7 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 				newP.Start()
 			}
 		}
-		logManager.Info("进程 %s", name)
+		logManager.Info("进程 %s 已添加", name)
 	}
 
 	if len(added) == 0 && len(removed) == 0 && len(modified) == 0 {
@@ -576,9 +577,18 @@ func updateProcessConfig(processManager *process.ProcessManager, configPath stri
 		processManager.AddProcess(expandedCfg)
 	}
 
-	// 启动新进程
+	// Re-wire metrics callback for updated processes
+	if metricsManagerRef != nil {
+		for _, expandedCfg := range config.ExpandProgramConfig(programCfg) {
+			if p := processManager.GetProcess(expandedCfg.Name); p != nil {
+				p.OnHealthCheckFailure = metricsManagerRef.RecordHealthCheckFailure
+			}
+		}
+	}
+
+	// 启动新进程（仅当 AutoStart 为 true 时）
 	newProcess := processManager.GetProcess(processName)
-	if newProcess != nil {
+	if newProcess != nil && programCfg.AutoStart {
 		if err := newProcess.Start(); err != nil {
 			return fmt.Errorf("启动进程 %s 失败: %v", processName, err)
 		}

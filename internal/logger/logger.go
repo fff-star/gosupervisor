@@ -27,7 +27,7 @@ func (cw *countingWriter) Write(p []byte) (n int, err error) {
 	total := atomic.AddInt64(&cw.bytesWritten, int64(n))
 	if cw.maxSize > 0 && total >= cw.maxSize && cw.onExceed != nil {
 		cw.onExceed()
-		atomic.StoreInt64(&cw.bytesWritten, 0)
+		atomic.AddInt64(&cw.bytesWritten, -cw.maxSize)
 	}
 	return
 }
@@ -272,6 +272,9 @@ func (l *Logger) rotateLogByKey(key, filePath string, maxSize int64, backupCount
 
 // rotateLog rotates logs for a process (both stdout and stderr streams).
 func (l *Logger) rotateLog(processName string) error {
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+
 	stdoutKey := processName + "/stdout"
 	stderrKey := processName + "/stderr"
 
@@ -341,7 +344,7 @@ func (l *Logger) compressLog(logFile string) error {
 
 // cleanupBackups removes old backup files keeping only the last backupCount.
 func (l *Logger) cleanupBackups(basePath string, backupCount int) {
-	pattern := basePath + ".*"
+	pattern := basePath + ".[0-9]*"
 	files, err := filepath.Glob(pattern)
 	if err != nil || len(files) <= backupCount {
 		return
@@ -382,16 +385,18 @@ func (l *Logger) CloseProcessLog(processName string) error {
 	stdoutKey := processName + "/stdout"
 	stderrKey := processName + "/stderr"
 
-	// When both streams share the same logStream, only close once.
+	closed := make(map[*os.File]bool)
 	for _, key := range []string{stdoutKey, stderrKey} {
 		if stream, exists := l.processLogs[key]; exists {
 			if cw, ok := stream.writer.(*countingWriter); ok {
 				if f, ok := cw.writer.(*os.File); ok {
-					f.Close()
+					if !closed[f] {
+						f.Close()
+						closed[f] = true
+					}
 				}
 			}
 			delete(l.processLogs, key)
-			// If stderr was shared with stdout, it's already deleted; nothing to do
 		}
 	}
 	return nil

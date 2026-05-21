@@ -119,11 +119,9 @@ func handleCommand(conn net.Conn, args []string) {
 func sendLine(conn net.Conn, cmd string) {
 	fmt.Fprintln(conn, cmd)
 	scanner := bufio.NewScanner(conn)
-	if !scanner.Scan() {
-		fmt.Fprintln(os.Stderr, "读取响应失败")
-		return
+	for scanner.Scan() {
+		fmt.Println(scanner.Text())
 	}
-	fmt.Println(scanner.Text())
 }
 
 // runREPL runs the interactive REPL loop.
@@ -180,8 +178,6 @@ func runREPL(socketPath string) {
 		for scanner.Scan() {
 			resp := scanner.Text()
 			fmt.Println(resp)
-			// socket server sends single-line responses, so one line is enough
-			break
 		}
 	}
 
@@ -274,7 +270,7 @@ func fetchProcessNames(conn net.Conn) []string {
 func historyPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ""
+		return filepath.Join(os.TempDir(), ".gosupervisorctl_history")
 	}
 	return filepath.Join(home, ".gosupervisorctl_history")
 }

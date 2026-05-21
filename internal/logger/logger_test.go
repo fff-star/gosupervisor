@@ -235,29 +235,34 @@ func TestLogCompression(t *testing.T) {
 }
 
 func TestCleanupOldLogs(t *testing.T) {
-	// 创建测试日志目录
-	logDir := "./test_logs"
-	os.MkdirAll(logDir, 0755)
-	defer os.RemoveAll(logDir)
+	logDir := t.TempDir()
 
-	// 初始化日志管理器
 	logger, err := NewDefaultLogger(logDir)
 	if err != nil {
 		t.Fatalf("初始化日志管理器失败: %v", err)
 	}
 	defer logger.Close()
 
-	// 测试清理旧日志
+	// Create backup files exceeding the default maxBackupCount (10)
+	basePath := filepath.Join(logDir, "test.log")
+	for i := 0; i < 15; i++ {
+		backup := fmt.Sprintf("%s.%d", basePath, i)
+		if err := os.WriteFile(backup, []byte("backup"), 0644); err != nil {
+			t.Fatalf("创建备份文件失败: %v", err)
+		}
+	}
+
 	if err := logger.cleanupOldLogs("test"); err != nil {
 		t.Errorf("清理旧日志失败: %v", err)
 	}
 
-	// 等待清理完成
-	time.Sleep(1 * time.Second)
-
-	// 检查日志目录是否存在
-	if _, err := os.Stat(logDir); os.IsNotExist(err) {
-		t.Fatalf("日志目录不存在")
+	// Verify old backups were trimmed to maxBackupCount
+	files, err := filepath.Glob(basePath + ".*")
+	if err != nil {
+		t.Fatalf("glob 失败: %v", err)
+	}
+	if len(files) > logger.maxBackupCount {
+		t.Errorf("备份文件未正确清理: got %d, want <= %d", len(files), logger.maxBackupCount)
 	}
 }
 
@@ -328,46 +333,35 @@ func TestLogCompressionWithInvalidFile(t *testing.T) {
 
 // TestCleanupOldLogsWithMultipleFiles 测试清理多个旧日志文件
 func TestCleanupOldLogsWithMultipleFiles(t *testing.T) {
-	// 创建测试日志目录
-	logDir := "./test_logs"
-	os.MkdirAll(logDir, 0755)
-	defer os.RemoveAll(logDir)
+	logDir := t.TempDir()
 
-	// 初始化日志管理器
 	logger, err := NewDefaultLogger(logDir)
 	if err != nil {
 		t.Fatalf("初始化日志管理器失败: %v", err)
 	}
 	defer logger.Close()
 
-	// 创建多个日志文件
-	for i := 0; i < 5; i++ {
-		// 创建测试日志文件
-		logFileName := filepath.Join(logDir, fmt.Sprintf("test_log_%d.log", i))
-		if err := os.WriteFile(logFileName, []byte("test log content"), 0644); err != nil {
+	// Create backup files matching the cleanup pattern (basePath.*)
+	basePath := filepath.Join(logDir, "test.log")
+	for i := 0; i < 15; i++ {
+		backup := fmt.Sprintf("%s.%d", basePath, i)
+		if err := os.WriteFile(backup, []byte("backup content"), 0644); err != nil {
 			t.Fatalf("创建测试日志文件失败: %v", err)
 		}
-		// 等待一段时间，确保文件修改时间不同
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 
-	// 清理旧日志
+	// Cleanup should reduce files to maxBackupCount (10)
 	if err := logger.cleanupOldLogs("test"); err != nil {
 		t.Errorf("清理旧日志失败: %v", err)
 	}
 
-	// 等待清理完成
-	time.Sleep(1 * time.Second)
-
-	// 检查剩余日志文件数量
-	remainingFiles, err := os.ReadDir(logDir)
+	files, err := filepath.Glob(basePath + ".*")
 	if err != nil {
-		t.Fatalf("读取日志目录失败: %v", err)
+		t.Fatalf("glob 失败: %v", err)
 	}
-
-	// 应该还有一些文件剩余（具体数量取决于清理策略）
-	if len(remainingFiles) == 0 {
-		t.Errorf("所有日志文件都被清理了，这可能不是预期行为")
+	if len(files) > logger.maxBackupCount {
+		t.Errorf("备份文件未正确清理: got %d, want <= %d", len(files), logger.maxBackupCount)
 	}
 }
 
@@ -396,8 +390,8 @@ func TestLoggerWithNonExistentDir(t *testing.T) {
 	}
 }
 
-// TestLogLevelFiltering 测试日志级别过滤
-func TestLogLevelFiltering(t *testing.T) {
+// TestLogLevelsWriteToSystemLog tests that all log levels write to system.log.
+func TestLogLevelsWriteToSystemLog(t *testing.T) {
 	// 创建测试日志目录
 	logDir := "./test_logs"
 	os.MkdirAll(logDir, 0755)

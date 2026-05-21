@@ -341,19 +341,6 @@ func TestProgramConfigStructTags(t *testing.T) {
 	}
 }
 
-// TestServerURLRemoved tests that the dead ServerURL field no longer exists.
-func TestServerURLRemoved(t *testing.T) {
-	cfg, err := LoadConfig("testdata/test_config.ini")
-	if err != nil {
-		t.Fatalf("加载配置失败: %v", err)
-	}
-	// Verify that all programs load correctly without the ServerURL field
-	test1 := cfg.Programs["test1"]
-	if test1 == nil {
-		t.Fatal("test1 应为 nil")
-	}
-	// No ServerURL to check — it was removed
-}
 
 // TestNewConfigFieldsINI tests parsing of all new config fields from INI format.
 func TestNewConfigFieldsINI(t *testing.T) {

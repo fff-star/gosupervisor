@@ -120,7 +120,7 @@ func TestHandleIndex(t *testing.T) {
 	}
 
 	// 检查响应内容是否包含进程信息
-	if !contains(w.Body.String(), "test_process") {
+	if !strings.Contains(w.Body.String(),"test_process") {
 		t.Errorf("响应内容不包含进程信息")
 	}
 }
@@ -331,11 +331,11 @@ func TestHandleLogs(t *testing.T) {
 	}
 
 	// 检查响应内容是否包含日志页面信息
-	if !contains(w.Body.String(), "test_process") {
+	if !strings.Contains(w.Body.String(),"test_process") {
 		t.Errorf("响应内容不包含进程名称")
 	}
 
-	if !contains(w.Body.String(), "进程日志") {
+	if !strings.Contains(w.Body.String(),"进程日志") {
 		t.Errorf("响应内容不包含日志页面标题")
 	}
 }
@@ -373,11 +373,11 @@ func TestHandleSystemInfo(t *testing.T) {
 	}
 
 	// 检查响应内容是否包含系统信息页面信息
-	if !contains(w.Body.String(), "系统信息") {
+	if !strings.Contains(w.Body.String(),"系统信息") {
 		t.Errorf("响应内容不包含系统信息页面标题")
 	}
 
-	if !contains(w.Body.String(), "操作系统:") {
+	if !strings.Contains(w.Body.String(),"操作系统:") {
 		t.Errorf("响应内容不包含操作系统信息")
 	}
 }
@@ -415,11 +415,11 @@ func TestHandleProcessDetail(t *testing.T) {
 	}
 
 	// 检查响应内容是否包含进程详情页面信息
-	if !contains(w.Body.String(), "进程详情") {
+	if !strings.Contains(w.Body.String(),"进程详情") {
 		t.Errorf("响应内容不包含进程详情页面标题")
 	}
 
-	if !contains(w.Body.String(), "test_process") {
+	if !strings.Contains(w.Body.String(),"test_process") {
 		t.Errorf("响应内容不包含进程名称")
 	}
 }
@@ -593,23 +593,6 @@ func TestValidateProcessName(t *testing.T) {
 	}
 }
 
-// 辅助函数：检查字符串是否包含子字符串
-func contains(s, substr string) bool {
-	if len(s) < len(substr) {
-		return false
-	}
-	return indexOf(s, substr) != -1
-}
-
-// 辅助函数：查找子字符串在字符串中的位置
-func indexOf(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
-}
 
 // TestReadTailLines tests reading the last N lines from a file.
 func TestReadTailLines(t *testing.T) {

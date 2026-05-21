@@ -668,7 +668,9 @@ func (p *Process) readProcStats(pid int) {
 	p.prevCPUTime = now
 	p.prevSysTicks = sysTicks
 
-	p.ResourceHealthy = p.CPUUsage < p.Config.CPUThresholdPercent && p.MemoryUsage < uint64(p.Config.MemoryThresholdBytes)
+	cpuOK := p.Config.CPUThresholdPercent <= 0 || p.CPUUsage < p.Config.CPUThresholdPercent
+	memOK := p.Config.MemoryThresholdBytes <= 0 || p.MemoryUsage < uint64(p.Config.MemoryThresholdBytes)
+	p.ResourceHealthy = cpuOK && memOK
 
 	// Push resource sample for history
 	if p.ResourceHistory != nil {

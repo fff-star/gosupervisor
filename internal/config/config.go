@@ -12,6 +12,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// parseIntWarn 解析整数并在失败时输出警告
+func parseIntWarn(value, field string, dst any) {
+	if _, err := fmt.Sscanf(value, "%d", dst); err != nil {
+		fmt.Printf("警告: 无法解析 %s 的值 '%s'，使用默认值\n", field, value)
+	}
+}
+
 // ProgramConfig 表示单个进程的配置
 type ProgramConfig struct {
 	Name                 string            `yaml:"name" json:"name"`
@@ -34,7 +41,9 @@ type ProgramConfig struct {
 	StderrLogMaxBytes    int64             `yaml:"stderrlogmaxbytes" json:"stderrlogmaxbytes"`
 	StderrLogBackupCount int               `yaml:"stderrlogbackupcount" json:"stderrlogbackupcount"`
 	Priority             int               `yaml:"priority" json:"priority"`
-	Umask                int               `yaml:"umask" json:"umask"`
+	// Umask: the Go default (022) is octal=18 decimal, but config files must use decimal.
+	// In INI/YAML/JSON: umask=18 corresponds to traditional octal 022 (write umask: 18 not 022).
+	Umask int `yaml:"umask" json:"umask"`
 	DependsOn            []string          `yaml:"dependson" json:"dependson"`
 	Group                string            `yaml:"group" json:"group"`
 
@@ -282,11 +291,11 @@ func loadINIConfig(configPath string) (*Config, error) {
 				case "autorestart":
 					currentProgram.AutoRestart = value == "true"
 				case "startsecs":
-					fmt.Sscanf(value, "%d", &currentProgram.StartSecs)
+					parseIntWarn(value, "startsecs", &currentProgram.StartSecs)
 				case "startretries":
-					fmt.Sscanf(value, "%d", &currentProgram.StartRetries)
+					parseIntWarn(value, "startretries", &currentProgram.StartRetries)
 				case "stopsecs":
-					fmt.Sscanf(value, "%d", &currentProgram.StopSecs)
+					parseIntWarn(value, "stopsecs", &currentProgram.StopSecs)
 				case "stopsignal":
 					currentProgram.StopSignal = value
 				case "user":
@@ -311,17 +320,17 @@ func loadINIConfig(configPath string) (*Config, error) {
 				case "stderrlogfile":
 					currentProgram.StderrLogFile = value
 				case "stdoutlogmaxbytes":
-					fmt.Sscanf(value, "%d", &currentProgram.StdoutLogMaxBytes)
+					parseIntWarn(value, "stdoutlogmaxbytes", &currentProgram.StdoutLogMaxBytes)
 				case "stdoutlogbackupcount":
-					fmt.Sscanf(value, "%d", &currentProgram.StdoutLogBackupCount)
+					parseIntWarn(value, "stdoutlogbackupcount", &currentProgram.StdoutLogBackupCount)
 				case "stderrlogmaxbytes":
-					fmt.Sscanf(value, "%d", &currentProgram.StderrLogMaxBytes)
+					parseIntWarn(value, "stderrlogmaxbytes", &currentProgram.StderrLogMaxBytes)
 				case "stderrlogbackupcount":
-					fmt.Sscanf(value, "%d", &currentProgram.StderrLogBackupCount)
+					parseIntWarn(value, "stderrlogbackupcount", &currentProgram.StderrLogBackupCount)
 				case "priority":
-					fmt.Sscanf(value, "%d", &currentProgram.Priority)
+					parseIntWarn(value, "priority", &currentProgram.Priority)
 				case "umask":
-					fmt.Sscanf(value, "%d", &currentProgram.Umask)
+					parseIntWarn(value, "umask", &currentProgram.Umask)
 				case "dependson":
 					// 解析依赖关系，格式如: prog1,prog2,prog3
 					deps := strings.Split(value, ",")
@@ -336,35 +345,43 @@ func loadINIConfig(configPath string) (*Config, error) {
 				case "healthcheckurl":
 					currentProgram.HealthCheckURL = value
 				case "healthcheckinterval":
-					fmt.Sscanf(value, "%d", &currentProgram.HealthCheckInterval)
+					parseIntWarn(value, "healthcheckinterval", &currentProgram.HealthCheckInterval)
 				case "healthchecktimeout":
-					fmt.Sscanf(value, "%d", &currentProgram.HealthCheckTimeout)
+					parseIntWarn(value, "healthchecktimeout", &currentProgram.HealthCheckTimeout)
 				case "healthcheckunhealthythreshold":
-					fmt.Sscanf(value, "%d", &currentProgram.HealthCheckUnhealthyThreshold)
+					parseIntWarn(value, "healthcheckunhealthythreshold", &currentProgram.HealthCheckUnhealthyThreshold)
 				case "healthcheckrestart":
 					currentProgram.HealthCheckRestart = value == "true"
 				case "cputhresholdpercent":
-					fmt.Sscanf(value, "%f", &currentProgram.CPUThresholdPercent)
+					if _, err := fmt.Sscanf(value, "%f", &currentProgram.CPUThresholdPercent); err != nil {
+					fmt.Printf("警告: 无法解析 cputhresholdpercent 的值 '%s'，使用默认值\n", value)
+				}
 				case "memorythresholdbytes":
-					fmt.Sscanf(value, "%d", &currentProgram.MemoryThresholdBytes)
+					parseIntWarn(value, "memorythresholdbytes", &currentProgram.MemoryThresholdBytes)
 				case "prestartscript":
 					currentProgram.PreStartScript = value
 				case "poststopscript":
 					currentProgram.PostStopScript = value
 				case "restartmaxcount":
-					fmt.Sscanf(value, "%d", &currentProgram.RestartMaxCount)
+					parseIntWarn(value, "restartmaxcount", &currentProgram.RestartMaxCount)
 				case "restartwindowsecs":
-					fmt.Sscanf(value, "%d", &currentProgram.RestartWindowSecs)
+					parseIntWarn(value, "restartwindowsecs", &currentProgram.RestartWindowSecs)
 				case "restartcodes":
 					for _, s := range strings.Split(value, ",") {
 						var code int
-						fmt.Sscanf(strings.TrimSpace(s), "%d", &code)
+						if _, err := fmt.Sscanf(strings.TrimSpace(s), "%d", &code); err != nil {
+							fmt.Printf("警告: 无法解析 restartcodes 值 '%s'，跳过\n", s)
+							continue
+						}
 						currentProgram.RestartCodes = append(currentProgram.RestartCodes, code)
 					}
 				case "norestartcodes":
 					for _, s := range strings.Split(value, ",") {
 						var code int
-						fmt.Sscanf(strings.TrimSpace(s), "%d", &code)
+						if _, err := fmt.Sscanf(strings.TrimSpace(s), "%d", &code); err != nil {
+							fmt.Printf("警告: 无法解析 norestartcodes 值 '%s'，跳过\n", s)
+							continue
+						}
 						currentProgram.NoRestartCodes = append(currentProgram.NoRestartCodes, code)
 					}
 				case "cgrouppath":
@@ -372,13 +389,13 @@ func loadINIConfig(configPath string) (*Config, error) {
 				case "webhookurl":
 					currentProgram.WebhookURL = value
 				case "webhookretries":
-					fmt.Sscanf(value, "%d", &currentProgram.WebhookRetries)
+					parseIntWarn(value, "webhookretries", &currentProgram.WebhookRetries)
 				case "webhooktimeout":
-					fmt.Sscanf(value, "%d", &currentProgram.WebhookTimeout)
+					parseIntWarn(value, "webhooktimeout", &currentProgram.WebhookTimeout)
 				case "stdinfile":
 					currentProgram.StdinFile = value
 				case "numprocs":
-					fmt.Sscanf(value, "%d", &currentProgram.NumProcs)
+					parseIntWarn(value, "numprocs", &currentProgram.NumProcs)
 				case "process_name":
 					currentProgram.ProcessName = value
 				case "killasgroup":
@@ -410,7 +427,7 @@ func loadINIConfig(configPath string) (*Config, error) {
 				case "corsorigin":
 					config.Server.CORSOrigin = value
 				case "ratelimitrps":
-					fmt.Sscanf(value, "%d", &config.Server.RateLimitRPS)
+					parseIntWarn(value, "ratelimitrps", &config.Server.RateLimitRPS)
 				case "webcert":
 					config.Server.WebCert = value
 				case "webkey":
@@ -625,20 +642,85 @@ func loadJSONConfig(configPath string) (*Config, error) {
 	return cfg, nil
 }
 
+var knownSignals = map[string]bool{
+	"SIGTERM": true, "SIGKILL": true, "SIGHUP": true, "SIGINT": true,
+	"SIGQUIT": true, "SIGUSR1": true, "SIGUSR2": true, "SIGSTOP": true,
+	"SIGCONT": true, "SIGABRT": true, "SIGALRM": true,
+}
+
 // ValidateConfig validates config consistency — missing DependsOn references, etc.
 func (c *Config) ValidateConfig() []string {
 	var warnings []string
 	for name, prog := range c.Programs {
+		if prog.Command == "" {
+			warnings = append(warnings, fmt.Sprintf("进程 %s 配置缺少 command 字段", name))
+		}
 		for _, dep := range prog.DependsOn {
 			if _, ok := c.Programs[dep]; !ok {
 				warnings = append(warnings, fmt.Sprintf("进程 %s 依赖了不存在的进程 %s", name, dep))
+			}
+			if dep == name {
+				warnings = append(warnings, fmt.Sprintf("进程 %s 不能依赖自身", name))
 			}
 		}
 		if prog.Name == "" {
 			warnings = append(warnings, fmt.Sprintf("进程 %s 配置缺少 name 字段", name))
 		}
+		if prog.StopSignal != "" && !knownSignals[prog.StopSignal] {
+			warnings = append(warnings, fmt.Sprintf("进程 %s 的 stopsignal '%s' 可能无效", name, prog.StopSignal))
+		}
+	}
+	// Detect dependency cycles
+	if cycle := findDependencyCycle(c.Programs); cycle != "" {
+		warnings = append(warnings, cycle)
 	}
 	return warnings
+}
+
+// findDependencyCycle detects a cycle in DependsOn using DFS.
+func findDependencyCycle(programs map[string]*ProgramConfig) string {
+	const (
+		white = 0 // unvisited
+		gray  = 1 // in current DFS path
+		black = 2 // fully explored
+	)
+	color := make(map[string]int)
+	parent := make(map[string]string)
+
+	var dfs func(name string) string
+	dfs = func(name string) string {
+		color[name] = gray
+		prog, ok := programs[name]
+		if !ok {
+			color[name] = black
+			return ""
+		}
+		for _, dep := range prog.DependsOn {
+			if color[dep] == gray {
+				return fmt.Sprintf("检测到循环依赖: %s -> %s", name, dep)
+			}
+			if color[dep] == white {
+				parent[dep] = name
+				if cycle := dfs(dep); cycle != "" {
+					return cycle
+				}
+			}
+		}
+		color[name] = black
+		return ""
+	}
+
+	for name := range programs {
+		color[name] = white
+	}
+	for name := range programs {
+		if color[name] == white {
+			if cycle := dfs(name); cycle != "" {
+				return cycle
+			}
+		}
+	}
+	return ""
 }
 
 
@@ -660,14 +742,27 @@ func expandTemplate(tmpl string, programName string, processNum int) string {
 		if dIdx < 0 {
 			break
 		}
-		// Extract printf format: everything after ) up to and including d
-		// For "%(process_num)d" → afterMarker="d" → format="%d"
-		// For "%(process_num)02d" → afterMarker="02d" → format="%02d"
-		fmtPart := afterMarker[:dIdx+1]          // "d" or "02d"
-		fmtStr := "%" + fmtPart                  // "%d" or "%02d"
+		fmtPart := afterMarker[:dIdx+1] // "d" or "02d"
+		if !isValidIntFormat(fmtPart) {
+			break
+		}
+		fmtStr := "%" + fmtPart
 		s = s[:start] + fmt.Sprintf(fmtStr, processNum) + s[start+len(marker)+dIdx+1:]
 	}
 	return s
+}
+
+// isValidIntFormat checks that s is of the form "d" or "02d" (digits followed by "d").
+func isValidIntFormat(s string) bool {
+	if len(s) < 1 || s[len(s)-1] != 'd' {
+		return false
+	}
+	for i := 0; i < len(s)-1; i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // copyProgramConfig returns a deep copy of the given ProgramConfig.

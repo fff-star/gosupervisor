@@ -2,6 +2,7 @@ package socket
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -32,7 +33,10 @@ func (s *SocketServer) Start(socketPath string) error {
 		for {
 			conn, err := l.Accept()
 			if err != nil {
-				return
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
+				continue
 			}
 			go s.handleConn(conn)
 		}
@@ -60,6 +64,9 @@ func (s *SocketServer) handleConn(conn net.Conn) {
 		}
 		response := s.handleCommand(line)
 		fmt.Fprintln(conn, response)
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("socket scanner error: %v\n", err)
 	}
 }
 
@@ -161,7 +168,10 @@ func (s *SocketServer) handleCommand(line string) string {
 		if p == nil {
 			return "ERR process not found"
 		}
-		sig, _ := process.ParseSignal("SIGHUP")
+		sig, ok := process.ParseSignal("SIGHUP")
+		if !ok {
+			return "ERR unknown signal: SIGHUP"
+		}
 		if err := p.Signal(sig); err != nil {
 			return fmt.Sprintf("ERR %v", err)
 		}

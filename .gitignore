@@ -45,6 +45,10 @@ CLAUDE.md
 *.bak
 *.backup
 
+# 覆盖率报告
+cover.out
+cover.html
+
 # 临时文件
 *.tmp
 *.temp
