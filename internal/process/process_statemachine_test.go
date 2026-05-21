@@ -364,15 +364,17 @@ func TestStateTransitions(t *testing.T) {
 				p := pm.AddProcess(&config.ProgramConfig{
 					Name: "start_from_starting", Command: "sleep 1", AutoStart: false,
 				})
-				// STARTING with no cmd (simulates Start() in progress before cmd.Start())
+				// STARTING with no cmd — simulates the window between
+				// Start() setting StateStarting and cmd.Start() completing.
+				// A concurrent Start() call should be rejected.
 				p.mu.Lock()
 				p.State = StateStarting
 				p.mu.Unlock()
 				return p
 			},
 			action:    (*Process).Start,
-			wantState: StateRunning,
-			wantErr:   false,
+			wantState: StateStarting,
+			wantErr:   true,
 		},
 		{
 			name: "STOPPING_Start_RUNNING",

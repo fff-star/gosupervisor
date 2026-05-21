@@ -748,6 +748,201 @@ func TestConfigIgnoreIncludeFilesInOutput(t *testing.T) {
 	}
 }
 
+func TestLoadConfigWithBadGlobPattern(t *testing.T) {
+	dir := t.TempDir()
+	main := filepath.Join(dir, "main.ini")
+	// "[" is a single character that causes a glob syntax error
+	if err := os.WriteFile(main, []byte("[program:main]\ncommand=sleep 1\n[include]\nfiles = [\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadConfig(main)
+	if err == nil {
+		t.Fatal("expected error for bad glob pattern, got nil")
+	}
+	if !strings.Contains(err.Error(), "无效的include模式") {
+		t.Errorf("expected '无效的include模式' in error, got: %v", err)
+	}
+}
+
+func TestLoadConfigWithEmptyIncludePattern(t *testing.T) {
+	dir := t.TempDir()
+	main := filepath.Join(dir, "main.ini")
+	if err := os.WriteFile(main, []byte("[program:main]\ncommand=sleep 1\n[include]\nfiles =\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(main)
+	if err != nil {
+		t.Fatalf("expected no error for empty include pattern, got: %v", err)
+	}
+	if _, ok := cfg.Programs["main"]; !ok {
+		t.Error("expected 'main' program to be loaded")
+	}
+	if len(cfg.Programs) != 1 {
+		t.Errorf("expected 1 program, got %d", len(cfg.Programs))
+	}
+}
+
+func TestLoadConfigWithIncludeNoMatches(t *testing.T) {
+	dir := t.TempDir()
+	main := filepath.Join(dir, "main.ini")
+	if err := os.WriteFile(main, []byte("[program:main]\ncommand=sleep 1\n[include]\nfiles = *.nonexistent\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(main)
+	if err != nil {
+		t.Fatalf("expected no error for include with no matches, got: %v", err)
+	}
+	if _, ok := cfg.Programs["main"]; !ok {
+		t.Error("expected 'main' program to be loaded")
+	}
+	if len(cfg.Programs) != 1 {
+		t.Errorf("expected 1 program, got %d", len(cfg.Programs))
+	}
+}
+
+func TestLoadConfigWithMultiLevelIncludes(t *testing.T) {
+	dir := t.TempDir()
+	main := filepath.Join(dir, "main.ini")
+	l1 := filepath.Join(dir, "level1.ini")
+	l2 := filepath.Join(dir, "level2.ini")
+
+	if err := os.WriteFile(main, []byte("[program:main]\ncommand=sleep 1\n[include]\nfiles = level1.ini\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(l1, []byte("[program:level1]\ncommand=sleep 1\n[include]\nfiles = level2.ini\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(l2, []byte("[program:level2]\ncommand=sleep 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfig(main)
+	if err != nil {
+		t.Fatalf("expected no error for multi-level include, got: %v", err)
+	}
+	if _, ok := cfg.Programs["main"]; !ok {
+		t.Error("expected 'main' program")
+	}
+	if _, ok := cfg.Programs["level1"]; !ok {
+		t.Error("expected 'level1' program from level-1 include")
+	}
+	if _, ok := cfg.Programs["level2"]; !ok {
+		t.Error("expected 'level2' program from level-2 include")
+	}
+	if len(cfg.Programs) != 3 {
+		t.Errorf("expected 3 programs, got %d", len(cfg.Programs))
+	}
+}
+
+func TestLoadConfigWithAbsolutePathInclude(t *testing.T) {
+	dir := t.TempDir()
+	main := filepath.Join(dir, "main.ini")
+	subDir := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "extra.ini"), []byte("[program:extra]\ncommand=sleep 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Use absolute path for the include glob
+	pattern := filepath.Join(subDir, "*.ini")
+	if err := os.WriteFile(main, []byte("[program:main]\ncommand=sleep 1\n[include]\nfiles = "+pattern+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfig(main)
+	if err != nil {
+		t.Fatalf("expected no error for absolute path include, got: %v", err)
+	}
+	if _, ok := cfg.Programs["main"]; !ok {
+		t.Error("expected 'main' program")
+	}
+	if _, ok := cfg.Programs["extra"]; !ok {
+		t.Error("expected 'extra' program from absolute path include")
+	}
+}
+
+func TestLoadConfigWithDuplicateProgramInInclude(t *testing.T) {
+	dir := t.TempDir()
+	main := filepath.Join(dir, "main.ini")
+	inc := filepath.Join(dir, "extra.ini")
+
+	if err := os.WriteFile(main, []byte("[program:dup]\ncommand=/bin/false\n[include]\nfiles = extra.ini\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(inc, []byte("[program:dup]\ncommand=/bin/true\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfig(main)
+	if err != nil {
+		t.Fatalf("expected no error for duplicate program, got: %v", err)
+	}
+	prog, ok := cfg.Programs["dup"]
+	if !ok {
+		t.Fatal("expected 'dup' program to exist")
+	}
+	// The included file's version should overwrite the main file's (last writer wins)
+	if prog.Command != "/bin/true" {
+		t.Errorf("expected Command '/bin/true' from include, got '%s'", prog.Command)
+	}
+}
+
+func TestLoadYAMLConfigWithIncludes(t *testing.T) {
+	dir := t.TempDir()
+	main := filepath.Join(dir, "main.yaml")
+	inc := filepath.Join(dir, "extra.ini")
+
+	if err := os.WriteFile(main, []byte("programs:\n  main:\n    command: sleep 1\nsupervisord:\n  webaddr: :8080\nincludes:\n  - extra.ini\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(inc, []byte("[program:extra]\ncommand=sleep 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfig(main)
+	if err != nil {
+		t.Fatalf("expected no error for YAML include, got: %v", err)
+	}
+	if _, ok := cfg.Programs["main"]; !ok {
+		t.Error("expected 'main' program from YAML")
+	}
+	if _, ok := cfg.Programs["extra"]; !ok {
+		t.Error("expected 'extra' program from included file")
+	}
+	if cfg.Server == nil || cfg.Server.WebAddr != ":8080" {
+		t.Error("expected Server.WebAddr ':8080' from YAML")
+	}
+}
+
+func TestLoadJSONConfigWithIncludes(t *testing.T) {
+	dir := t.TempDir()
+	main := filepath.Join(dir, "main.json")
+	inc := filepath.Join(dir, "extra.ini")
+
+	jsonContent := `{"programs":{"main":{"command":"sleep 1"}},"supervisord":{"webaddr":":9090"},"includes":["extra.ini"]}`
+	if err := os.WriteFile(main, []byte(jsonContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(inc, []byte("[program:extra]\ncommand=sleep 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfig(main)
+	if err != nil {
+		t.Fatalf("expected no error for JSON include, got: %v", err)
+	}
+	if _, ok := cfg.Programs["main"]; !ok {
+		t.Error("expected 'main' program from JSON")
+	}
+	if _, ok := cfg.Programs["extra"]; !ok {
+		t.Error("expected 'extra' program from included file")
+	}
+	if cfg.Server == nil || cfg.Server.WebAddr != ":9090" {
+		t.Error("expected Server.WebAddr ':9090' from JSON")
+	}
+}
+
 func TestExpandTemplate(t *testing.T) {
 	tests := []struct {
 		tmpl        string

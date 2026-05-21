@@ -127,3 +127,119 @@ func TestRecordEvent(t *testing.T) {
 		t.Errorf("expected name 'test', got %s", snapshot[0].Name)
 	}
 }
+
+func TestRecordEventFatal(t *testing.T) {
+	oldBuffer := GlobalEventBuffer
+	GlobalEventBuffer = NewEventBuffer(500)
+	defer func() { GlobalEventBuffer = oldBuffer }()
+
+	RecordEvent("proc1", EventFatal, 42, 1, "max retries")
+
+	snapshot := GlobalEventBuffer.Snapshot(0)
+	if len(snapshot) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(snapshot))
+	}
+	e := snapshot[0]
+	if e.Type != EventFatal {
+		t.Errorf("expected EventFatal, got %s", e.Type)
+	}
+	if e.Name != "proc1" {
+		t.Errorf("expected name 'proc1', got %s", e.Name)
+	}
+	if e.PID != 42 {
+		t.Errorf("expected PID 42, got %d", e.PID)
+	}
+	if e.ExitCode != 1 {
+		t.Errorf("expected ExitCode 1, got %d", e.ExitCode)
+	}
+	if e.Message != "max retries" {
+		t.Errorf("expected message 'max retries', got %s", e.Message)
+	}
+}
+
+func TestRecordEventHealthFail(t *testing.T) {
+	oldBuffer := GlobalEventBuffer
+	GlobalEventBuffer = NewEventBuffer(500)
+	defer func() { GlobalEventBuffer = oldBuffer }()
+
+	RecordEvent("proc2", EventHealthFail, 99, 0, "health check failed")
+
+	snapshot := GlobalEventBuffer.Snapshot(0)
+	if len(snapshot) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(snapshot))
+	}
+	e := snapshot[0]
+	if e.Type != EventHealthFail {
+		t.Errorf("expected EventHealthFail, got %s", e.Type)
+	}
+	if e.Name != "proc2" {
+		t.Errorf("expected name 'proc2', got %s", e.Name)
+	}
+	if e.PID != 99 {
+		t.Errorf("expected PID 99, got %d", e.PID)
+	}
+	if e.ExitCode != 0 {
+		t.Errorf("expected ExitCode 0, got %d", e.ExitCode)
+	}
+	if e.Message != "health check failed" {
+		t.Errorf("expected message 'health check failed', got %s", e.Message)
+	}
+}
+
+func TestRecordEventHealthRestore(t *testing.T) {
+	oldBuffer := GlobalEventBuffer
+	GlobalEventBuffer = NewEventBuffer(500)
+	defer func() { GlobalEventBuffer = oldBuffer }()
+
+	RecordEvent("proc3", EventHealthRestore, 77, 0, "health restored")
+
+	snapshot := GlobalEventBuffer.Snapshot(0)
+	if len(snapshot) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(snapshot))
+	}
+	e := snapshot[0]
+	if e.Type != EventHealthRestore {
+		t.Errorf("expected EventHealthRestore, got %s", e.Type)
+	}
+	if e.Name != "proc3" {
+		t.Errorf("expected name 'proc3', got %s", e.Name)
+	}
+	if e.PID != 77 {
+		t.Errorf("expected PID 77, got %d", e.PID)
+	}
+	if e.ExitCode != 0 {
+		t.Errorf("expected ExitCode 0, got %d", e.ExitCode)
+	}
+	if e.Message != "health restored" {
+		t.Errorf("expected message 'health restored', got %s", e.Message)
+	}
+}
+
+func TestRecordEventSignal(t *testing.T) {
+	oldBuffer := GlobalEventBuffer
+	GlobalEventBuffer = NewEventBuffer(500)
+	defer func() { GlobalEventBuffer = oldBuffer }()
+
+	RecordEvent("proc4", EventSignal, 55, 0, "signal SIGTERM")
+
+	snapshot := GlobalEventBuffer.Snapshot(0)
+	if len(snapshot) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(snapshot))
+	}
+	e := snapshot[0]
+	if e.Type != EventSignal {
+		t.Errorf("expected EventSignal, got %s", e.Type)
+	}
+	if e.Name != "proc4" {
+		t.Errorf("expected name 'proc4', got %s", e.Name)
+	}
+	if e.PID != 55 {
+		t.Errorf("expected PID 55, got %d", e.PID)
+	}
+	if e.ExitCode != 0 {
+		t.Errorf("expected ExitCode 0, got %d", e.ExitCode)
+	}
+	if e.Message != "signal SIGTERM" {
+		t.Errorf("expected message 'signal SIGTERM', got %s", e.Message)
+	}
+}
