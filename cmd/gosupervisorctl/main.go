@@ -118,6 +118,11 @@ func handleCommand(conn net.Conn, args []string) {
 
 func sendLine(conn net.Conn, cmd string) {
 	fmt.Fprintln(conn, cmd)
+	// Close write side to signal EOF so the server stops reading and the client
+	// scanner exits. The read side stays open to receive the full response.
+	if uc, ok := conn.(*net.UnixConn); ok {
+		uc.CloseWrite()
+	}
 	scanner := bufio.NewScanner(conn)
 	for scanner.Scan() {
 		fmt.Println(scanner.Text())
@@ -126,20 +131,14 @@ func sendLine(conn net.Conn, cmd string) {
 
 // runREPL runs the interactive REPL loop.
 func runREPL(socketPath string) {
-	conn, err := net.Dial("unix", socketPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "连接 socket 失败 (%s): %v\n", socketPath, err)
-		return
-	}
-	defer conn.Close()
-
 	fmt.Printf("GoSupervisor REPL — 连接到 %s，输入 'quit' 退出\n", socketPath)
 
 	line := liner.NewLiner()
 	defer line.Close()
 
 	line.SetCtrlCAborts(true)
-	line.SetCompleter(buildCompleter(conn))
+	// Fetch process names once for the completer (uses a temp connection)
+	line.SetCompleter(buildCompleterOnce(socketPath))
 
 	// Load history
 	historyFile := historyPath()
@@ -172,13 +171,16 @@ func runREPL(socketPath string) {
 			continue
 		}
 
-		// Send command to socket
-		fmt.Fprintln(conn, input)
-		scanner := bufio.NewScanner(conn)
-		for scanner.Scan() {
-			resp := scanner.Text()
-			fmt.Println(resp)
+		// Dial a fresh connection per command to avoid the multi-line response
+		// hang: the server keeps the connection open for the next command, so the
+		// client can't know when the response ends.
+		conn, err := net.Dial("unix", socketPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "连接失败: %v\n", err)
+			continue
 		}
+		sendLine(conn, input)
+		conn.Close()
 	}
 
 	// Save history
@@ -189,10 +191,19 @@ func runREPL(socketPath string) {
 	fmt.Println("再见!")
 }
 
-// buildCompleter returns a dynamic tab-completion function.
-func buildCompleter(conn net.Conn) func(line string) []string {
-	// Fetch process names from the server once on startup
+// buildCompleterOnce fetches process names via a temp connection and returns a completer.
+func buildCompleterOnce(socketPath string) func(line string) []string {
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return func(line string) []string { return nil }
+	}
 	processNames := fetchProcessNames(conn)
+	conn.Close()
+	return buildCompleterStatic(processNames)
+}
+
+// buildCompleterStatic returns a tab-completion function using cached process names.
+func buildCompleterStatic(processNames []string) func(line string) []string {
 
 	return func(line string) []string {
 		var completions []string
