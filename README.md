@@ -77,7 +77,7 @@ sudo cp gosupervisor /usr/local/bin/
 | `-g` | `""` | Group name (for targeting a group of processes) |
 | `-web-user` | `""` | Web UI Basic Auth username |
 | `-web-pass` | `""` | Web UI Basic Auth password |
-| `-web-api-auth` | `false` | Enable API v1 Basic Auth (off by default) |
+| `-web-api-auth` | `true` | Require API v1 Basic Auth (on by default; set `=false` to expose API without auth) |
 | `-socket` | `""` | Unix socket path for CLI control |
 | `-state-file` | `""` | Path to persist process state as JSON |
 | `-web-cert` | `""` | TLS certificate file path |
@@ -254,7 +254,7 @@ The web UI is available when started with `-web`. Default address is `http://loc
 
 ### Authentication
 
-Start with `-web-user` and `-web-pass` to enable HTTP Basic Auth on all web UI routes. The REST API routes (`/api/v1/`) bypass authentication by default so they can be used programmatically.
+Start with `-web-user` and `-web-pass` to enable HTTP Basic Auth on all routes (web UI and API). By default, API routes are also protected. Set `-web-api-auth=false` to allow programmatic API access without credentials while keeping the web UI protected.
 
 ## REST API v1
 
@@ -305,7 +305,7 @@ gosupervisor -cmd stop -g web        # stop all processes in the "web" group
 gosupervisor -cmd restart -g workers # restart all processes in the "workers" group
 ```
 
-Group operations are also available via the REST API and Unix socket CLI.
+Group operations use topological sort based on `dependson` for correct startup/shutdown ordering, and are also available via the REST API and Unix socket CLI.
 
 ## Restart Rate Limiting
 
@@ -427,7 +427,7 @@ gosupervisor/
 - **User switching**: the `user` field enables running processes as a different user via `syscall.Credential`. Only takes effect when running as root.
 - **Umask**: set via `syscall.Umask()` serialized across all process starts.
 - **CPU metrics**: delta-based percentage computed from `/proc/pid/stat` and `/proc/stat` rather than raw tick counts.
-- **Web security**: state-changing endpoints (start/stop/restart) accept POST only, with `Origin`/`Referer` header validation against the `Host` header for CSRF protection. Process names are validated against path traversal (`/`, `..`, `\`).
+- **Web security**: state-changing endpoints (start/stop/restart) accept POST only, with `Origin`/`Referer` header validation against the `Host` header for CSRF protection. Process names are validated against path traversal (`/`, `..`, `\`). Templates use `html/template` for auto-XSS-escaping. Rate limiting uses `RemoteAddr` only (does not trust `X-Forwarded-For`). API error responses return generic messages to avoid information disclosure.
 - **Thread safety**: `ProcessManager.Processes` is protected by `sync.RWMutex`. Use `RangeProcesses()`, `GetProcess()`, `Len()` (readers) and `AddProcess()`, `RemoveProcess()`, `ReplaceProcesses()` (writers) for safe concurrent access.
 - **Goroutine lifecycle**: `monitorResources()` exits cleanly when a process is restarted (via per-start context cancellation). `monitor()` signals completion via `monitorDone` channel, ensuring `Start()` waits for old goroutines before creating new ones.
 - **Separate HTTP mux**: web and metrics servers each use `http.NewServeMux()` to avoid handler leakage between addresses.
@@ -435,7 +435,7 @@ gosupervisor/
 - **YAML/JSON defaults**: boolean fields (`autostart`, `autorestart`, `redirectstdout`, `redirectstderr`) default to `true` only when absent from the config. An explicit `false` is preserved. All struct fields have explicit `yaml` and `json` tags.
 - **Log paths**: when both stdout and stderr target the same file, a single writer is shared to avoid interleaved corruption. Custom paths via `stdoutlogfile`/`stderrlogfile` are fully respected for rotation and tail viewing.
 - **Atomic byte counting**: `countingWriter` uses `sync/atomic` for concurrent-safe byte tracking during log rotation.
-- **Robust /proc parsing**: VmRSS and MemTotal/MemAvailable use `strings.Fields` instead of tab-dependent `Sscanf`. Disk info uses `df -B1` for locale-independent byte output.
+- **Robust /proc parsing**: VmRSS and MemTotal/MemAvailable use `strings.Fields` instead of tab-dependent `Sscanf`. Disk info uses `syscall.Statfs` for efficient, locale-independent byte output.
 - **Retry limit**: `StartRetries` is enforced with `>=` check, preventing off-by-one extra restart.
 
 ## License
