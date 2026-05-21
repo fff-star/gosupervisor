@@ -80,6 +80,10 @@ func (s *SocketServer) handleCommand(line string) string {
 	if len(parts) > 1 {
 		name = parts[1]
 	}
+	// Validate process name if provided (reject path traversal characters)
+	if name != "" && !isValidName(name) {
+		return "ERR invalid process name"
+	}
 
 	switch cmd {
 	case "status":
@@ -218,4 +222,12 @@ func (s *SocketServer) handleCommand(line string) string {
 	default:
 		return fmt.Sprintf("ERR unknown command: %s", cmd)
 	}
+}
+
+// isValidName rejects process names containing path traversal characters.
+func isValidName(name string) bool {
+	if name == "" {
+		return false
+	}
+	return !strings.Contains(name, "/") && !strings.Contains(name, "..") && !strings.Contains(name, "\\")
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -40,7 +41,7 @@ func main() {
 	webAddr := flag.String("web-addr", ":8080", "Web界面地址")
 	webUser := flag.String("web-user", "", "Web界面HTTP Basic Auth用户名")
 	webPass := flag.String("web-pass", "", "Web界面HTTP Basic Auth密码")
-	webAPIAuth := flag.Bool("web-api-auth", false, "启用API v1的HTTP Basic Auth认证")
+	webAPIAuth := flag.Bool("web-api-auth", true, "对API v1启用HTTP Basic Auth认证（默认开启）")
 	webCert := flag.String("web-cert", "", "TLS证书文件路径")
 	webKey := flag.String("web-key", "", "TLS私钥文件路径")
 	metricsEnable := flag.Bool("metrics", false, "启用Prometheus指标导出")
@@ -439,6 +440,7 @@ func runAsDaemon() error {
 
 // handleSignals 处理系统信号
 func handleSignals(sigChan chan os.Signal, done chan struct{}, processManager *process.ProcessManager, configPath *string, logManager *logger.Logger, stateFile *string) {
+	var doneOnce sync.Once
 	for {
 		sig := <-sigChan
 		switch sig {
@@ -450,7 +452,7 @@ func handleSignals(sigChan chan os.Signal, done chan struct{}, processManager *p
 				processManager.SaveState(*stateFile)
 			}
 			logManager.Info("所有进程已停止，正在退出...")
-			close(done)
+			doneOnce.Do(func() { close(done) })
 			return
 		case syscall.SIGHUP:
 			// 处理重载信号

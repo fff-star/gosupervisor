@@ -121,14 +121,15 @@ func TestRateLimiterXForwardedFor(t *testing.T) {
 		t.Errorf("first request should pass, got %d", w1.Code)
 	}
 
-	// Second request with same X-Forwarded-For should be rate limited
+	// X-Forwarded-For is NOT trusted; rate limiting uses RemoteAddr.
+	// Different X-Forwarded-For with same RemoteAddr should still be rate limited.
 	req2 := httptest.NewRequest("GET", "/api/test", nil)
-	req2.RemoteAddr = "10.0.0.2:12345" // different RemoteAddr
-	req2.Header.Set("X-Forwarded-For", "192.168.1.100") // same forwarded IP
+	req2.RemoteAddr = "10.0.0.1:12345" // same RemoteAddr
+	req2.Header.Set("X-Forwarded-For", "10.0.0.99") // different forwarded IP (ignored)
 	w2 := httptest.NewRecorder()
 	handler.ServeHTTP(w2, req2)
 	if w2.Code != http.StatusTooManyRequests {
-		t.Errorf("second request with same forwarded IP should be 429, got %d", w2.Code)
+		t.Errorf("second request with same RemoteAddr should be 429 (X-Forwarded-For ignored), got %d", w2.Code)
 	}
 }
 

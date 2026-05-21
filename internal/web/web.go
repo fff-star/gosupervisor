@@ -14,7 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
-	"text/template"
+	"html/template"
 	"time"
 
 	"gosupervisor/internal/process"
@@ -317,7 +317,7 @@ func (ws *WebServer) handleAPIV1Processes(w http.ResponseWriter, r *http.Request
 			snapshots = nil
 		} else {
 			end := offset + limit
-			if limit <= 0 || end > len(snapshots) {
+			if limit <= 0 || end < offset || end > len(snapshots) {
 				end = len(snapshots)
 			}
 			snapshots = snapshots[offset:end]
@@ -360,19 +360,22 @@ func (ws *WebServer) handleAPIV1ProcessAction(w http.ResponseWriter, r *http.Req
 		jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "process": snap})
 	case action == "start" && r.Method == http.MethodPost:
 		if err := p.Start(); err != nil {
-			jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: err.Error()})
+			fmt.Printf("API: start process failed: %v\n", err)
+			jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: "Failed to start process"})
 			return
 		}
 		jsonResponse(w, http.StatusOK, apiV1Status{Status: "ok", Message: "Process started"})
 	case action == "stop" && r.Method == http.MethodPost:
 		if err := p.Stop(); err != nil {
-			jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: err.Error()})
+			fmt.Printf("API: stop process failed: %v\n", err)
+			jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: "Failed to stop process"})
 			return
 		}
 		jsonResponse(w, http.StatusOK, apiV1Status{Status: "ok", Message: "Process stopped"})
 	case action == "restart" && r.Method == http.MethodPost:
 		if err := p.Restart(); err != nil {
-			jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: err.Error()})
+			fmt.Printf("API: restart process failed: %v\n", err)
+			jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: "Failed to restart process"})
 			return
 		}
 		jsonResponse(w, http.StatusOK, apiV1Status{Status: "ok", Message: "Process restarted"})
@@ -753,7 +756,7 @@ func (ws *WebServer) handleProcessLogsTail(w http.ResponseWriter, r *http.Reques
 
 	content, err := readTailLines(logPath, int(maxLines), maxBytes)
 	if err != nil {
-		jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: err.Error()})
+		jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: "Internal error"})
 		return
 	}
 
@@ -787,7 +790,7 @@ func (ws *WebServer) handleProcessSignal(w http.ResponseWriter, r *http.Request,
 	}
 
 	if err := p.Signal(sig); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: err.Error()})
+		jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: "Internal error"})
 		return
 	}
 	jsonResponse(w, http.StatusOK, apiV1Status{Status: "ok", Message: "Signal sent"})
@@ -820,7 +823,7 @@ func (ws *WebServer) handleProcessLogsTailStream(w http.ResponseWriter, r *http.
 
 	content, err := readTailLines(logPath, int(maxLines), maxBytes)
 	if err != nil {
-		jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: err.Error()})
+		jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: "Internal error"})
 		return
 	}
 
@@ -840,7 +843,7 @@ func (ws *WebServer) handleProcessLogsTailStream(w http.ResponseWriter, r *http.
 
 func (ws *WebServer) handleProcessReload(w http.ResponseWriter, r *http.Request, p *process.Process) {
 	if err := p.Signal(syscall.SIGHUP); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: err.Error()})
+		jsonResponse(w, http.StatusInternalServerError, apiV1Status{Status: "error", Message: "Internal error"})
 		return
 	}
 	jsonResponse(w, http.StatusOK, apiV1Status{Status: "ok", Message: "Process reload signal sent"})

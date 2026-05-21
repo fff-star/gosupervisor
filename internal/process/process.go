@@ -242,13 +242,22 @@ func (p *Process) Start() error {
 			p.mu.Unlock()
 			return fmt.Errorf("查找用户 %s 失败: %v", p.Config.User, err)
 		}
-		uid, _ := strconv.ParseUint(u.Uid, 10, 32)
-		gid, _ := strconv.ParseUint(u.Gid, 10, 32)
+		uid, err := strconv.ParseUint(u.Uid, 10, 32)
+		if err != nil {
+			Logf("警告: 进程 %s 的用户 %s 的 UID '%s' 无效: %v", p.Name, p.Config.User, u.Uid, err)
+		}
+		gid, err := strconv.ParseUint(u.Gid, 10, 32)
+		if err != nil {
+			Logf("警告: 进程 %s 的用户 %s 的 GID '%s' 无效: %v", p.Name, p.Config.User, u.Gid, err)
+		}
 
 		gidStrs, _ := u.GroupIds()
 		var groups []uint32
 		for _, gs := range gidStrs {
-			g, _ := strconv.ParseUint(gs, 10, 32)
+			g, err := strconv.ParseUint(gs, 10, 32)
+			if err != nil {
+				Logf("警告: 进程 %s 的用户 %s 的附加组 ID '%s' 无效: %v", p.Name, p.Config.User, gs, err)
+			}
 			groups = append(groups, uint32(g))
 		}
 
@@ -262,7 +271,9 @@ func (p *Process) Start() error {
 
 	if p.Logger != nil {
 		stdoutWriter, stderrWriter, err := p.Logger.GetProcessLogWriters(p.Name, p.Config)
-		if err == nil {
+		if err != nil {
+			Logf("警告: 进程 %s 创建日志写入器失败: %v", p.Name, err)
+		} else {
 			if p.Config.RedirectStdout {
 				cmd.Stdout = stdoutWriter
 			}
@@ -664,6 +675,8 @@ func (p *Process) readProcStats(pid int) {
 		}
 	}
 
+	firstSample := p.prevCPUTicks == 0
+
 	p.prevCPUTicks = cpuTicks
 	p.prevCPUTime = now
 	p.prevSysTicks = sysTicks
@@ -672,8 +685,8 @@ func (p *Process) readProcStats(pid int) {
 	memOK := p.Config.MemoryThresholdBytes <= 0 || p.MemoryUsage < uint64(p.Config.MemoryThresholdBytes)
 	p.ResourceHealthy = cpuOK && memOK
 
-	// Push resource sample for history
-	if p.ResourceHistory != nil {
+	// Skip first sample since CPU delta is not yet meaningful
+	if p.ResourceHistory != nil && !firstSample {
 		p.ResourceHistory.Push(ResourceSample{
 			Timestamp: now,
 			CPU:       p.CPUUsage,
@@ -728,6 +741,14 @@ func (p *Process) runHealthCheck(ctx context.Context) {
 			p.mu.Unlock()
 
 			ok := checkHealth(url, timeout)
+
+			// Bail out if the process was stopped/restarted while checkHealth was in flight
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
 			p.mu.Lock()
 			wasHealthy := p.Healthy
 			if ok {
@@ -849,17 +870,13 @@ func (p *Process) shouldRestartOnExitCode() bool {
 
 // StartGroup starts all processes in a group.
 func (pm *ProcessManager) StartGroup(group string) []string {
-	var procs []*Process
-	pm.mu.RLock()
-	for _, p := range pm.Processes {
-		if p.Config.Group == group && p.Config.AutoStart {
-			procs = append(procs, p)
-		}
-	}
-	pm.mu.RUnlock()
-
+	ordered := pm.topologicalSortForGroup(group)
 	var started []string
-	for _, p := range procs {
+	for _, name := range ordered {
+		p := pm.GetProcess(name)
+		if p == nil || !p.Config.AutoStart {
+			continue
+		}
 		if err := p.Start(); err != nil {
 			fmt.Printf("启动进程 %s 失败: %v\n", p.Name, err)
 		} else {
@@ -871,17 +888,14 @@ func (pm *ProcessManager) StartGroup(group string) []string {
 
 // StopGroup stops all processes in a group (reverse dependency order within group).
 func (pm *ProcessManager) StopGroup(group string) []string {
-	var procs []*Process
-	pm.mu.RLock()
-	for _, p := range pm.Processes {
-		if p.Config.Group == group {
-			procs = append(procs, p)
-		}
-	}
-	pm.mu.RUnlock()
-
+	ordered := pm.topologicalSortForGroup(group)
 	var stopped []string
-	for _, p := range procs {
+	// Reverse order: stop dependents before dependencies
+	for i := len(ordered) - 1; i >= 0; i-- {
+		p := pm.GetProcess(ordered[i])
+		if p == nil {
+			continue
+		}
 		if err := p.Stop(); err != nil {
 			fmt.Printf("停止进程 %s 失败: %v\n", p.Name, err)
 		} else {
@@ -919,7 +933,11 @@ func (pm *ProcessManager) SaveState(path string) error {
 	if err != nil {
 		return fmt.Errorf("序列化进程状态失败: %v", err)
 	}
-	return os.WriteFile(path, data, 0644)
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 // RestoreState reads process state from a JSON file. It only restores metadata,
@@ -1003,24 +1021,24 @@ func (p *Process) sendWebhook(state ProcessState, pid int, exitCode int) {
 			continue
 		}
 		resp.Body.Close()
+		if resp.StatusCode >= 500 {
+			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+			continue
+		}
 		return
 	}
 	Logf("进程 %s webhook 发送失败 (已重试 %d 次): %v\n", p.Name, retries, lastErr)
 }
 
-// RestartGroup restarts all processes in a group.
+// RestartGroup restarts all processes in a group (dependency order).
 func (pm *ProcessManager) RestartGroup(group string) []string {
-	var procs []*Process
-	pm.mu.RLock()
-	for _, p := range pm.Processes {
-		if p.Config.Group == group {
-			procs = append(procs, p)
-		}
-	}
-	pm.mu.RUnlock()
-
+	ordered := pm.topologicalSortForGroup(group)
 	var restarted []string
-	for _, p := range procs {
+	for _, name := range ordered {
+		p := pm.GetProcess(name)
+		if p == nil {
+			continue
+		}
 		if err := p.Restart(); err != nil {
 			fmt.Printf("重启进程 %s 失败: %v\n", p.Name, err)
 		} else {
@@ -1028,6 +1046,76 @@ func (pm *ProcessManager) RestartGroup(group string) []string {
 		}
 	}
 	return restarted
+}
+
+// topologicalSortForGroup returns process names in dependency order for a specific group.
+func (pm *ProcessManager) topologicalSortForGroup(group string) []string {
+	// Build a subgraph for the group
+	pm.mu.RLock()
+	inGroup := make(map[string]bool)
+	allNames := make(map[string]bool)
+	for name, p := range pm.Processes {
+		if p.Config.Group == group {
+			inGroup[name] = true
+		}
+		allNames[name] = true
+	}
+
+	// Calculate in-degree counting only deps within the group
+	inDegree := make(map[string]int)
+	deps := make(map[string][]string)
+	for name := range inGroup {
+		p := pm.Processes[name]
+		for _, dep := range p.Config.DependsOn {
+			if inGroup[dep] {
+				inDegree[name]++
+				deps[dep] = append(deps[dep], name)
+			}
+		}
+		if _, ok := inDegree[name]; !ok {
+			inDegree[name] = 0
+		}
+	}
+	pm.mu.RUnlock()
+
+	// Kahn's algorithm
+	var queue []string
+	for name := range inGroup {
+		if inDegree[name] == 0 {
+			queue = append(queue, name)
+		}
+	}
+	sort.Strings(queue) // deterministic order for same priority
+
+	var result []string
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		result = append(result, name)
+		for _, dependent := range deps[name] {
+			inDegree[dependent]--
+			if inDegree[dependent] == 0 {
+				queue = append(queue, dependent)
+				sort.Strings(queue)
+			}
+		}
+	}
+
+	// Append any remaining group members not reached (cycles or missing deps)
+	for name := range inGroup {
+		found := false
+		for _, r := range result {
+			if r == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			result = append(result, name)
+		}
+	}
+
+	return result
 }
 
 // readSystemCPUTicks reads total CPU ticks from /proc/stat.
