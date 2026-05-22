@@ -1,6 +1,7 @@
 package process
 
 import (
+	"sync"
 	"time"
 )
 
@@ -54,7 +55,26 @@ var GlobalEventBuffer = NewEventBuffer(500)
 // OnEvent is an optional callback invoked by RecordEvent for each event.
 // External subsystems (e.g., event listeners) can hook into this to observe
 // events in real time. The callback is called synchronously from RecordEvent.
-var OnEvent func(name string, typ EventType, pid int, exitCode int, message string)
+//
+// Use SetOnEvent / SwapOnEvent to write and RecordEvent reads under onEventMu.
+var onEvent func(name string, typ EventType, pid int, exitCode int, message string)
+var onEventMu sync.Mutex
+
+// SetOnEvent atomically sets the global event callback.
+func SetOnEvent(fn func(name string, typ EventType, pid int, exitCode int, message string)) {
+	onEventMu.Lock()
+	onEvent = fn
+	onEventMu.Unlock()
+}
+
+// SwapOnEvent atomically replaces the global event callback and returns the previous one.
+func SwapOnEvent(fn func(name string, typ EventType, pid int, exitCode int, message string)) func(name string, typ EventType, pid int, exitCode int, message string) {
+	onEventMu.Lock()
+	prev := onEvent
+	onEvent = fn
+	onEventMu.Unlock()
+	return prev
+}
 
 // RecordEvent pushes an event to the global buffer.
 func RecordEvent(name string, typ EventType, pid int, exitCode int, message string) {
@@ -66,7 +86,10 @@ func RecordEvent(name string, typ EventType, pid int, exitCode int, message stri
 		ExitCode:  exitCode,
 		Message:   message,
 	})
-	if OnEvent != nil {
-		OnEvent(name, typ, pid, exitCode, message)
+	onEventMu.Lock()
+	fn := onEvent
+	onEventMu.Unlock()
+	if fn != nil {
+		fn(name, typ, pid, exitCode, message)
 	}
 }

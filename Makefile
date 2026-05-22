@@ -12,11 +12,16 @@ build:
 
 ## Standard tests (race detector, all packages)
 
+# test runs the full suite with multi-iteration to detect flaky races.
+# For a faster single pass, use test-quick.
 test:
+	go test -race -count=10 ./...
+
+test-quick:
 	go test -race -count=1 ./...
 
 test-v:
-	go test -race -count=1 -v ./...
+	go test -race -count=10 -v ./...
 
 test-short:
 	go test -race -count=1 -short ./...

@@ -24,6 +24,7 @@ type eventQueue struct {
 	cond   *sync.Cond
 	events []process.Event
 	cap    int
+	closed bool
 }
 
 func newEventQueue(capacity int) *eventQueue {
@@ -52,13 +53,25 @@ func (q *eventQueue) Push(e process.Event) {
 }
 
 // Pop blocks until an event is available and returns the first event (without removing it).
-func (q *eventQueue) Pop() process.Event {
+// Returns false if the queue has been closed.
+func (q *eventQueue) Pop() (process.Event, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	for len(q.events) == 0 {
+	for len(q.events) == 0 && !q.closed {
 		q.cond.Wait()
 	}
-	return q.events[0]
+	if q.closed && len(q.events) == 0 {
+		return process.Event{}, false
+	}
+	return q.events[0], true
+}
+
+// Close unblocks all waiters and prevents further Pop operations from blocking.
+func (q *eventQueue) Close() {
+	q.mu.Lock()
+	q.closed = true
+	q.mu.Unlock()
+	q.cond.Broadcast()
 }
 
 // RemoveFirst removes the first event from the queue.
@@ -91,6 +104,7 @@ type EventListener struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	done        chan struct{}
+	startDone   chan struct{} // closed when start() completes
 	poolSerial  int64
 	eventMask   map[process.EventType]bool
 }
@@ -133,11 +147,12 @@ func (l *EventListener) start() error {
 		return nil
 	}
 	l.state = "STARTING"
+	l.startDone = make(chan struct{})
 
 	l.ctx, l.cancel = context.WithCancel(context.Background())
 	l.done = make(chan struct{})
 
-	cmd := exec.Command("/bin/sh", "-c", l.Config.Command)
+	cmd := exec.CommandContext(l.ctx, "/bin/sh", "-c", l.Config.Command)
 	if l.Config.Directory != "" {
 		cmd.Dir = l.Config.Directory
 	}
@@ -154,17 +169,23 @@ func (l *EventListener) start() error {
 	stdoutR, err := cmd.StdoutPipe()
 	if err != nil {
 		l.state = "STOPPED"
+		close(l.startDone)
 		return fmt.Errorf("stdout pipe: %w", err)
 	}
 	stdinW, err := cmd.StdinPipe()
 	if err != nil {
+		stdoutR.Close()
 		l.state = "STOPPED"
+		close(l.startDone)
 		return fmt.Errorf("stdin pipe: %w", err)
 	}
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
+		stdoutR.Close()
+		stdinW.Close()
 		l.state = "STOPPED"
+		close(l.startDone)
 		return fmt.Errorf("start child process: %w", err)
 	}
 
@@ -172,6 +193,7 @@ func (l *EventListener) start() error {
 	l.stdinR = stdoutR
 	l.stdoutW = stdinW
 	l.state = "RUNNING"
+	close(l.startDone)
 
 	go l.protocolLoop(stdoutR, stdinW)
 	return nil
@@ -180,6 +202,15 @@ func (l *EventListener) start() error {
 // stop terminates the child process and waits for the protocol loop to exit.
 func (l *EventListener) stop() {
 	l.mu.Lock()
+	// If start is still in progress, wait for it to complete.
+	if l.state == "STARTING" {
+		startDone := l.startDone
+		l.mu.Unlock()
+		if startDone != nil {
+			<-startDone
+		}
+		l.mu.Lock()
+	}
 	if l.state != "RUNNING" {
 		l.mu.Unlock()
 		return
@@ -188,6 +219,7 @@ func (l *EventListener) stop() {
 	cmd := l.cmd
 	done := l.done
 	stdinR := l.stdinR
+	cancel := l.cancel
 	l.mu.Unlock()
 
 	if cmd != nil && cmd.Process != nil {
@@ -202,10 +234,13 @@ func (l *EventListener) stop() {
 		timer.Stop()
 	}
 
-	// Cancel context to unblock any remaining operations, then close pipes
-	if l.cancel != nil {
-		l.cancel()
+	// Cancel context (sends SIGKILL via CommandContext if process still alive),
+	// close queue to unblock protocolLoop if it's waiting on Pop,
+	// then close pipes.
+	if cancel != nil {
+		cancel()
 	}
+	l.queue.Close()
 	if stdinR != nil {
 		_ = stdinR.Close()
 	}
@@ -283,7 +318,10 @@ func (l *EventListener) protocolLoop(stdoutR io.Reader, stdinW io.WriteCloser) {
 		}
 
 		// Step 2: Get next event and send it
-		currentEvent := l.queue.Pop() // blocks until event available
+		currentEvent, ok := l.queue.Pop() // blocks until event available
+		if !ok {
+			return // queue closed, shutting down
+		}
 
 		serial := atomic.AddInt64(&l.poolSerial, 1)
 		encoded := encodeEvent(currentEvent, "gosupervisor", 0, serial, l.Name)

@@ -58,10 +58,14 @@ func (b *sseBroker) broadcast(event process.Event) {
 // InitSSEBroker wires the global SSE broker to process.OnEvent.
 // Called from main.go after OnEvent is set.
 func InitSSEBroker() {
-	prev := process.OnEvent
-	process.OnEvent = func(name string, typ process.EventType, pid int, exitCode int, message string) {
-		if prev != nil {
-			prev(name, typ, pid, exitCode, message)
+	// Atomically clear and capture the previous handler chain.
+	// oldFn is an ordinary local — immutable after this assignment,
+	// so the closure below captures it without any data race.
+	oldFn := process.SwapOnEvent(nil)
+
+	process.SetOnEvent(func(name string, typ process.EventType, pid int, exitCode int, message string) {
+		if oldFn != nil {
+			oldFn(name, typ, pid, exitCode, message)
 		}
 		globalSSEBroker.broadcast(process.Event{
 			Timestamp: time.Now(),
@@ -71,5 +75,5 @@ func InitSSEBroker() {
 			ExitCode:  exitCode,
 			Message:   message,
 		})
-	}
+	})
 }

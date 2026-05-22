@@ -323,6 +323,9 @@ func (p *Process) Start() error {
 	if err := cmd.Start(); err != nil {
 		syscall.Umask(oldUmask)
 		umaskMu.Unlock()
+		if stdinFile != nil {
+			_ = stdinFile.Close()
+		}
 		p.mu.Lock()
 		p.State = StateExited
 		p.mu.Unlock()

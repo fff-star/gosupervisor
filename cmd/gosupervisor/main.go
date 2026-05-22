@@ -189,7 +189,7 @@ func main() {
 	if len(cfg.EventListeners) > 0 {
 		eventListenerManager = eventlistener.NewManager(cfg, logManager.Info)
 		eventListenerManager.Start()
-		process.OnEvent = eventListenerManager.EmitEvent
+		process.SetOnEvent(eventListenerManager.EmitEvent)
 		eventListenerManagerRef = eventListenerManager
 		// Re-wire SSE after event listener manager to maintain chain
 		if *webEnable {
@@ -205,7 +205,7 @@ func main() {
 		}
 		if eventListenerManager != nil {
 			eventListenerManager.Stop()
-			process.OnEvent = nil
+			process.SetOnEvent(nil)
 		}
 		if metricsManagerRef != nil {
 			metricsManagerRef.Stop()
@@ -567,7 +567,7 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 	// Reload event listeners
 	if eventListenerManagerRef != nil {
 		eventListenerManagerRef.Reload(cfg)
-		process.OnEvent = eventListenerManagerRef.EmitEvent
+		process.SetOnEvent(eventListenerManagerRef.EmitEvent)
 	}
 	// Re-wire SSE broker after reload (BUGFIX: SSE was lost after SIGHUP)
 	web.InitSSEBroker()

@@ -3817,3 +3817,184 @@ func TestStdinFile_Nonexistent(t *testing.T) {
 	}
 	_ = p.Stop()
 }
+
+// --- Error path tests: verify state cleanup, fd closure, and goroutine hygiene on Start() failure ---
+
+// countOpenFDs returns the number of open file descriptors for the current process.
+func countOpenFDs(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatalf("cannot read /proc/self/fd: %v", err)
+	}
+	return len(entries)
+}
+
+// badShebangPath creates an executable file whose shebang points to a nonexistent
+// interpreter, forcing cmd.Start() to fail. Returns the path to the temp file.
+func badShebangPath(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "bad_shebang")
+	if err := os.WriteFile(path, []byte("#!/nonexistent/interpreter/xyz\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestStart_ExecFails verifies that starting a process whose binary fails to exec
+// (bad shebang) fails cleanly: error returned, state reset to Exited.
+func TestStart_ExecFails(t *testing.T) {
+	dir := t.TempDir()
+	logManager, err := logger.NewDefaultLogger(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:      "exec_fail",
+		Command:   badShebangPath(t),
+		Directory: "/tmp",
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("exec_fail")
+	if p == nil {
+		t.Fatal("process not created")
+	}
+
+	err = p.Start()
+	if err == nil {
+		_ = p.Stop()
+		t.Fatal("expected error for bad shebang binary, got nil")
+	}
+
+	// After failure, state must be Exited (not stuck in Starting).
+	if state := p.GetState(); state != StateExited {
+		t.Errorf("expected StateExited after exec failure, got %s", state)
+	}
+
+	// StartRetries must not have been incremented past the guard in Start().
+	s := p.Snapshot()
+	if s.StartRetries > 1 {
+		t.Errorf("StartRetries should be at most 1 after exec failure, got %d", s.StartRetries)
+	}
+}
+
+// TestStart_UserNotFound verifies that starting a process with a nonexistent user fails.
+func TestStart_UserNotFound(t *testing.T) {
+	dir := t.TempDir()
+	logManager, err := logger.NewDefaultLogger(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:      "user_not_found",
+		Command:   "sleep 1",
+		Directory: "/tmp",
+		User:      "nonexistent_user_xyz_12345",
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("user_not_found")
+	if p == nil {
+		t.Fatal("process not created")
+	}
+
+	err = p.Start()
+	if err == nil {
+		_ = p.Stop()
+		t.Fatal("expected error for nonexistent user, got nil")
+	}
+
+	if state := p.GetState(); state != StateExited {
+		t.Errorf("expected StateExited after user lookup failure, got %s", state)
+	}
+}
+
+// TestStart_ExecFails_NoFdLeak verifies that file descriptors are not leaked when
+// StdinFile is set but the command fails to start.
+func TestStart_ExecFails_NoFdLeak(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a real stdin file so StdinFile opens successfully.
+	stdinPath := filepath.Join(dir, "stdin.txt")
+	if err := os.WriteFile(stdinPath, []byte("test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	logManager, err := logger.NewDefaultLogger(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logManager.Close()
+
+	fdsBefore := countOpenFDs(t)
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:      "exec_fail_stdin",
+		Command:   badShebangPath(t),
+		Directory: "/tmp",
+		StdinFile: stdinPath,
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("exec_fail_stdin")
+	if p == nil {
+		t.Fatal("process not created")
+	}
+
+	err = p.Start()
+	if err == nil {
+		_ = p.Stop()
+		t.Fatal("expected error for bad shebang binary, got nil")
+	}
+
+	// Allow any deferred cleanup to run.
+	time.Sleep(50 * time.Millisecond)
+
+	fdsAfter := countOpenFDs(t)
+	if fdsAfter > fdsBefore+2 {
+		t.Errorf("fd leak detected: before=%d, after=%d (diff=%d)", fdsBefore, fdsAfter, fdsAfter-fdsBefore)
+	}
+}
+
+// TestStart_ExecFails_Flaky verifies with 50 iterations that Start() failure
+// is consistently clean — no intermittent state corruption.
+// Note: does not use goleak because other tests in the suite may leave background
+// goroutines (Monitor tickers, health checks) that fire during iteration windows.
+func TestStart_ExecFails_Flaky(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		i := i
+		dir := t.TempDir()
+		logManager, err := logger.NewDefaultLogger(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer logManager.Close()
+
+		pm := NewProcessManager(logManager)
+		cfg := &config.ProgramConfig{
+			Name:      fmt.Sprintf("exec_flaky_%d", i),
+			Command:   badShebangPath(t),
+			Directory: "/tmp",
+		}
+		pm.AddProcess(cfg)
+		p := pm.GetProcess(cfg.Name)
+		if p == nil {
+			t.Fatal("process not created")
+		}
+
+		err = p.Start()
+		if err == nil {
+			_ = p.Stop()
+			t.Fatal("expected error for bad shebang binary")
+		}
+
+		if state := p.GetState(); state != StateExited {
+			t.Errorf("iteration %d: expected StateExited, got %s", i, state)
+		}
+	}
+}

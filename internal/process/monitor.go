@@ -119,12 +119,23 @@ func (m *Monitor) handleExitedProcess(process *Process) {
 	go func() {
 		time.Sleep(1 * time.Second)
 
-		// Re-check state: Stop() may have been called, or another restart path
-		// (health check) may have already set STARTING.
-		st := process.GetState()
-		if st == StateStopped || st == StateStopping || st == StateStarting {
+		process.mu.Lock()
+		// Stop() was called while we slept — bail.
+		if process.State == StateStopped || process.State == StateStopping {
+			process.mu.Unlock()
 			return
 		}
+		// Health check restart already took over — bail.
+		if process.State == StateStarting && process.healthCheckRestartFired {
+			process.mu.Unlock()
+			return
+		}
+		// Reset state so Start() can proceed (we set it to Starting on line 114
+		// to prevent the monitor from re-scheduling this process).
+		if process.State == StateStarting {
+			process.State = StateExited
+		}
+		process.mu.Unlock()
 
 		fmt.Printf("进程 %s 已退出，尝试重启...\n", name)
 

@@ -154,20 +154,20 @@ func TestEventQueue_FIFO(t *testing.T) {
 		t.Fatalf("expected 3 events, got %d", q.Len())
 	}
 
-	first := q.Pop()
-	if first.Name != "p1" {
-		t.Errorf("expected p1, got %s", first.Name)
+	first, ok := q.Pop()
+	if !ok || first.Name != "p1" {
+		t.Errorf("expected p1, got %s (ok=%v)", first.Name, ok)
 	}
 	q.RemoveFirst()
 
-	second := q.Pop()
-	if second.Name != "p2" {
-		t.Errorf("expected p2, got %s", second.Name)
+	second, ok := q.Pop()
+	if !ok || second.Name != "p2" {
+		t.Errorf("expected p2, got %s (ok=%v)", second.Name, ok)
 	}
 	q.RemoveFirst()
 
-	third := q.Pop()
-	if third.Name != "p3" {
+	third, ok := q.Pop()
+	if !ok || third.Name != "p3" {
 		t.Errorf("expected p3, got %s", third.Name)
 	}
 	q.RemoveFirst()
@@ -189,8 +189,8 @@ func TestEventQueue_Overflow(t *testing.T) {
 	}
 
 	// Oldest should be dropped (PID 0 and 1), first remaining is PID 2
-	first := q.Pop()
-	if first.PID != 2 {
+	first, ok := q.Pop()
+	if !ok || first.PID != 2 {
 		t.Errorf("expected PID 2 after overflow, got %d", first.PID)
 	}
 }
