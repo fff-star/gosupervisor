@@ -140,7 +140,7 @@ func TestProcessOperations(t *testing.T) {
 	// 重启进程，遇到错误记录但不直接失败测试
 	err = p.Restart()
 	if err != nil {
-		t.Logf("重启进程时遇到错误: %v", err)
+		t.Errorf("重启进程时遇到错误: %v", err)
 	}
 
 	// 等待进程重启
@@ -159,7 +159,7 @@ func TestProcessOperations(t *testing.T) {
 	// 测试进程状态
 	// 检查进程最终状态（若不同则记录）
 	if state := p.GetState(); state != StateStopped {
-		t.Logf("进程状态为%s，期望为STOPPED", state)
+		t.Errorf("进程状态为%s，期望为STOPPED", state)
 	}
 }
 
@@ -363,21 +363,16 @@ func TestProcessAutoRestart(t *testing.T) {
 		t.Errorf("启动进程失败: %v", err)
 	}
 
-	// 等待进程启动
-	time.Sleep(2 * time.Second)
-
-	// 模拟进程退出并等待自动重启
-	p.ExitCode = 1
-	p.mu.Lock(); p.State = StateExited; p.mu.Unlock()
+	// 等待进程启动后退出，monitor 应自动重启
 	time.Sleep(3 * time.Second)
 
-	// 检查进程是否重启
-	if state := p.GetState(); state != StateRunning {
-		t.Logf("期望进程状态为RUNNING（已重启），实际为%s", state)
+	// 进程应该已经退出并被 monitor 重启（或正在重启）
+	state := p.GetState()
+	if state != StateRunning && state != StateStarting {
+		t.Errorf("期望进程状态为RUNNING或STARTING（已重启），实际为%s", state)
 	}
 
 	// 停止进程
-	// 停止进程，若出错则记录
 	if err := p.Stop(); err != nil {
 		t.Logf("停止进程时遇到错误: %v", err)
 	}
@@ -508,7 +503,7 @@ func TestProcessStateTransitions(t *testing.T) {
 	time.Sleep(3 * time.Second)
 	// 检查停止状态（记录非预期状态）
 	if state := p.GetState(); state != StateStopped {
-		t.Logf("进程状态为%s，期望为STOPPED", state)
+		t.Errorf("进程状态为%s，期望为STOPPED", state)
 	}
 }
 
@@ -560,9 +555,9 @@ func TestMonitorAutoRestart(t *testing.T) {
 	// 等待进程退出
 	time.Sleep(2 * time.Second)
 
-	// 进程应该已退出
-	if state := p.GetState(); state != StateExited && state != StateRunning {
-		t.Logf("第一次检查：进程状态为%s", state)
+	// 进程应该已退出或被 monitor 重启（允许 STARTING 过渡态）
+	if state := p.GetState(); state != StateExited && state != StateRunning && state != StateStarting {
+		t.Errorf("第一次检查：进程状态为%s，期望 EXITED/RUNNING/STARTING", state)
 	}
 
 	// 等待监控尝试重启
@@ -571,7 +566,7 @@ func TestMonitorAutoRestart(t *testing.T) {
 	// 检查是否发生了重启（RestartCount > 0 或状态变化）
 	s := p.Snapshot()
 	if s.RestartCount == 0 && s.StartRetries == 1 {
-		t.Logf("期望重启至少发生过一次，RestartCount=%d, StartRetries=%d", s.RestartCount, s.StartRetries)
+		t.Errorf("期望重启至少发生过一次，RestartCount=%d, StartRetries=%d", s.RestartCount, s.StartRetries)
 	}
 }
 
@@ -637,7 +632,7 @@ func TestTopologicalSortWithStartAllFallback(t *testing.T) {
 	// 由于 echo 命令会立即完成，进程会进入 EXITED 状态
 	s1, s2 := p1.GetState(), p2.GetState()
 	if s1 == StateStopped && s2 == StateStopped {
-		t.Logf("循环依赖时 StartAll 可能未执行（期望至少有进程启动/退出）")
+		t.Errorf("循环依赖时 StartAll 可能未执行（期望至少有进程启动/退出）")
 	}
 }
 
@@ -742,17 +737,17 @@ func TestHandleExitedProcessNoAutoRestart(t *testing.T) {
 
 	p.mu.Lock()
 	p.StartRetries = 0
-	beforeState := p.State
 	p.mu.Unlock()
 
 	m := &Monitor{Manager: pm}
 	m.handleExitedProcess(p)
 
-	if state := p.GetState(); state == StateRunning || state == StateStarting {
-		t.Errorf("AutoRestart=false 时不应重启，但状态变为 %s", state)
+	afterState := p.GetState()
+	if afterState == StateRunning || afterState == StateStarting {
+		t.Errorf("AutoRestart=false 时不应重启，但状态变为 %s", afterState)
 	}
-	if beforeState != StateExited {
-		t.Logf("初始状态为 %s", beforeState)
+	if afterState != StateExited && afterState != StateFatal {
+		t.Errorf("handleExitedProcess 后状态应为 EXITED 或 FATAL，实际为 %s", afterState)
 	}
 }
 
@@ -2362,8 +2357,9 @@ func TestSendWebhookEmptyURL(t *testing.T) {
 		Environment:  make(map[string]string),
 	}
 	p := pm.AddProcess(cfg)
-	// Should be no-op when WebhookURL is empty
+	// Should be no-op when WebhookURL is empty (must not panic)
 	p.sendWebhook(StateExited, 0, 0)
+	// If we get here without panicking, the test passes
 }
 
 func TestSendWebhookDeliversPayload(t *testing.T) {
@@ -2458,8 +2454,9 @@ func TestSendWebhookServerError(t *testing.T) {
 	p.PID = 1
 	p.State = StateExited
 	p.mu.Unlock()
-	// Should not panic, just print error
+	// Should not panic on 500, must retry and eventually give up
 	p.sendWebhook(StateExited, 1, 0)
+	// Test passes if no panic
 }
 
 func TestStartHealthCheckAndRunHealthCheck(t *testing.T) {
@@ -3543,7 +3540,7 @@ func TestSendWebhookRetryExhausted(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
-	srv.Close()
+	defer srv.Close()
 
 	p := &Process{
 		Name: "webhook_fail",
@@ -3557,8 +3554,8 @@ func TestSendWebhookRetryExhausted(t *testing.T) {
 	p.sendWebhook(StateRunning, 12345, 0)
 
 	mu.Lock()
-	if attempts > 0 {
-		t.Logf("webhook attempts: %d", attempts)
+	if attempts != 3 {
+		t.Errorf("expected 3 webhook attempts (1 initial + 2 retries), got %d", attempts)
 	}
 	mu.Unlock()
 }
@@ -3754,4 +3751,69 @@ func TestOnHealthCheckFailureCallback(t *testing.T) {
 		t.Errorf("OnHealthCheckFailure should have been called at least once, got %d", failureCount)
 	}
 	mu.Unlock()
+}
+
+func TestStdinFile(t *testing.T) {
+	dir := t.TempDir()
+	stdinContent := "hello from stdin\n"
+	stdinPath := filepath.Join(dir, "stdin.txt")
+	if err := os.WriteFile(stdinPath, []byte(stdinContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	logManager, err := logger.NewDefaultLogger(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:      "stdin_test",
+		Command:   "cat",
+		Directory: dir,
+		StdinFile: stdinPath,
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("stdin_test")
+	if p == nil {
+		t.Fatal("process not created")
+	}
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Wait for process to finish (cat reads stdin and exits)
+	time.Sleep(500 * time.Millisecond)
+	s := p.Snapshot()
+	if s.State == StateRunning {
+		_ = p.Stop()
+	}
+}
+
+func TestStdinFile_Nonexistent(t *testing.T) {
+	dir := t.TempDir()
+	logManager, err := logger.NewDefaultLogger(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:      "stdin_test2",
+		Command:   "cat",
+		Directory: dir,
+		StdinFile: "/nonexistent/stdin.txt",
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("stdin_test2")
+
+	// Should start without StdinFile, cat will hang waiting for stdin
+	err = p.Start()
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	_ = p.Stop()
 }

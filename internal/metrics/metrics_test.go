@@ -1,7 +1,6 @@
 package metrics
 
 import (
-	"os"
 	"testing"
 	"time"
 
@@ -11,20 +10,15 @@ import (
 )
 
 // 初始化测试环境
-func setupMetricsTestEnvironment() (*process.ProcessManager, error) {
-	// 创建日志目录
-	logDir := "./test_logs"
-
-	// 初始化日志管理器
-	logManager, err := logger.NewDefaultLogger(logDir)
+func setupMetricsTestEnvironment(t *testing.T) *process.ProcessManager {
+	t.Helper()
+	logManager, err := logger.NewDefaultLogger(t.TempDir())
 	if err != nil {
-		return nil, err
+		t.Fatalf("初始化日志管理器失败: %v", err)
 	}
+	t.Cleanup(func() { logManager.Close() })
 
-	// 创建进程管理器
 	processManager := process.NewProcessManager(logManager)
-
-	// 创建测试进程配置
 	programCfg := &config.ProgramConfig{
 		Name:         "test_process",
 		Command:      "echo \"Hello, World!\"",
@@ -36,27 +30,14 @@ func setupMetricsTestEnvironment() (*process.ProcessManager, error) {
 		User:         "",
 		Environment:  make(map[string]string),
 	}
-
-	// 添加进程
 	processManager.AddProcess(programCfg)
-
-	return processManager, nil
-}
-
-// 清理测试环境
-func cleanupMetricsTestEnvironment() {
-	// 删除测试日志目录
-	os.RemoveAll("./test_logs")
+	return processManager
 }
 
 // TestNewMetricsManager 测试创建指标管理器
 func TestNewMetricsManager(t *testing.T) {
 	// 初始化测试环境
-	processManager, err := setupMetricsTestEnvironment()
-	if err != nil {
-		t.Fatalf("初始化测试环境失败: %v", err)
-	}
-	defer cleanupMetricsTestEnvironment()
+	processManager := setupMetricsTestEnvironment(t)
 
 	// 创建指标管理器
 	metricsManager := NewMetricsManager(processManager)
@@ -77,11 +58,7 @@ func TestNewMetricsManager(t *testing.T) {
 // TestRegisterMetrics 测试指标注册
 func TestRegisterMetrics(t *testing.T) {
 	// 初始化测试环境
-	processManager, err := setupMetricsTestEnvironment()
-	if err != nil {
-		t.Fatalf("初始化测试环境失败: %v", err)
-	}
-	defer cleanupMetricsTestEnvironment()
+	processManager := setupMetricsTestEnvironment(t)
 
 	// 创建指标管理器
 	metricsManager := NewMetricsManager(processManager)
@@ -114,56 +91,60 @@ func TestRegisterMetrics(t *testing.T) {
 
 // TestUpdateMetrics 测试更新指标
 func TestUpdateMetrics(t *testing.T) {
-	// 初始化测试环境
-	processManager, err := setupMetricsTestEnvironment()
-	if err != nil {
-		t.Fatalf("初始化测试环境失败: %v", err)
-	}
-	defer cleanupMetricsTestEnvironment()
+	processManager := setupMetricsTestEnvironment(t)
 
-	// 创建指标管理器
 	metricsManager := NewMetricsManager(processManager)
 
-	// 更新指标
+	// Start a process so there's something to measure
+	p := processManager.GetProcess("test_process")
+	if p == nil {
+		t.Fatal("test_process not found")
+	}
+	_ = p.Start()
+	time.Sleep(500 * time.Millisecond)
+	defer func() { _ = p.Stop() }()
+
+	// UpdateMetrics should not panic
 	metricsManager.UpdateMetrics()
 
-	// 检查指标是否更新成功
-	// 这里我们主要检查方法是否执行成功，不检查具体值
-	// 因为具体值依赖于进程状态
-	t.Log("指标更新成功")
+	// processCount gauge should be registered and non-nil
+	if metricsManager.processCount == nil {
+		t.Error("processCount gauge is nil after UpdateMetrics")
+	}
+	if metricsManager.processStatus == nil {
+		t.Error("processStatus gauge is nil after UpdateMetrics")
+	}
+	if metricsManager.processCPUUsage == nil {
+		t.Error("processCPUUsage gauge is nil after UpdateMetrics")
+	}
+	if metricsManager.processMemUsage == nil {
+		t.Error("processMemUsage gauge is nil after UpdateMetrics")
+	}
 }
 
 // TestStartMetricsCollector 测试启动指标收集器
 func TestStartMetricsCollector(t *testing.T) {
-	// 初始化测试环境
-	processManager, err := setupMetricsTestEnvironment()
-	if err != nil {
-		t.Fatalf("初始化测试环境失败: %v", err)
-	}
-	defer cleanupMetricsTestEnvironment()
+	processManager := setupMetricsTestEnvironment(t)
 
-	// 创建指标管理器
 	metricsManager := NewMetricsManager(processManager)
 
-	// 启动指标收集器
-	metricsManager.StartMetricsCollector(1 * time.Second)
+	// StartMetricsCollector should not panic
+	metricsManager.StartMetricsCollector(100 * time.Millisecond)
 
-	// 等待一段时间，确保收集器启动
-	time.Sleep(2 * time.Second)
+	// Let it tick at least once
+	time.Sleep(300 * time.Millisecond)
+	metricsManager.Stop()
 
-	// 检查收集器是否正常运行
-	// 这里我们主要检查方法是否执行成功
-	t.Log("指标收集器启动成功")
+	// Verify we can start again (no double-start issues)
+	metricsManager.StartMetricsCollector(100 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
+	metricsManager.Stop()
 }
 
 // TestGetRegistry 测试获取注册表
 func TestGetRegistry(t *testing.T) {
 	// 初始化测试环境
-	processManager, err := setupMetricsTestEnvironment()
-	if err != nil {
-		t.Fatalf("初始化测试环境失败: %v", err)
-	}
-	defer cleanupMetricsTestEnvironment()
+	processManager := setupMetricsTestEnvironment(t)
 
 	// 创建指标管理器
 	metricsManager := NewMetricsManager(processManager)
@@ -182,55 +163,55 @@ func TestGetRegistry(t *testing.T) {
 
 // TestMetricsIntegration 集成测试
 func TestMetricsIntegration(t *testing.T) {
-	// 初始化测试环境
-	processManager, err := setupMetricsTestEnvironment()
-	if err != nil {
-		t.Fatalf("初始化测试环境失败: %v", err)
-	}
-	defer cleanupMetricsTestEnvironment()
+	processManager := setupMetricsTestEnvironment(t)
 
-	// 创建指标管理器
 	metricsManager := NewMetricsManager(processManager)
 
-	// 启动指标收集器
-	metricsManager.StartMetricsCollector(500 * time.Millisecond)
+	// Start a process
+	p := processManager.GetProcess("test_process")
+	if p == nil {
+		t.Fatal("test_process not found")
+	}
+	_ = p.Start()
+	defer func() { _ = p.Stop() }()
+	time.Sleep(300 * time.Millisecond)
 
-	// 等待指标更新
-	time.Sleep(1 * time.Second)
-
-	// 手动更新指标
+	// Run collector and update metrics
+	metricsManager.StartMetricsCollector(200 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
 	metricsManager.UpdateMetrics()
+	metricsManager.Stop()
 
-	// 检查指标是否更新成功
-	t.Log("集成测试成功")
+	// Verify registry is still accessible after stop
+	if metricsManager.GetRegistry() == nil {
+		t.Error("registry should not be nil after stop")
+	}
 }
 
 // TestMetricsStopCollector tests that the collector can be stopped cleanly.
 func TestMetricsStopCollector(t *testing.T) {
-	processManager, err := setupMetricsTestEnvironment()
-	if err != nil {
-		t.Fatalf("初始化测试环境失败: %v", err)
-	}
-	defer cleanupMetricsTestEnvironment()
+	processManager := setupMetricsTestEnvironment(t)
 
 	mm := NewMetricsManager(processManager)
 	mm.StartMetricsCollector(100 * time.Millisecond)
 
 	time.Sleep(300 * time.Millisecond)
 	mm.Stop()
-	time.Sleep(100 * time.Millisecond)
 
-	// Should not panic on Stop
-	t.Log("Stop 完成，未发生 panic")
+	// Verify stop channel is closed (Stop is complete)
+	if mm.stop != nil {
+		select {
+		case <-mm.stop:
+			// Expected: channel is closed
+		default:
+			t.Error("stop channel should be closed after Stop()")
+		}
+	}
 }
 
 // TestMetricsStopDoubleClose verifies Stop is safe to call multiple times.
 func TestMetricsStopDoubleClose(t *testing.T) {
-	processManager, err := setupMetricsTestEnvironment()
-	if err != nil {
-		t.Fatalf("初始化测试环境失败: %v", err)
-	}
-	defer cleanupMetricsTestEnvironment()
+	processManager := setupMetricsTestEnvironment(t)
 
 	mm := NewMetricsManager(processManager)
 	mm.StartMetricsCollector(100 * time.Millisecond)

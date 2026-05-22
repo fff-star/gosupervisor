@@ -297,12 +297,14 @@ func (p *Process) Start() error {
 	}
 
 	// Set up stdin from file if configured
+	var stdinFile *os.File
 	if p.Config.StdinFile != "" {
 		f, err := os.Open(p.Config.StdinFile)
 		if err != nil {
 			fmt.Printf("进程 %s 打开 stdin 文件失败: %v\n", p.Name, err)
 		} else {
 			cmd.Stdin = f
+			stdinFile = f
 		}
 	}
 
@@ -328,6 +330,11 @@ func (p *Process) Start() error {
 	}
 	syscall.Umask(oldUmask)
 	umaskMu.Unlock()
+
+	// Close stdin file in parent — child has its own fd copy
+	if stdinFile != nil {
+		_ = stdinFile.Close()
+	}
 
 	p.mu.Lock()
 	// Create channels only after cmd.Start() succeeds so that

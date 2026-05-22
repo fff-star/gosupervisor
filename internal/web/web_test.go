@@ -2242,3 +2242,50 @@ func TestContentType_ProcessNotFound(t *testing.T) {
 		t.Errorf("expected application/json for error response, got: %s", ct)
 	}
 }
+
+func TestFormatBytes(t *testing.T) {
+	tests := []struct {
+		bytes    int64
+		expected string
+	}{
+		{0, "0 B"},
+		{512, "512 B"},
+		{1024, "1.0 KB"},
+		{1536, "1.5 KB"},
+		{1048576, "1.0 MB"},
+		{5242880, "5.0 MB"},
+		{1073741824, "1.0 GB"},
+		{3221225472, "3.0 GB"},
+		{-1, "-1 B"},
+	}
+	for _, tt := range tests {
+		result := formatBytes(tt.bytes)
+		if result != tt.expected {
+			t.Errorf("formatBytes(%d) = %q, want %q", tt.bytes, result, tt.expected)
+		}
+	}
+}
+
+func TestJsonResponse(t *testing.T) {
+	w := httptest.NewRecorder()
+	jsonResponse(w, http.StatusOK, map[string]string{"status": "ok"})
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", w.Code)
+	}
+	ct := w.Header().Get("Content-Type")
+	if !strings.Contains(ct, "application/json") {
+		t.Errorf("expected Content-Type application/json, got %q", ct)
+	}
+	if !strings.Contains(w.Body.String(), `"status":"ok"`) {
+		t.Errorf("expected JSON body with status:ok, got: %s", w.Body.String())
+	}
+}
+
+func TestCountProcesses(t *testing.T) {
+	n := countProcesses()
+	if n <= 0 {
+		t.Errorf("expected positive process count, got %d", n)
+	}
+}
+

@@ -1287,7 +1287,7 @@ margin-right:4px;animation:pulse 1.5s ease-in-out infinite}
 </div>
 
 <div class="toolbar">
-<select id="filter-state" onchange="render()">
+<select id="filter-state">
 <option value="">全部状态</option>
 <option value="RUNNING">RUNNING</option>
 <option value="STOPPED">STOPPED</option>
@@ -1296,7 +1296,7 @@ margin-right:4px;animation:pulse 1.5s ease-in-out infinite}
 <option value="EXITED">EXITED</option>
 <option value="FATAL">FATAL</option>
 </select>
-<input type="text" id="filter-name" placeholder="搜索进程…" oninput="render()">
+<input type="text" id="filter-name" placeholder="搜索进程…">
 </div>
 
 <div class="table-wrap">
@@ -1372,6 +1372,8 @@ updateStats(processes)
 }
 
 render();
+document.getElementById('filter-state').onchange=render;
+document.getElementById('filter-name').oninput=render;
 
 // Live updates via SSE
 var es=new EventSource('/api/v1/events/stream');

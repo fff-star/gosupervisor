@@ -569,6 +569,8 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 		eventListenerManagerRef.Reload(cfg)
 		process.OnEvent = eventListenerManagerRef.EmitEvent
 	}
+	// Re-wire SSE broker after reload (BUGFIX: SSE was lost after SIGHUP)
+	web.InitSSEBroker()
 
 	return nil
 }

@@ -137,7 +137,7 @@ func (l *EventListener) start() error {
 	l.ctx, l.cancel = context.WithCancel(context.Background())
 	l.done = make(chan struct{})
 
-	cmd := exec.CommandContext(l.ctx, "/bin/sh", "-c", l.Config.Command)
+	cmd := exec.Command("/bin/sh", "-c", l.Config.Command)
 	if l.Config.Directory != "" {
 		cmd.Dir = l.Config.Directory
 	}
@@ -185,16 +185,13 @@ func (l *EventListener) stop() {
 		return
 	}
 	l.state = "STOPPING"
-	cancel := l.cancel
 	cmd := l.cmd
 	done := l.done
+	stdinR := l.stdinR
 	l.mu.Unlock()
 
-	if cancel != nil {
-		cancel()
-	}
 	if cmd != nil && cmd.Process != nil {
-		// Send stop signal
+		// Send graceful stop signal first
 		sig := parseStopSignal(l.Config.StopSignal)
 		_ = cmd.Process.Signal(sig)
 		// Wait with timeout then force kill
@@ -203,6 +200,14 @@ func (l *EventListener) stop() {
 		})
 		_ = cmd.Wait()
 		timer.Stop()
+	}
+
+	// Cancel context to unblock any remaining operations, then close pipes
+	if l.cancel != nil {
+		l.cancel()
+	}
+	if stdinR != nil {
+		_ = stdinR.Close()
 	}
 
 	if done != nil {

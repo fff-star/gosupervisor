@@ -13,7 +13,7 @@ import (
 
 func TestLogger(t *testing.T) {
 	// 创建测试日志目录
-	logDir := "./test_logs"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -50,7 +50,7 @@ func TestLogger(t *testing.T) {
 
 // TestProcessLogWriterWithLargeWrites 测试日志写入时文件大小跟踪是否同步更新
 func TestProcessLogWriterWithLargeWrites(t *testing.T) {
-	logDir := "./test_logs"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -121,7 +121,7 @@ func TestProcessLogWriterWithLargeWrites(t *testing.T) {
 
 func TestLogRotation(t *testing.T) {
 	// 创建测试日志目录
-	logDir := "./test_logs"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -163,7 +163,7 @@ func TestLogRotation(t *testing.T) {
 
 func TestLogCompression(t *testing.T) {
 	// 创建测试日志目录
-	logDir := "./test_logs"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -269,7 +269,7 @@ func TestCleanupOldLogs(t *testing.T) {
 // TestLogRotationWithMultipleRotations 测试多次日志轮转
 func TestLogRotationWithMultipleRotations(t *testing.T) {
 	// 创建测试日志目录
-	logDir := "./test_logs"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -313,7 +313,7 @@ func TestLogRotationWithMultipleRotations(t *testing.T) {
 // TestLogCompressionWithInvalidFile 测试压缩无效文件
 func TestLogCompressionWithInvalidFile(t *testing.T) {
 	// 创建测试日志目录
-	logDir := "./test_logs"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -393,7 +393,7 @@ func TestLoggerWithNonExistentDir(t *testing.T) {
 // TestLogLevelsWriteToSystemLog tests that all log levels write to system.log.
 func TestLogLevelsWriteToSystemLog(t *testing.T) {
 	// 创建测试日志目录
-	logDir := "./test_logs"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -425,7 +425,7 @@ func TestLogLevelsWriteToSystemLog(t *testing.T) {
 
 // TestGetProcessLogWritersPerProcessConfig tests per-process log settings.
 func TestGetProcessLogWritersPerProcessConfig(t *testing.T) {
-	logDir := "./test_logs_pp"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -474,7 +474,7 @@ func TestGetProcessLogWritersPerProcessConfig(t *testing.T) {
 
 // TestGetProcessLogWritersSeparatePaths tests custom log file paths.
 func TestGetProcessLogWritersSeparatePaths(t *testing.T) {
-	logDir := "./test_logs_sep"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -517,7 +517,7 @@ func TestGetProcessLogWritersSeparatePaths(t *testing.T) {
 // TestGetProcessLogWritersSamePath tests that when stdout and stderr share
 // the same path, they reuse the same writer instead of opening separate handles.
 func TestGetProcessLogWritersSamePath(t *testing.T) {
-	logDir := "./test_logs_samepath"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -577,7 +577,7 @@ func TestGetProcessLogWritersSamePath(t *testing.T) {
 // TestCountingWriterConcurrent tests that concurrent writes to countingWriter
 // don't race when tracking bytesWritten via sync/atomic.
 func TestCountingWriterConcurrent(t *testing.T) {
-	logDir := "./test_logs_cwcon"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -616,7 +616,7 @@ func TestCountingWriterConcurrent(t *testing.T) {
 // TestRotateLogsSharedWriter tests that RotateLogs handles shared writers
 // without double-rotating the same file.
 func TestRotateLogsSharedWriter(t *testing.T) {
-	logDir := "./test_logs_sw"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -662,7 +662,7 @@ func TestRotateLogsSharedWriter(t *testing.T) {
 
 // TestRotateLogFallback tests the fallback path when no active writers exist.
 func TestRotateLogFallback(t *testing.T) {
-	logDir := "./test_logs_fallback"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -699,7 +699,7 @@ func TestRotateLogFallback(t *testing.T) {
 
 // TestRotateLogFallbackCompressEnabled tests fallback rotation with compression.
 func TestRotateLogFallbackCompressEnabled(t *testing.T) {
-	logDir := "./test_logs_fallback_gz"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -733,7 +733,7 @@ func TestRotateLogFallbackCompressEnabled(t *testing.T) {
 // TestCleanupBackupsKeepsNewest verifies cleanupBackups removes old files
 // keeping only the most recent backupCount files.
 func TestCleanupBackupsKeepsNewest(t *testing.T) {
-	logDir := "./test_logs_cleanup"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -764,7 +764,7 @@ func TestCleanupBackupsKeepsNewest(t *testing.T) {
 // TestCleanupBackupsNoOpWhenUnderLimit verifies cleanupBackups is a no-op
 // when the number of backup files does not exceed backupCount.
 func TestCleanupBackupsNoOpWhenUnderLimit(t *testing.T) {
-	logDir := "./test_logs_cleanup_noop"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -786,7 +786,7 @@ func TestCleanupBackupsNoOpWhenUnderLimit(t *testing.T) {
 // TestRotateFileOutsideLock validates that rotateFileOutsideLock renames a
 // file, compresses it if enabled, and cleans up old backups.
 func TestRotateFileOutsideLock(t *testing.T) {
-	logDir := "./test_logs_rotate_outside"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -816,7 +816,7 @@ func TestRotateFileOutsideLock(t *testing.T) {
 
 // TestRotateFileOutsideLockNoCompress validates rotation without compression.
 func TestRotateFileOutsideLockNoCompress(t *testing.T) {
-	logDir := "./test_logs_rotate_nocompress"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -849,7 +849,7 @@ func TestRotateFileOutsideLockNoCompress(t *testing.T) {
 // TestRotateFileOutsideLockFileNotExist validates behavior when the file
 // does not exist (should return nil, no error).
 func TestRotateFileOutsideLockFileNotExist(t *testing.T) {
-	logDir := "./test_logs_rotate_missing"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -865,7 +865,7 @@ func TestRotateFileOutsideLockFileNotExist(t *testing.T) {
 
 // TestCloseProcessLog verifies CloseProcessLog removes the log stream.
 func TestCloseProcessLog(t *testing.T) {
-	logDir := "./test_logs_close"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
@@ -889,7 +889,7 @@ func TestCloseProcessLog(t *testing.T) {
 // TestLogSystemRotation verifies LogSystem triggers rotation when
 // system.log exceeds max size.
 func TestLogSystemRotation(t *testing.T) {
-	logDir := "./test_logs_system_rot"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 

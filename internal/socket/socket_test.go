@@ -3,6 +3,7 @@ package socket
 import (
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,7 +14,7 @@ import (
 
 func newTestSocketServer(t *testing.T) *SocketServer {
 	t.Helper()
-	logManager, err := logger.NewDefaultLogger("/tmp/gosupervisor_socket_test")
+	logManager, err := logger.NewDefaultLogger(t.TempDir())
 	if err != nil {
 		t.Fatalf("创建 logger 失败: %v", err)
 	}
@@ -38,7 +39,7 @@ func cleanupSocket(path string) {
 }
 
 func TestNewSocketServer(t *testing.T) {
-	logManager, err := logger.NewDefaultLogger("/tmp/gosupervisor_socket_test")
+	logManager, err := logger.NewDefaultLogger(t.TempDir())
 	if err != nil {
 		t.Fatalf("创建 logger 失败: %v", err)
 	}
@@ -264,7 +265,7 @@ func TestHandleCommandStartDuplicate(t *testing.T) {
 
 func TestStartStopSocket(t *testing.T) {
 	s := newTestSocketServer(t)
-	socketPath := "/tmp/gosupervisor_test_startstop.sock"
+	socketPath := filepath.Join(t.TempDir(), "test.sock")
 	cleanupSocket(socketPath)
 
 	if err := s.Start(socketPath); err != nil {
@@ -307,7 +308,7 @@ func TestStartStopSocket(t *testing.T) {
 
 func TestHandleConnWithQuit(t *testing.T) {
 	s := newTestSocketServer(t)
-	socketPath := "/tmp/gosupervisor_test_quit.sock"
+	socketPath := filepath.Join(t.TempDir(), "test.sock")
 	cleanupSocket(socketPath)
 
 	if err := s.Start(socketPath); err != nil {
@@ -334,7 +335,7 @@ func TestHandleConnWithQuit(t *testing.T) {
 
 func TestHandleConnWithExit(t *testing.T) {
 	s := newTestSocketServer(t)
-	socketPath := "/tmp/gosupervisor_test_exit.sock"
+	socketPath := filepath.Join(t.TempDir(), "test.sock")
 	cleanupSocket(socketPath)
 
 	if err := s.Start(socketPath); err != nil {
@@ -360,7 +361,7 @@ func TestHandleConnWithExit(t *testing.T) {
 
 func TestHandleConnHelpQuit(t *testing.T) {
 	s := newTestSocketServer(t)
-	socketPath := "/tmp/gosupervisor_test_helpquit.sock"
+	socketPath := filepath.Join(t.TempDir(), "test.sock")
 	cleanupSocket(socketPath)
 
 	if err := s.Start(socketPath); err != nil {
@@ -390,7 +391,7 @@ func TestHandleConnHelpQuit(t *testing.T) {
 
 func TestStartReplacesExistingSocket(t *testing.T) {
 	s := newTestSocketServer(t)
-	socketPath := "/tmp/gosupervisor_test_replace.sock"
+	socketPath := filepath.Join(t.TempDir(), "test.sock")
 	cleanupSocket(socketPath)
 
 	// Create a socket file and close it, leaving the file on disk
