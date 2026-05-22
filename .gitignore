@@ -20,6 +20,7 @@ internal/*/test_logs/
 
 # Claude
 CLAUDE.md
+Docs/
 
 # 配置文件
 *.ini
@@ -27,8 +28,6 @@ CLAUDE.md
 *.yml
 *.json
 
-# 依赖
-/vendor/
 
 # IDE
 .idea/
