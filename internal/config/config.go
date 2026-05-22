@@ -86,6 +86,19 @@ type ProgramConfig struct {
 	// Process group signaling
 	KillsAsGroup bool `yaml:"killasgroup" json:"killasgroup"`
 	StopAsGroup  bool `yaml:"stopasgroup" json:"stopasgroup"`
+
+	// Resource limits (0 = not set, value applied to both soft and hard limit)
+	RlimitAs     uint64 `yaml:"rlimitas" json:"rlimitas"`
+	RlimitCore   uint64 `yaml:"rlimitcore" json:"rlimitcore"`
+	RlimitCpu    uint64 `yaml:"rlimitcpu" json:"rlimitcpu"`
+	RlimitData   uint64 `yaml:"rlimitdata" json:"rlimitdata"`
+	RlimitFsize  uint64 `yaml:"rlimitfsize" json:"rlimitfsize"`
+	RlimitNofile uint64 `yaml:"rlimitnofile" json:"rlimitnofile"`
+	RlimitNproc  uint64 `yaml:"rlimitnproc" json:"rlimitnproc"`
+	RlimitStack  uint64 `yaml:"rlimitstack" json:"rlimitstack"`
+
+	// Exit codes considered "expected" — they do not exhaust StartRetries
+	ExitCodes []int `yaml:"exitcodes" json:"exitcodes"`
 }
 
 // EventListenerConfig represents the configuration for an event listener process.
@@ -129,10 +142,14 @@ type ServerConfig struct {
 	SocketPath  string `yaml:"socketpath" json:"socketpath"`
 	StateFile   string `yaml:"statefile" json:"statefile"`
 	LogDir      string `yaml:"logdir" json:"logdir"`
+	LogFormat   string `yaml:"logformat" json:"logformat"` // "text" or "json", default "text"
+	LogLevel    string `yaml:"loglevel" json:"loglevel"`   // "debug", "info", "warn", "error", default "info"
 	CORSOrigin  string `yaml:"corsorigin" json:"corsorigin"`
 	RateLimitRPS int   `yaml:"ratelimitrps" json:"ratelimitrps"`
 	WebCert     string `yaml:"webcert" json:"webcert"`
 	WebKey      string `yaml:"webkey" json:"webkey"`
+	SocketMode  uint32 `yaml:"socketmode" json:"socketmode"`   // octal, e.g. 0644
+	SocketOwner string `yaml:"socketowner" json:"socketowner"` // "uid:gid" or "user:group"
 }
 
 // Config 表示整个配置文件的结构
@@ -300,6 +317,7 @@ func loadINIConfig(configPath string) (*Config, error) {
 					DependsOn:                    []string{},
 					RestartCodes:                 []int{},
 					NoRestartCodes:               []int{},
+					ExitCodes:                    []int{},
 					HealthCheckInterval:           30,
 					HealthCheckTimeout:            5,
 					HealthCheckUnhealthyThreshold: 3,
@@ -477,6 +495,31 @@ func loadINIConfig(configPath string) (*Config, error) {
 					currentProgram.KillsAsGroup = value == "true"
 				case "stopasgroup":
 					currentProgram.StopAsGroup = value == "true"
+				case "rlimitas":
+					parseIntWarn(value, "rlimitas", &currentProgram.RlimitAs)
+				case "rlimitcore":
+					parseIntWarn(value, "rlimitcore", &currentProgram.RlimitCore)
+				case "rlimitcpu":
+					parseIntWarn(value, "rlimitcpu", &currentProgram.RlimitCpu)
+				case "rlimitdata":
+					parseIntWarn(value, "rlimitdata", &currentProgram.RlimitData)
+				case "rlimitfsize":
+					parseIntWarn(value, "rlimitfsize", &currentProgram.RlimitFsize)
+				case "rlimitnofile":
+					parseIntWarn(value, "rlimitnofile", &currentProgram.RlimitNofile)
+				case "rlimitnproc":
+					parseIntWarn(value, "rlimitnproc", &currentProgram.RlimitNproc)
+				case "rlimitstack":
+					parseIntWarn(value, "rlimitstack", &currentProgram.RlimitStack)
+				case "exitcodes":
+					for _, s := range strings.Split(value, ",") {
+						var code int
+						if _, err := fmt.Sscanf(strings.TrimSpace(s), "%d", &code); err != nil {
+							fmt.Printf("警告: 无法解析 exitcodes 值 '%s'，跳过\n", s)
+							continue
+						}
+						currentProgram.ExitCodes = append(currentProgram.ExitCodes, code)
+					}
 				}
 			}
 		} else if currentListener != nil {
@@ -574,6 +617,19 @@ func loadINIConfig(configPath string) (*Config, error) {
 					config.Server.WebCert = value
 				case "webkey":
 					config.Server.WebKey = value
+				case "socketmode":
+					var v uint32
+					if _, err := fmt.Sscanf(value, "%o", &v); err != nil {
+						fmt.Printf("警告: 无法解析 socketmode 的值 '%s'，使用默认值\n", value)
+					} else {
+						config.Server.SocketMode = v
+					}
+				case "socketowner":
+					config.Server.SocketOwner = value
+				case "logformat":
+					config.Server.LogFormat = value
+				case "loglevel":
+					config.Server.LogLevel = value
 				}
 			}
 		} else if config.Server != nil && currentSection == "inet_http_server" {
@@ -672,6 +728,9 @@ func applyDefaults(programs map[string]*ProgramConfig, rawPrograms map[string]ma
 		}
 		if prog.NoRestartCodes == nil {
 			prog.NoRestartCodes = []int{}
+		}
+		if prog.ExitCodes == nil {
+			prog.ExitCodes = []int{}
 		}
 
 		raw := rawPrograms[name]
@@ -991,6 +1050,10 @@ func copyProgramConfig(cfg *ProgramConfig) *ProgramConfig {
 	if cfg.NoRestartCodes != nil {
 		copyCfg.NoRestartCodes = make([]int, len(cfg.NoRestartCodes))
 		copy(copyCfg.NoRestartCodes, cfg.NoRestartCodes)
+	}
+	if cfg.ExitCodes != nil {
+		copyCfg.ExitCodes = make([]int, len(cfg.ExitCodes))
+		copy(copyCfg.ExitCodes, cfg.ExitCodes)
 	}
 	return &copyCfg
 }

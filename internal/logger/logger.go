@@ -2,17 +2,53 @@ package logger
 
 import (
 	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"gosupervisor/internal/config"
 )
+
+// Level represents a log severity level.
+type Level int
+
+const (
+	LevelDebug Level = iota
+	LevelInfo
+	LevelWarn
+	LevelError
+)
+
+// Format represents the output format for system logs.
+type Format string
+
+const (
+	FormatText Format = "text"
+	FormatJSON Format = "json"
+)
+
+// ParseLevel converts a string to a Level (default: LevelInfo).
+func ParseLevel(s string) Level {
+	switch strings.ToLower(s) {
+	case "debug":
+		return LevelDebug
+	case "info":
+		return LevelInfo
+	case "warn", "warning":
+		return LevelWarn
+	case "error":
+		return LevelError
+	default:
+		return LevelInfo
+	}
+}
 
 // countingWriter 包装 io.Writer 以追踪写入字节数
 type countingWriter struct {
@@ -48,11 +84,13 @@ type Logger struct {
 	systemLogMaxBytes    int64
 	systemLogBackupCount int
 	compress             bool
+	level                Level
+	format               Format
 	mutex                sync.Mutex
 	systemLogMu          sync.Mutex
 }
 
-func NewLogger(logDir string, maxLogSize int64, maxBackupCount int, compress bool) (*Logger, error) {
+func NewLogger(logDir string, maxLogSize int64, maxBackupCount int, compress bool, level Level, format Format) (*Logger, error) {
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return nil, fmt.Errorf("创建日志目录失败: %v", err)
 	}
@@ -65,6 +103,13 @@ func NewLogger(logDir string, maxLogSize int64, maxBackupCount int, compress boo
 		maxBackupCount = 10
 	}
 
+	if level < LevelDebug || level > LevelError {
+		level = LevelInfo
+	}
+	if format != FormatText && format != FormatJSON {
+		format = FormatText
+	}
+
 	return &Logger{
 		logDir:               logDir,
 		processLogs:          make(map[string]*logStream),
@@ -73,11 +118,13 @@ func NewLogger(logDir string, maxLogSize int64, maxBackupCount int, compress boo
 		systemLogMaxBytes:    50 * 1024 * 1024, // 50MB
 		systemLogBackupCount: 10,
 		compress:             compress,
+		level:                level,
+		format:               format,
 	}, nil
 }
 
 func NewDefaultLogger(logDir string) (*Logger, error) {
-	return NewLogger(logDir, 50*1024*1024, 10, true)
+	return NewLogger(logDir, 50*1024*1024, 10, true, LevelInfo, FormatText)
 }
 
 // GetProcessLogWriters returns stdout and stderr writers for a process.
@@ -403,12 +450,15 @@ func (l *Logger) CloseProcessLog(processName string) error {
 }
 
 func (l *Logger) LogSystem(message string) {
+	l.writeSystemLog(message, LevelInfo)
+}
+
+func (l *Logger) writeSystemLog(message string, level Level) {
 	l.systemLogMu.Lock()
 	defer l.systemLogMu.Unlock()
 
 	systemLog := filepath.Join(l.logDir, "system.log")
 
-	// Rotate if file exceeds max size
 	if info, err := os.Stat(systemLog); err == nil && info.Size() >= l.systemLogMaxBytes {
 		if err := l.rotateFileOutsideLock(systemLog, l.systemLogBackupCount); err != nil {
 			fmt.Printf("旋转系统日志文件失败: %v\n", err)
@@ -423,7 +473,65 @@ func (l *Logger) LogSystem(message string) {
 	defer file.Close()
 
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	fmt.Fprintf(file, "[%s] %s\n", timestamp, message)
+	if l.format == FormatJSON {
+		levelStr := levelString(level)
+		entry := struct {
+			Time    string `json:"time"`
+			Level   string `json:"level"`
+			Message string `json:"message"`
+		}{timestamp, levelStr, message}
+		_ = json.NewEncoder(file).Encode(entry)
+	} else {
+		fmt.Fprintf(file, "[%s] [%s] %s\n", timestamp, levelString(level), message)
+	}
+}
+
+func levelString(level Level) string {
+	switch level {
+	case LevelDebug:
+		return "DEBUG"
+	case LevelInfo:
+		return "INFO"
+	case LevelWarn:
+		return "WARNING"
+	case LevelError:
+		return "ERROR"
+	default:
+		return "INFO"
+	}
+}
+
+// SetLevel sets the minimum log level.
+func (l *Logger) SetLevel(level Level) {
+	l.level = level
+}
+
+// SetFormat sets the system log output format.
+func (l *Logger) SetFormat(format Format) {
+	l.format = format
+}
+
+func (l *Logger) log(level Level, format string, args ...interface{}) {
+	if level < l.level {
+		return
+	}
+	l.writeSystemLog(fmt.Sprintf(format, args...), level)
+}
+
+func (l *Logger) Debug(format string, args ...interface{}) {
+	l.log(LevelDebug, format, args...)
+}
+
+func (l *Logger) Info(format string, args ...interface{}) {
+	l.log(LevelInfo, format, args...)
+}
+
+func (l *Logger) Warning(format string, args ...interface{}) {
+	l.log(LevelWarn, format, args...)
+}
+
+func (l *Logger) Error(format string, args ...interface{}) {
+	l.log(LevelError, format, args...)
 }
 
 func (l *Logger) Close() error {
@@ -489,19 +597,4 @@ func (l *Logger) RotateLogs() error {
 	}
 
 	return nil
-}
-
-func (l *Logger) Info(format string, args ...interface{}) {
-	message := fmt.Sprintf(format, args...)
-	l.LogSystem(fmt.Sprintf("[INFO] %s", message))
-}
-
-func (l *Logger) Warning(format string, args ...interface{}) {
-	message := fmt.Sprintf(format, args...)
-	l.LogSystem(fmt.Sprintf("[WARNING] %s", message))
-}
-
-func (l *Logger) Error(format string, args ...interface{}) {
-	message := fmt.Sprintf(format, args...)
-	l.LogSystem(fmt.Sprintf("[ERROR] %s", message))
 }

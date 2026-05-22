@@ -6,18 +6,30 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/user"
+	"strconv"
 	"strings"
 
 	"gosupervisor/internal/process"
 )
 
 type SocketServer struct {
-	pm     *process.ProcessManager
-	socket net.Listener
+	pm          *process.ProcessManager
+	socket      net.Listener
+	socketMode  os.FileMode
+	socketOwner string
 }
 
 func NewSocketServer(pm *process.ProcessManager) *SocketServer {
 	return &SocketServer{pm: pm}
+}
+
+func (s *SocketServer) SetSocketMode(mode os.FileMode) {
+	s.socketMode = mode
+}
+
+func (s *SocketServer) SetSocketOwner(owner string) {
+	s.socketOwner = owner
 }
 
 func (s *SocketServer) Start(socketPath string) error {
@@ -27,6 +39,19 @@ func (s *SocketServer) Start(socketPath string) error {
 		return fmt.Errorf("创建 Unix socket 失败: %v", err)
 	}
 	s.socket = l
+
+	// Apply socket permissions if configured
+	if s.socketMode != 0 {
+		if err := os.Chmod(socketPath, s.socketMode); err != nil {
+			return fmt.Errorf("设置 socket 权限失败: %v", err)
+		}
+	}
+	if s.socketOwner != "" {
+		if err := s.applySocketOwner(socketPath); err != nil {
+			return fmt.Errorf("设置 socket 所有者失败: %v", err)
+		}
+	}
+
 	fmt.Printf("Unix socket CLI 启动在 %s\n", socketPath)
 
 	go func() {
@@ -42,6 +67,36 @@ func (s *SocketServer) Start(socketPath string) error {
 		}
 	}()
 	return nil
+}
+
+func (s *SocketServer) applySocketOwner(path string) error {
+	parts := strings.Split(s.socketOwner, ":")
+	if len(parts) != 2 {
+		return fmt.Errorf("socketowner 格式无效: %q，应为 uid:gid 或 user:group", s.socketOwner)
+	}
+	ownerPart := strings.TrimSpace(parts[0])
+	groupPart := strings.TrimSpace(parts[1])
+
+	uid := -1
+	if u, err := strconv.Atoi(ownerPart); err == nil {
+		uid = u
+	} else if u, err := user.Lookup(ownerPart); err == nil {
+		if parsed, err := strconv.Atoi(u.Uid); err == nil {
+			uid = parsed
+		}
+	}
+	gid := -1
+	if g, err := strconv.Atoi(groupPart); err == nil {
+		gid = g
+	} else if g, err := user.LookupGroup(groupPart); err == nil {
+		if parsed, err := strconv.Atoi(g.Gid); err == nil {
+			gid = parsed
+		}
+	}
+	if uid < 0 || gid < 0 {
+		return fmt.Errorf("无法解析 socketowner: %q", s.socketOwner)
+	}
+	return os.Chown(path, uid, gid)
 }
 
 func (s *SocketServer) Stop() error {

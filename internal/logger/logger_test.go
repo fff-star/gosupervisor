@@ -55,7 +55,7 @@ func TestProcessLogWriterWithLargeWrites(t *testing.T) {
 	defer os.RemoveAll(logDir)
 
 	// 创建小的日志大小限制以便快速触发轮转
-	logger, err := NewLogger(logDir, 1024, 5, false) // 1KB max size
+	logger, err := NewLogger(logDir, 1024, 5, false, LevelInfo, FormatText) // 1KB max size
 	if err != nil {
 		t.Fatalf("初始化日志管理器失败: %v", err)
 	}
@@ -581,7 +581,7 @@ func TestCountingWriterConcurrent(t *testing.T) {
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
-	logger, err := NewLogger(logDir, 50*1024*1024, 10, false)
+	logger, err := NewLogger(logDir, 50*1024*1024, 10, false, LevelInfo, FormatText)
 	if err != nil {
 		t.Fatalf("初始化日志管理器失败: %v", err)
 	}
@@ -620,7 +620,7 @@ func TestRotateLogsSharedWriter(t *testing.T) {
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
-	logger, err := NewLogger(logDir, 1024, 5, false)
+	logger, err := NewLogger(logDir, 1024, 5, false, LevelInfo, FormatText)
 	if err != nil {
 		t.Fatalf("初始化日志管理器失败: %v", err)
 	}
@@ -703,7 +703,7 @@ func TestRotateLogFallbackCompressEnabled(t *testing.T) {
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
-	logger, err := NewLogger(logDir, 50*1024*1024, 10, true)
+	logger, err := NewLogger(logDir, 50*1024*1024, 10, true, LevelInfo, FormatText)
 	if err != nil {
 		t.Fatalf("初始化日志管理器失败: %v", err)
 	}
@@ -790,7 +790,7 @@ func TestRotateFileOutsideLock(t *testing.T) {
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
-	logger, err := NewLogger(logDir, 10*1024*1024, 5, true)
+	logger, err := NewLogger(logDir, 10*1024*1024, 5, true, LevelInfo, FormatText)
 	if err != nil {
 		t.Fatalf("初始化日志管理器失败: %v", err)
 	}
@@ -820,7 +820,7 @@ func TestRotateFileOutsideLockNoCompress(t *testing.T) {
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
-	logger, err := NewLogger(logDir, 10*1024*1024, 5, false)
+	logger, err := NewLogger(logDir, 10*1024*1024, 5, false, LevelInfo, FormatText)
 	if err != nil {
 		t.Fatalf("初始化日志管理器失败: %v", err)
 	}
@@ -893,7 +893,7 @@ func TestLogSystemRotation(t *testing.T) {
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
-	logger, err := NewLogger(logDir, 10*1024*1024, 5, false)
+	logger, err := NewLogger(logDir, 10*1024*1024, 5, false, LevelInfo, FormatText)
 	if err != nil {
 		t.Fatalf("初始化日志管理器失败: %v", err)
 	}

@@ -85,6 +85,14 @@ func (m *Monitor) handleExitedProcess(process *Process) {
 		return
 	}
 
+	// Reset retry count if exit code is in ExitCodes (expected/normal exits)
+	for _, code := range process.Config.ExitCodes {
+		if process.ExitCode == code {
+			process.StartRetries = 0
+			break
+		}
+	}
+
 	// Check restart rate limiting
 	if process.restartRateExceeded() {
 		process.State = StateFatal

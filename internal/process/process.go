@@ -319,9 +319,13 @@ func (p *Process) Start() error {
 
 	// Set umask before fork (process-wide, so serialise via mutex)
 	umaskMu.Lock()
+	rlimitRestore := p.applyRlimits()
 	oldUmask := syscall.Umask(p.Config.Umask)
 	if err := cmd.Start(); err != nil {
 		syscall.Umask(oldUmask)
+		for i := len(rlimitRestore) - 1; i >= 0; i-- {
+			rlimitRestore[i]()
+		}
 		umaskMu.Unlock()
 		if stdinFile != nil {
 			_ = stdinFile.Close()
@@ -332,6 +336,9 @@ func (p *Process) Start() error {
 		return fmt.Errorf("启动进程失败: %v", err)
 	}
 	syscall.Umask(oldUmask)
+	for i := len(rlimitRestore) - 1; i >= 0; i-- {
+		rlimitRestore[i]()
+	}
 	umaskMu.Unlock()
 
 	// Close stdin file in parent — child has its own fd copy
@@ -717,6 +724,44 @@ func (p *Process) readProcStats(pid int) {
 		})
 	}
 	p.mu.Unlock()
+}
+
+type rlimitEntry struct {
+	resource int
+	value    uint64
+}
+
+// applyRlimits applies per-process resource limits before fork.
+// Returns restore functions that must be called (in reverse order) after fork.
+func (p *Process) applyRlimits() (restore []func()) {
+	entries := []rlimitEntry{
+		{syscall.RLIMIT_AS, p.Config.RlimitAs},
+		{syscall.RLIMIT_CORE, p.Config.RlimitCore},
+		{syscall.RLIMIT_CPU, p.Config.RlimitCpu},
+		{syscall.RLIMIT_DATA, p.Config.RlimitData},
+		{syscall.RLIMIT_FSIZE, p.Config.RlimitFsize},
+		{syscall.RLIMIT_NOFILE, p.Config.RlimitNofile},
+		{6 /* RLIMIT_NPROC */, p.Config.RlimitNproc},
+		{syscall.RLIMIT_STACK, p.Config.RlimitStack},
+	}
+	for _, e := range entries {
+		if e.value == 0 {
+			continue
+		}
+		var old syscall.Rlimit
+		if err := syscall.Getrlimit(e.resource, &old); err != nil {
+			continue
+		}
+		if err := syscall.Setrlimit(e.resource, &syscall.Rlimit{Cur: e.value, Max: e.value}); err != nil {
+			continue
+		}
+		r := e.resource
+		o := old
+		restore = append(restore, func() {
+			syscall.Setrlimit(r, &o) // nolint: errcheck
+		})
+	}
+	return restore
 }
 
 // needsShell reports whether cmd contains shell metacharacters and requires /bin/sh -c.

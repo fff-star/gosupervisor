@@ -24,6 +24,10 @@ corsorigin=https://example.com
 ratelimitrps=100
 webcert=/tmp/cert.pem
 webkey=/tmp/key.pem
+logformat=json
+loglevel=debug
+socketmode=644
+socketowner=1000:1000
 
 [program:full_test]
 command=sleep 60
@@ -70,6 +74,9 @@ numprocs=2
 process_name=%(program_name)s_%(process_num)02d
 killasgroup=true
 stopasgroup=true
+rlimitnofile=65535
+rlimitas=1073741824
+exitcodes=0,2
 `
 
 	if err := os.WriteFile(configPath, []byte(ini), 0644); err != nil {
@@ -117,6 +124,18 @@ stopasgroup=true
 	}
 	if cfg.Server.WebKey != "/tmp/key.pem" {
 		t.Errorf("WebKey: expected /tmp/key.pem, got %s", cfg.Server.WebKey)
+	}
+	if cfg.Server.LogFormat != "json" {
+		t.Errorf("LogFormat: expected json, got %s", cfg.Server.LogFormat)
+	}
+	if cfg.Server.LogLevel != "debug" {
+		t.Errorf("LogLevel: expected debug, got %s", cfg.Server.LogLevel)
+	}
+	if cfg.Server.SocketMode != 420 { // 0644 octal
+		t.Errorf("SocketMode: expected 0644 (420), got %d", cfg.Server.SocketMode)
+	}
+	if cfg.Server.SocketOwner != "1000:1000" {
+		t.Errorf("SocketOwner: expected 1000:1000, got %s", cfg.Server.SocketOwner)
 	}
 
 	// ---- Program config ----
@@ -280,6 +299,15 @@ stopasgroup=true
 	}
 	if prog.StopAsGroup != true {
 		t.Errorf("StopAsGroup: expected true")
+	}
+	if prog.RlimitNofile != 65535 {
+		t.Errorf("RlimitNofile: expected 65535, got %d", prog.RlimitNofile)
+	}
+	if prog.RlimitAs != 1073741824 {
+		t.Errorf("RlimitAs: expected 1073741824, got %d", prog.RlimitAs)
+	}
+	if len(prog.ExitCodes) != 2 || prog.ExitCodes[0] != 0 || prog.ExitCodes[1] != 2 {
+		t.Errorf("ExitCodes: expected [0,2], got %v", prog.ExitCodes)
 	}
 }
 

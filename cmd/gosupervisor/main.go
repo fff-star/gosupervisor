@@ -148,6 +148,16 @@ func main() {
 	}
 	defer logManager.Close()
 
+	// Apply log format/level from config if set
+	if cfg.Server != nil {
+		if cfg.Server.LogFormat != "" {
+			logManager.SetFormat(logger.Format(cfg.Server.LogFormat))
+		}
+		if cfg.Server.LogLevel != "" {
+			logManager.SetLevel(logger.ParseLevel(cfg.Server.LogLevel))
+		}
+	}
+
 	// 初始化进程管理器
 	processManager := process.NewProcessManager(logManager)
 
@@ -240,6 +250,14 @@ func main() {
 			// 如果启用了Unix socket CLI
 			if *socketPath != "" {
 				socketServer := socket.NewSocketServer(processManager)
+				if cfg.Server != nil {
+					if cfg.Server.SocketMode != 0 {
+						socketServer.SetSocketMode(os.FileMode(cfg.Server.SocketMode))
+					}
+					if cfg.Server.SocketOwner != "" {
+						socketServer.SetSocketOwner(cfg.Server.SocketOwner)
+					}
+				}
 				if err := socketServer.Start(*socketPath); err != nil {
 					fmt.Printf("启动Unix socket CLI失败: %v\n", err)
 					exitCode = 1

@@ -3037,7 +3037,7 @@ func TestCleanupBackupsSortedCorrectly(t *testing.T) {
 	os.MkdirAll(logDir, 0755)
 	defer os.RemoveAll(logDir)
 
-	logManager, err := logger.NewLogger(logDir, 100, 2, false)
+	logManager, err := logger.NewLogger(logDir, 100, 2, false, logger.LevelInfo, logger.FormatText)
 	if err != nil {
 		t.Fatalf("failed to create logger: %v", err)
 	}
