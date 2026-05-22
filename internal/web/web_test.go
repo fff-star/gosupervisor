@@ -335,8 +335,8 @@ func TestHandleLogs(t *testing.T) {
 		t.Errorf("响应内容不包含进程名称")
 	}
 
-	if !strings.Contains(w.Body.String(),"进程日志") {
-		t.Errorf("响应内容不包含日志页面标题")
+	if !strings.Contains(w.Body.String(),"terminal-body") {
+		t.Errorf("响应内容不包含日志页面内容")
 	}
 }
 
@@ -373,11 +373,7 @@ func TestHandleSystemInfo(t *testing.T) {
 	}
 
 	// 检查响应内容是否包含系统信息页面信息
-	if !strings.Contains(w.Body.String(),"系统信息") {
-		t.Errorf("响应内容不包含系统信息页面标题")
-	}
-
-	if !strings.Contains(w.Body.String(),"操作系统:") {
+	if !strings.Contains(w.Body.String(),"操作系统") {
 		t.Errorf("响应内容不包含操作系统信息")
 	}
 }
@@ -415,10 +411,6 @@ func TestHandleProcessDetail(t *testing.T) {
 	}
 
 	// 检查响应内容是否包含进程详情页面信息
-	if !strings.Contains(w.Body.String(),"进程详情") {
-		t.Errorf("响应内容不包含进程详情页面标题")
-	}
-
 	if !strings.Contains(w.Body.String(),"test_process") {
 		t.Errorf("响应内容不包含进程名称")
 	}

@@ -59,6 +59,20 @@ func NewWebServerFullTLS(processManager *process.ProcessManager, logDir, user, p
 		"lower": func(s interface{}) string {
 			return strings.ToLower(fmt.Sprintf("%v", s))
 		},
+		"formatBytes": func(v interface{}) string {
+			var b int64
+			switch val := v.(type) {
+			case uint64:
+				b = int64(val)
+			case int64:
+				b = val
+			case int:
+				b = int64(val)
+			default:
+				return fmt.Sprintf("%v", v)
+			}
+			return formatBytes(b)
+		},
 	}
 
 	indexTmpl := template.Must(template.New("index").Funcs(funcs).Parse(indexTemplate))
@@ -96,6 +110,7 @@ func NewWebServerFullTLS(processManager *process.ProcessManager, logDir, user, p
 	mux.HandleFunc("/api/v1/system", ws.handleAPIV1System)
 	mux.HandleFunc("/api/v1/config", ws.handleAPIV1Config)
 	mux.HandleFunc("/api/v1/events", ws.handleAPIV1Events)
+	mux.HandleFunc("/api/v1/events/stream", ws.handleAPIV1EventsStream)
 	mux.HandleFunc("/start", ws.handleStart)
 	mux.HandleFunc("/stop", ws.handleStop)
 	mux.HandleFunc("/restart", ws.handleRestart)
@@ -198,7 +213,7 @@ func (ws *WebServer) Stop() {
 	if ws.srv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		ws.srv.Shutdown(ctx)
+		_ = ws.srv.Shutdown(ctx)
 	}
 }
 
@@ -253,13 +268,20 @@ func (ws *WebServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	ws.processManager.RangeProcesses(func(name string, p *process.Process) {
 		snapshots = append(snapshots, p.Snapshot())
 	})
+	if snapshots == nil {
+		snapshots = []process.Snapshot{}
+	}
+
+	processesJSON, _ := json.Marshal(snapshots)
 
 	data := struct {
-		Processes []process.Snapshot
-		Time      string
+		Processes     []process.Snapshot
+		ProcessesJSON template.JS
+		Time          string
 	}{
-		Processes: snapshots,
-		Time:      time.Now().Format("2006-01-02 15:04:05"),
+		Processes:     snapshots,
+		ProcessesJSON: template.JS(processesJSON),
+		Time:          time.Now().Format("2006-01-02 15:04:05"),
 	}
 
 	if err := ws.indexTmpl.Execute(w, data); err != nil {
@@ -733,6 +755,36 @@ func (ws *WebServer) handleAPIV1Events(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleAPIV1EventsStream streams process events via Server-Sent Events.
+func (ws *WebServer) handleAPIV1EventsStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	ch := globalSSEBroker.subscribe()
+	defer globalSSEBroker.unsubscribe(ch)
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case data, ok := <-ch:
+			if !ok {
+				return
+			}
+			w.Write(data)
+			flusher.Flush()
+		}
+	}
+}
+
 func (ws *WebServer) handleProcessLogsTail(w http.ResponseWriter, r *http.Request, name string) {
 	var maxLines, maxBytes int64
 	maxLines = int64(tailMaxLines)
@@ -882,10 +934,10 @@ type SystemInfo struct {
 	Arch                string
 	Hostname            string
 	CPUCount            int
-	MemoryTotal         uint64
-	MemoryUsed          uint64
-	DiskTotal           uint64
-	DiskUsed            uint64
+	MemoryTotal         string
+	MemoryUsed          string
+	DiskTotal           string
+	DiskUsed            string
 	Uptime              string
 	GoVersion           string
 	ProcessCount        int
@@ -893,7 +945,7 @@ type SystemInfo struct {
 	DaemonPID           int
 	DaemonUptime        string
 	ManagedProcessCount int
-	TotalLogSize        int64
+	TotalLogSize        string
 }
 
 // getSystemInfo 获取系统信息
@@ -910,23 +962,37 @@ func getSystemInfo(pm *process.ProcessManager) *SystemInfo {
 		DaemonPID:    os.Getpid(),
 	}
 
-	// Supervisor daemon uptime (handle process name with spaces in /proc/self/stat)
-	if procUptime, err := os.ReadFile("/proc/self/stat"); err == nil {
-		content := string(procUptime)
+	// Supervisor daemon uptime: subtract process starttime from system uptime.
+	// /proc/self/stat field 22 (0-indexed rest[19]) = starttime in clock ticks since boot.
+	// /proc/uptime first field = system uptime in seconds.
+	var daemonUptimeSecs int64
+	if statData, err := os.ReadFile("/proc/self/stat"); err == nil {
+		content := string(statData)
 		idx := strings.LastIndex(content, ")")
 		if idx >= 0 && idx+2 < len(content) {
 			rest := strings.Fields(content[idx+2:])
 			if len(rest) >= 20 {
 				var startTicks uint64
 				fmt.Sscanf(rest[19], "%d", &startTicks)
-				ticksPerSec := int64(100) // USER_HZ is always 100 on Linux
-				uptimeSecs := time.Now().Unix() - int64(startTicks)/ticksPerSec
-				if uptimeSecs >= 0 {
-					h := int(uptimeSecs) / 3600
-					m := (int(uptimeSecs) % 3600) / 60
-					info.DaemonUptime = fmt.Sprintf("%dh %dm", h, m)
+				processStartSecs := int64(startTicks) / 100 // USER_HZ=100
+				if uptimeData, err := os.ReadFile("/proc/uptime"); err == nil {
+					var sysUptime float64
+					fmt.Sscanf(string(uptimeData), "%f", &sysUptime)
+					daemonUptimeSecs = int64(sysUptime) - processStartSecs
 				}
 			}
+		}
+	}
+	if daemonUptimeSecs > 0 {
+		h := int(daemonUptimeSecs) / 3600
+		m := (int(daemonUptimeSecs) % 3600) / 60
+		s := int(daemonUptimeSecs) % 60
+		if h > 0 {
+			info.DaemonUptime = fmt.Sprintf("%dh %dm", h, m)
+		} else if m > 0 {
+			info.DaemonUptime = fmt.Sprintf("%dm %ds", m, s)
+		} else {
+			info.DaemonUptime = fmt.Sprintf("%ds", s)
 		}
 	}
 	if info.DaemonUptime == "" {
@@ -936,6 +1002,7 @@ func getSystemInfo(pm *process.ProcessManager) *SystemInfo {
 	// Managed process count and total log disk usage
 	if pm != nil {
 		info.ManagedProcessCount = pm.Len()
+		var logSize int64
 		pm.RangeProcesses(func(name string, p *process.Process) {
 			s := p.Snapshot()
 			cfg := s.Config
@@ -944,13 +1011,15 @@ func getSystemInfo(pm *process.ProcessManager) *SystemInfo {
 					continue
 				}
 				if fi, err := os.Stat(path); err == nil {
-					info.TotalLogSize += fi.Size()
+					logSize += fi.Size()
 				}
 			}
 		})
+		info.TotalLogSize = formatBytes(logSize)
 	}
 
 	// 从 /proc/meminfo 读取内存信息
+	var memTotal, memUsed uint64
 	if meminfo, err := os.Open("/proc/meminfo"); err == nil {
 		defer meminfo.Close()
 		scanner := bufio.NewScanner(meminfo)
@@ -961,18 +1030,20 @@ func getSystemInfo(pm *process.ProcessManager) *SystemInfo {
 				if len(fields) >= 2 {
 					var total int64
 					fmt.Sscanf(fields[1], "%d", &total)
-					info.MemoryTotal = uint64(total) * 1024
+					memTotal = uint64(total) * 1024
 				}
 			} else if strings.HasPrefix(line, "MemAvailable:") {
 				fields := strings.Fields(line)
 				if len(fields) >= 2 {
 					var avail int64
 					fmt.Sscanf(fields[1], "%d", &avail)
-					info.MemoryUsed = info.MemoryTotal - uint64(avail)*1024
+					memUsed = memTotal - uint64(avail)*1024
 				}
 			}
 		}
 	}
+	info.MemoryTotal = formatBytes(int64(memTotal))
+	info.MemoryUsed = formatBytes(int64(memUsed))
 
 	// 从 /proc/uptime 读取系统运行时间
 	if uptime, err := os.Open("/proc/uptime"); err == nil {
@@ -988,8 +1059,8 @@ func getSystemInfo(pm *process.ProcessManager) *SystemInfo {
 	if err := syscall.Statfs("/", &stat); err == nil {
 		total := stat.Blocks * uint64(stat.Bsize)
 		free := stat.Bfree * uint64(stat.Bsize)
-		info.DiskTotal = total
-		info.DiskUsed = total - free
+		info.DiskTotal = formatBytes(int64(total))
+		info.DiskUsed = formatBytes(int64(total - free))
 	}
 
 	return info
@@ -1055,6 +1126,20 @@ func readTailLines(path string, maxLines int, maxBytes int64) ([]byte, error) {
 	return buf, nil
 }
 
+// formatBytes converts a byte count to a human-readable string.
+func formatBytes(bytes int64) string {
+	switch {
+	case bytes >= 1073741824:
+		return fmt.Sprintf("%.1f GB", float64(bytes)/1073741824)
+	case bytes >= 1048576:
+		return fmt.Sprintf("%.1f MB", float64(bytes)/1048576)
+	case bytes >= 1024:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
+}
+
 // countProcesses 统计系统中运行的进程数
 func countProcesses() int {
 	if dir, err := os.Open("/proc"); err == nil {
@@ -1074,682 +1159,528 @@ func countProcesses() int {
 }
 
 const indexTemplate = `<!DOCTYPE html>
-<html>
+<html lang="zh">
 <head>
-	<title>GoSupervisor</title>
-	<style>
-		body {
-			font-family: Arial, sans-serif;
-			margin: 20px;
-		}
-		h1 {
-			color: #333;
-		}
-		table {
-			width: 100%;
-			border-collapse: collapse;
-			margin-top: 20px;
-		}
-		th, td {
-			padding: 10px;
-			text-align: left;
-			border-bottom: 1px solid #ddd;
-		}
-		th {
-			background-color: #f2f2f2;
-		}
-		tr:hover {
-			background-color: #f5f5f5;
-		}
-		.status-running {
-			color: green;
-		}
-		.status-stopped {
-			color: red;
-		}
-		.status-starting {
-			color: orange;
-		}
-		.status-stopping {
-			color: orange;
-		}
-		.status-exited {
-			color: gray;
-		}
-		.status-fatal {
-			color: darkred;
-		}
-		button {
-			padding: 5px 10px;
-			margin-right: 5px;
-			border: none;
-			border-radius: 3px;
-			cursor: pointer;
-		}
-		.btn-start {
-			background-color: green;
-			color: white;
-		}
-		.btn-stop {
-			background-color: red;
-			color: white;
-		}
-		.btn-restart {
-			background-color: blue;
-			color: white;
-		}
-		.btn-logs {
-			background-color: purple;
-			color: white;
-		}
-		.btn-detail {
-			background-color: orange;
-			color: white;
-		}
-		.footer {
-			margin-top: 20px;
-			font-size: 12px;
-			color: #666;
-		}
-	</style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GoSupervisor</title>
+<style>
+:root {
+--bg: #0a0e14;
+--bg-card: #12171f;
+--bg-row: #141b24;
+--border: #1e2a38;
+--text: #c8ccd4;
+--text-dim: #6c7380;
+--accent: #39bae6;
+--green: #7fd962;
+--red: #f26d78;
+--amber: #ffb454;
+--purple: #d2a6ff;
+--orange: #ff8f40;
+--blue: #59c2ff;
+--font: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+--mono: "Fira Code","JetBrains Mono","Cascadia Code",monospace;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:var(--font);line-height:1.5;min-height:100vh}
+body::before{content:"";position:fixed;inset:0;background:
+radial-gradient(ellipse at 20% 50%,rgba(57,186,230,0.03) 0%,transparent 50%),
+radial-gradient(ellipse at 80% 20%,rgba(210,166,255,0.02) 0%,transparent 40%);
+pointer-events:none;z-index:0}
+.header{position:sticky;top:0;z-index:10;background:var(--bg-card);border-bottom:1px solid var(--border);
+-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
+.header-inner{max-width:1400px;margin:0 auto;padding:12px 24px;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:10px}
+.logo-icon{width:32px;height:32px;background:var(--accent);border-radius:8px;display:flex;align-items:center;justify-content:center;
+font-size:16px;font-weight:700;color:#0a0e14}
+.logo-text{font-size:18px;font-weight:600;letter-spacing:-0.3px}
+.nav{display:flex;gap:4px}
+.nav a{color:var(--text-dim);text-decoration:none;padding:6px 14px;border-radius:6px;font-size:14px;
+transition:all 0.15s}
+.nav a:hover,.nav a.active{color:var(--text);background:rgba(255,255,255,0.05)}
+.stats{max-width:1400px;margin:20px auto 0;padding:0 24px;display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}
+.stat-card{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:14px 16px;
+transition:border-color 0.2s}
+.stat-card:hover{border-color:rgba(255,255,255,0.1)}
+.stat-value{font-size:28px;font-weight:700;font-family:var(--mono);line-height:1}
+.stat-label{font-size:12px;color:var(--text-dim);margin-top:4px;text-transform:uppercase;letter-spacing:0.5px}
+.stat-card.running .stat-value{color:var(--green)}
+.stat-card.stopped .stat-value{color:var(--text-dim)}
+.stat-card.fatal .stat-value{color:var(--red)}
+.toolbar{max-width:1400px;margin:16px auto 0;padding:0 24px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.toolbar select,.toolbar input{background:var(--bg-card);border:1px solid var(--border);border-radius:6px;color:var(--text);
+padding:6px 12px;font-size:13px;font-family:var(--font);outline:none}
+.toolbar select:focus,.toolbar input:focus{border-color:var(--accent)}
+.toolbar input{width:140px}
+.toolbar input::placeholder{color:var(--text-dim)}
+.table-wrap{max-width:1400px;margin:12px auto 40px;padding:0 24px;overflow-x:auto}
+table{width:100%;border-collapse:separate;border-spacing:0}
+thead{background:var(--bg-card)}
+th{background:var(--bg-card);color:var(--text-dim);font-size:11px;font-weight:600;text-transform:uppercase;
+letter-spacing:0.8px;padding:10px 14px;text-align:left;border-bottom:2px solid var(--border);
+white-space:nowrap}
+td{padding:10px 14px;font-size:13px;border-bottom:1px solid var(--border);white-space:nowrap}
+tbody tr{background:var(--bg-row);transition:background 0.1s}
+tbody tr:hover{background:rgba(57,186,230,0.04)}
+.status{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:20px;
+font-size:11px;font-weight:600;letter-spacing:0.3px}
+.status::before{content:"";width:6px;height:6px;border-radius:50%}
+.status-RUNNING{background:rgba(127,217,98,0.1);color:var(--green)}
+.status-RUNNING::before{background:var(--green);animation:pulse 2s ease-in-out infinite}
+.status-STOPPED{background:rgba(108,115,128,0.1);color:var(--text-dim)}
+.status-STOPPED::before{background:var(--text-dim)}
+.status-STARTING{background:rgba(255,180,84,0.1);color:var(--amber)}
+.status-STARTING::before{background:var(--amber);animation:pulse 0.8s ease-in-out infinite}
+.status-STOPPING{background:rgba(255,143,64,0.1);color:var(--orange)}
+.status-STOPPING::before{background:var(--orange);animation:pulse 0.8s ease-in-out infinite}
+.status-EXITED{background:rgba(108,115,128,0.06);color:var(--text-dim)}
+.status-EXITED::before{background:var(--text-dim)}
+.status-FATAL{background:rgba(242,109,120,0.12);color:var(--red)}
+.status-FATAL::before{background:var(--red)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+.btn{display:inline-flex;align-items:center;gap:4px;padding:5px 10px;margin-right:6px;border:none;border-radius:5px;
+font-size:11px;font-weight:600;cursor:pointer;transition:all 0.12s;font-family:var(--font);
+letter-spacing:0.2px}
+.btn:hover{transform:translateY(-1px);filter:brightness(1.15)}
+.btn:active{transform:translateY(0)}
+.btn-start{background:rgba(127,217,98,0.15);color:var(--green)}
+.btn-start:hover{background:rgba(127,217,98,0.25)}
+.btn-stop{background:rgba(242,109,120,0.15);color:var(--red)}
+.btn-stop:hover{background:rgba(242,109,120,0.25)}
+.btn-restart{background:rgba(89,194,255,0.15);color:var(--blue)}
+.btn-restart:hover{background:rgba(89,194,255,0.25)}
+.btn-logs{background:rgba(210,166,255,0.15);color:var(--purple)}
+.btn-logs:hover{background:rgba(210,166,255,0.25)}
+.btn-detail{background:rgba(255,143,64,0.12);color:var(--orange)}
+.btn-detail:hover{background:rgba(255,143,64,0.22)}
+.cell-pid{font-family:var(--mono);font-size:12px;color:var(--accent)}
+.cell-time{font-size:12px;color:var(--text-dim)}
+.cell-ec{font-family:var(--mono);font-size:12px}
+.footer{max-width:1400px;margin:0 auto;padding:16px 24px 32px;display:flex;justify-content:space-between;
+font-size:11px;color:var(--text-dim);border-top:1px solid var(--border)}
+.live-dot{display:inline-block;width:5px;height:5px;background:var(--green);border-radius:50%;
+margin-right:4px;animation:pulse 1.5s ease-in-out infinite}
+.empty-state{text-align:center;padding:60px 20px;color:var(--text-dim)}
+.empty-state p{font-size:14px}
+</style>
 </head>
 <body>
-	<h1>GoSupervisor 进程管理</h1>
-		<div style="margin-bottom:10px">
-			<label>状态过滤: <select id="filter-state" onchange="applyFilters()"><option value="">全部</option><option value="RUNNING">RUNNING</option><option value="STOPPED">STOPPED</option><option value="STARTING">STARTING</option><option value="STOPPING">STOPPING</option><option value="EXITED">EXITED</option><option value="FATAL">FATAL</option></select></label>
-			<label style="margin-left:10px">组过滤: <input type="text" id="filter-group" placeholder="进程组名称" style="width:120px" oninput="applyFilters()"></label>
-		</div>
-	<table>
-		<tr>
-			<th>进程名称</th>
-			<th>状态</th>
-			<th>PID</th>
-			<th>运行时间</th>
-			<th>启动时间</th>
-			<th>停止时间</th>
-			<th>退出码</th>
-			<th>启动重试次数</th>
-			<th>操作</th>
-		</tr>
-		<tbody id="process-table-body">
-		{{range .Processes}}
-		<tr>
-			<td>{{.Name}}</td>
-			<td class="status-{{lower .State}}">{{.State}}</td>
-			<td>{{if gt .PID 0}}{{.PID}}{{else}}-{{end}}</td>
-			<td>{{if not .StartTime.IsZero}}{{.StartTime.Format "2006-01-02 15:04:05"}}{{else}}-{{end}}</td>
-			<td>{{if not .StopTime.IsZero}}{{.StopTime.Format "2006-01-02 15:04:05"}}{{else}}-{{end}}</td>
-			<td>{{if ne .ExitCode 0}}{{.ExitCode}}{{else}}-{{end}}</td>
-			<td>{{.StartRetries}}</td>
-			<td>
-				{{if ne .State "RUNNING"}}
-				<form method="post" action="/start" style="display:inline">
-					<input type="hidden" name="name" value="{{.Name}}">
-					<button class="btn-start" type="submit">启动</button>
-				</form>
-				{{end}}
-				{{if eq .State "RUNNING"}}
-				<form method="post" action="/stop" style="display:inline">
-					<input type="hidden" name="name" value="{{.Name}}">
-					<button class="btn-stop" type="submit">停止</button>
-				</form>
-				{{end}}
-				<form method="post" action="/restart" style="display:inline">
-					<input type="hidden" name="name" value="{{.Name}}">
-					<button class="btn-restart" type="submit">重启</button>
-				</form>
-				<form method="get" action="/logs" style="display:inline">
-					<input type="hidden" name="name" value="{{.Name}}">
-					<button class="btn-logs" type="submit">查看日志</button>
-				</form>
-				<form method="get" action="/process" style="display:inline">
-					<input type="hidden" name="name" value="{{.Name}}">
-					<button class="btn-detail" type="submit">详情</button>
-				</form>
-			</td>
-		</tr>
-		{{end}}
-		</tbody>
-	</table>
-	<div class="footer">
-		<p>最后更新: <span id="last-updated">{{.Time}}</span></p>
-		<p>GoSupervisor - 进程管理工具</p>
-	</div>
-		<script>
-		function esc(s) {
-			return s.replace(/&/g,'&amp;').replace(/</g,'&lt;')
-			        .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-		}
-		function fmtTime(ts) {
-			if (!ts) return '-';
-			var d = new Date(ts);
-			if (d.getFullYear() <= 1) return '-';
-			return d.getFullYear() + '-' +
-				String(d.getMonth()+1).padStart(2,'0') + '-' +
-				String(d.getDate()).padStart(2,'0') + ' ' +
-				String(d.getHours()).padStart(2,'0') + ':' +
-				String(d.getMinutes()).padStart(2,'0') + ':' +
-				String(d.getSeconds()).padStart(2,'0');
-		}
-		function fmtUptime(ts, state) {
-			if (!ts || state !== 'RUNNING') return '-';
-			var d = new Date(ts);
-			if (d.getFullYear() <= 1) return '-';
-			var diff = Math.floor((Date.now() - d.getTime()) / 1000);
-			if (diff < 0) return '-';
-			var h = Math.floor(diff / 3600);
-			var m = Math.floor((diff % 3600) / 60);
-			var s = diff % 60;
-			if (h > 0) return h + 'h ' + m + 'm';
-			if (m > 0) return m + 'm ' + s + 's';
-			return s + 's';
-		}
-		function applyFilters() {
-			var state = document.getElementById('filter-state').value;
-			var group = document.getElementById('filter-group').value.toLowerCase();
-			var rows = document.querySelectorAll('#process-table-body tr');
-			for (var i = 0; i < rows.length; i++) {
-				var row = rows[i];
-				var stateCell = (row.cells[1] && row.cells[1].textContent || '').trim();
-				var nameCell = (row.cells[0] && row.cells[0].textContent || '').trim();
-				var show = true;
-				if (state && stateCell.toUpperCase() !== state.toUpperCase()) show = false;
-				if (group && nameCell.toLowerCase().indexOf(group) === -1) show = false;
-				row.style.display = show ? '' : 'none';
-			}
-		}
-		function updateTable() {
-			fetch('/api/processes')
-				.then(function(r) { return r.json(); })
-				.then(function(procs) {
-					var h = '';
-					for (var i = 0; i < procs.length; i++) {
-						var p = procs[i];
-						var st  = (p.State || '').toLowerCase();
-						var pid = p.PID > 0 ? String(p.PID) : '-';
-						var start = fmtTime(p.StartTime);
-						var stop  = fmtTime(p.StopTime);
-						var uptime = fmtUptime(p.StartTime, p.State);
-						var ec    = p.ExitCode !== 0 ? p.ExitCode : '-';
+<div class="header">
+<div class="header-inner">
+<div class="logo">
+<div class="logo-icon">GS</div>
+<span class="logo-text">GoSupervisor</span>
+</div>
+<nav class="nav">
+<a href="/" class="active">进程</a>
+<a href="/system">系统</a>
+</nav>
+</div>
+</div>
 
-						h += '<tr>' +
-							'<td>' + esc(p.Name) + '</td>' +
-							'<td class="status-' + st + '">' + esc(p.State) + '</td>' +
-							'<td>' + pid + '</td>' +
-							'<td>' + uptime + '</td>' +
-							'<td>' + start + '</td>' +
-							'<td>' + stop + '</td>' +
-							'<td>' + ec + '</td>' +
-							'<td>' + p.StartRetries + '</td>' +
-							'<td>';
+<div class="stats" id="stats">
+<div class="stat-card"><div class="stat-value" id="stat-total">-</div><div class="stat-label">总数</div></div>
+<div class="stat-card running"><div class="stat-value" id="stat-running">-</div><div class="stat-label">运行中</div></div>
+<div class="stat-card stopped"><div class="stat-value" id="stat-stopped">-</div><div class="stat-label">已停止</div></div>
+<div class="stat-card fatal"><div class="stat-value" id="stat-fatal">-</div><div class="stat-label">Fatal</div></div>
+</div>
 
-						var nm = esc(p.Name);
-						if (p.State !== 'RUNNING') {
-							h += '<form method="post" action="/start" style="display:inline">' +
-								'<input type="hidden" name="name" value="' + nm + '">' +
-								'<button class="btn-start" type="submit">启动</button></form>';
-						}
-						if (p.State === 'RUNNING') {
-							h += '<form method="post" action="/stop" style="display:inline">' +
-								'<input type="hidden" name="name" value="' + nm + '">' +
-								'<button class="btn-stop" type="submit">停止</button></form>';
-						}
-						h += '<form method="post" action="/restart" style="display:inline">' +
-							'<input type="hidden" name="name" value="' + nm + '">' +
-							'<button class="btn-restart" type="submit">重启</button></form>' +
-							'<form method="get" action="/logs" style="display:inline">' +
-							'<input type="hidden" name="name" value="' + nm + '">' +
-							'<button class="btn-logs" type="submit">查看日志</button></form>' +
-							'<form method="get" action="/process" style="display:inline">' +
-							'<input type="hidden" name="name" value="' + nm + '">' +
-							'<button class="btn-detail" type="submit">详情</button></form>';
+<div class="toolbar">
+<select id="filter-state" onchange="render()">
+<option value="">全部状态</option>
+<option value="RUNNING">RUNNING</option>
+<option value="STOPPED">STOPPED</option>
+<option value="STARTING">STARTING</option>
+<option value="STOPPING">STOPPING</option>
+<option value="EXITED">EXITED</option>
+<option value="FATAL">FATAL</option>
+</select>
+<input type="text" id="filter-name" placeholder="搜索进程…" oninput="render()">
+</div>
 
-						h += '</td></tr>';
-					}
-					document.getElementById('process-table-body').innerHTML = h;
-					document.getElementById('last-updated').textContent =
-						fmtTime(new Date().toISOString());
-				})
-				.catch(function(e) {
-					console.error('process update failed:', e);
-				});
-		}
-		updateTable();
-		setInterval(updateTable, 2000);
-	</script>
+<div class="table-wrap">
+<table>
+<thead><tr>
+<th>名称</th><th>状态</th><th>PID</th><th>运行时间</th><th>启动时间</th><th>停止时间</th><th>退出码</th><th>重启</th><th>操作</th>
+</tr></thead>
+<tbody id="tbody"></tbody>
+</table>
+<div id="empty" class="empty-state" style="display:none"><p>没有匹配的进程</p></div>
+</div>
+
+<div class="footer">
+<span><span class="live-dot"></span>实时更新中</span>
+<span id="last-updated">{{.Time}}</span>
+</div>
+
+<script>
+(function(){
+var processes = {{.ProcessesJSON}};
+var tbody = document.getElementById('tbody');
+var empty = document.getElementById('empty');
+
+function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
+function fmt(ts){if(!ts)return'-';var d=new Date(ts);if(d.getFullYear()<=1)return'-';
+return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')+' '
++String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')+':'+String(d.getSeconds()).padStart(2,'0')}
+function uptime(ts,st){if(!ts||st!=='RUNNING')return'-';var d=new Date(ts);
+if(d.getFullYear()<=1)return'-';var diff=Math.floor((Date.now()-d.getTime())/1000);
+if(diff<0)return'-';var h=Math.floor(diff/3600),m=Math.floor((diff%3600)/60),s=diff%60;
+return h>0?h+'h '+m+'m':m>0?m+'m '+s+'s':s+'s'}
+
+function rowHTML(p){
+var nm=esc(p.Name),st=(p.State||'').toUpperCase(),ls=st.toLowerCase();
+var pid=p.PID>0?'<span class="cell-pid">'+p.PID+'</span>':'-';
+var up=uptime(p.StartTime,p.State);
+var start=fmt(p.StartTime),stop=fmt(p.StopTime);
+var ec=p.ExitCode!==0?p.ExitCode:'-';
+var sc='<span class="status status-'+ls+'">'+esc(st)+'</span>';
+var btns='';
+if(p.State!=='RUNNING')btns+='<form method="post" action="/start" style="display:inline"><input type="hidden" name="name" value="'+nm+'"><button class="btn btn-start">启动</button></form>';
+if(p.State==='RUNNING')btns+='<form method="post" action="/stop" style="display:inline"><input type="hidden" name="name" value="'+nm+'"><button class="btn btn-stop">停止</button></form>';
+btns+='<form method="post" action="/restart" style="display:inline"><input type="hidden" name="name" value="'+nm+'"><button class="btn btn-restart">重启</button></form>';
+btns+='<form method="get" action="/logs" style="display:inline"><input type="hidden" name="name" value="'+nm+'"><button class="btn btn-logs">日志</button></form>';
+btns+='<form method="get" action="/process" style="display:inline"><input type="hidden" name="name" value="'+nm+'"><button class="btn btn-detail">详情</button></form>';
+return '<tr><td>'+nm+'</td><td>'+sc+'</td><td>'+pid+'</td><td class="cell-time">'+up+'</td><td class="cell-time">'+start+'</td><td class="cell-time">'+stop+'</td><td class="cell-ec">'+ec+'</td><td>'+p.StartRetries+'</td><td>'+btns+'</td></tr>'
+}
+
+function updateStats(arr){
+var r=0,s=0,f=0;
+for(var i=0;i<arr.length;i++){
+if(arr[i].State==='RUNNING')r++;else if(arr[i].State==='STOPPED')s++;else if(arr[i].State==='FATAL')f++
+}
+document.getElementById('stat-total').textContent=arr.length;
+document.getElementById('stat-running').textContent=r;
+document.getElementById('stat-stopped').textContent=s;
+document.getElementById('stat-fatal').textContent=f
+}
+
+function render(){
+var state=document.getElementById('filter-state').value;
+var name=document.getElementById('filter-name').value.toLowerCase();
+var h='';var count=0;
+for(var i=0;i<processes.length;i++){
+var p=processes[i];
+if(state&&p.State!==state)continue;
+if(name&&p.Name.toLowerCase().indexOf(name)===-1)continue;
+h+=rowHTML(p);count++
+}
+tbody.innerHTML=h;
+empty.style.display=count===0?'block':'none';
+updateStats(processes)
+}
+
+render();
+
+// Live updates via SSE
+var es=new EventSource('/api/v1/events/stream');
+es.onmessage=function(e){
+try{
+var ev=JSON.parse(e.data);
+var found=false;
+for(var i=0;i<processes.length;i++){
+if(processes[i].Name===ev.name){
+processes[i].State=ev.type==='start'?'RUNNING':ev.type==='stop'?'STOPPED':ev.type==='exit'?'EXITED':ev.type==='fatal'?'FATAL':processes[i].State;
+if(ev.pid>0)processes[i].PID=ev.pid;
+if(ev.exitCode)processes[i].ExitCode=ev.exitCode;
+found=true;break
+}
+}
+if(!found){
+// New process, reload full list
+fetch('/api/processes').then(function(r){return r.json()}).then(function(arr){
+processes=arr;render()
+}).catch(function(){})
+}else{render()}
+document.getElementById('last-updated').textContent=fmt(new Date().toISOString())
+}catch(_){}
+};
+es.onerror=function(){setTimeout(function(){es.close();es=new EventSource('/api/v1/events/stream')},3000)};
+// Keep the footer clock ticking even without SSE events
+setInterval(function(){document.getElementById('last-updated').textContent=fmt(new Date().toISOString())},1000);
+})();
+</script>
 </body>
 </html>`
 
 const logsTemplate = `<!DOCTYPE html>
-<html>
+<html lang="zh">
 <head>
-	<title>GoSupervisor - 进程日志</title>
-	<style>
-		body {
-			font-family: Arial, sans-serif;
-			margin: 20px;
-		}
-		h1 {
-			color: #333;
-		}
-		.log-container {
-			background-color: #f5f5f5;
-			padding: 20px;
-			border-radius: 5px;
-			margin-top: 20px;
-			max-height: 600px;
-			overflow-y: auto;
-			font-family: monospace;
-			white-space: pre-wrap;
-		}
-		.back-button {
-			margin-top: 20px;
-			padding: 10px 20px;
-			background-color: #333;
-			color: white;
-			border: none;
-			border-radius: 3px;
-			cursor: pointer;
-		}
-		.back-button:hover {
-			background-color: #555;
-		}
-		.footer {
-			margin-top: 20px;
-			font-size: 12px;
-			color: #666;
-		}
-	</style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{.ProcessName}} — GoSupervisor</title>
+<style>
+:root{--bg:#0a0e14;--bg-card:#12171f;--border:#1e2a38;--text:#c8ccd4;--text-dim:#6c7380;--accent:#39bae6;--green:#7fd962;--red:#f26d78;--font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;--mono:"Fira Code","JetBrains Mono","Cascadia Code",monospace}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:var(--font);line-height:1.5;min-height:100vh}
+.header{background:var(--bg-card);border-bottom:1px solid var(--border);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
+.header-inner{max-width:1400px;margin:0 auto;padding:12px 24px;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:10px}
+.logo-icon{width:32px;height:32px;background:var(--accent);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:#0a0e14}
+.logo-text{font-size:18px;font-weight:600;letter-spacing:-0.3px}
+.back{color:var(--text-dim);text-decoration:none;padding:6px 14px;border-radius:6px;font-size:14px;transition:all 0.15s}
+.back:hover{color:var(--text);background:rgba(255,255,255,0.05)}
+main{max-width:1400px;margin:0 auto;padding:24px}
+.proc-name{display:flex;align-items:center;gap:10px;margin-bottom:20px}
+.proc-name h2{font-size:20px;font-weight:600}
+.proc-name .tag{font-size:11px;padding:3px 10px;border-radius:20px;background:rgba(57,186,230,0.15);color:var(--accent);font-weight:600;letter-spacing:0.3px}
+.terminal{background:#0d1117;border:1px solid var(--border);border-radius:12px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.3)}
+.terminal-bar{background:var(--bg-card);padding:8px 16px;display:flex;align-items:center;border-bottom:1px solid var(--border)}
+.terminal-title{font-size:11px;color:var(--text-dim);font-family:var(--mono)}
+.terminal-body{padding:20px;font-family:var(--mono);font-size:13px;line-height:1.7;white-space:pre-wrap;word-break:break-all;
+color:#9ed072;max-height:70vh;overflow-y:auto}
+.terminal-body::-webkit-scrollbar{width:6px}
+.terminal-body::-webkit-scrollbar-track{background:transparent}
+.terminal-body::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+.empty-log{color:var(--text-dim);text-align:center;padding:40px;font-style:italic}
+</style>
 </head>
 <body>
-	<h1>GoSupervisor - 进程日志</h1>
-	<h2>进程: {{.ProcessName}}</h2>
-	<div class="log-container">
-		{{.LogContent}}
-	</div>
-	<button class="back-button" onclick="window.location.href='/'">返回首页</button>
-	<div class="footer">
-		<p>GoSupervisor - 进程管理工具</p>
-	</div>
-	<script>
-		// 自动滚动到日志底部
-		window.onload = function() {
-			var logContainer = document.querySelector('.log-container');
-			logContainer.scrollTop = logContainer.scrollHeight;
-		};
-	</script>
+<div class="header"><div class="header-inner">
+<div class="logo"><div class="logo-icon">GS</div><span class="logo-text">GoSupervisor</span></div>
+<a href="/" class="back">&larr; 返回</a>
+</div></div>
+<main>
+<div class="proc-name"><h2>{{.ProcessName}}</h2><span class="tag">LOG</span></div>
+<div class="terminal">
+<div class="terminal-bar"><span class="terminal-title">{{.ProcessName}}.log</span></div>
+<div class="terminal-body">{{if .LogContent}}{{.LogContent}}{{else}}<div class="empty-log">暂无日志</div>{{end}}</div>
+</div>
+</main>
+<script>
+(function(){var b=document.querySelector('.terminal-body');b.scrollTop=b.scrollHeight})();
+var procName="{{.ProcessName}}",count=0;
+setInterval(function(){
+fetch('/api/v1/processes/'+encodeURIComponent(procName)+'/logs/tail?lines=200')
+.then(function(r){return r.json()}).then(function(d){
+var b=document.querySelector('.terminal-body');
+if(d.content&&d.content!==b.textContent){b.textContent=d.content;b.scrollTop=b.scrollHeight}
+}).catch(function(){});
+},2000);
+</script>
 </body>
 </html>`
 
 const systemInfoTemplate = `<!DOCTYPE html>
-<html>
+<html lang="zh">
 <head>
-	<title>GoSupervisor - 系统信息</title>
-	<style>
-		body {
-			font-family: Arial, sans-serif;
-			margin: 20px;
-		}
-		h1 {
-			color: #333;
-		}
-		.info-container {
-			background-color: #f5f5f5;
-			padding: 20px;
-			border-radius: 5px;
-			margin-top: 20px;
-		}
-		.info-item {
-			margin-bottom: 10px;
-			padding: 10px;
-			background-color: white;
-			border-radius: 3px;
-			box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-		}
-		.info-label {
-			font-weight: bold;
-			color: #555;
-			margin-right: 10px;
-		}
-		.back-button {
-			margin-top: 20px;
-			padding: 10px 20px;
-			background-color: #333;
-			color: white;
-			border: none;
-			border-radius: 3px;
-			cursor: pointer;
-		}
-		.back-button:hover {
-			background-color: #555;
-		}
-		.footer {
-			margin-top: 20px;
-			font-size: 12px;
-			color: #666;
-		}
-		.navbar {
-			background-color: #333;
-			color: white;
-			padding: 10px;
-			border-radius: 5px;
-			margin-bottom: 20px;
-		}
-		.navbar a {
-			color: white;
-			text-decoration: none;
-			margin-right: 20px;
-		}
-		.navbar a:hover {
-			text-decoration: underline;
-		}
-	</style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>系统信息 — GoSupervisor</title>
+<style>
+:root{--bg:#0a0e14;--bg-card:#12171f;--border:#1e2a38;--text:#c8ccd4;--text-dim:#6c7380;--accent:#39bae6;--green:#7fd962;--red:#f26d78;--purple:#d2a6ff;--amber:#ffb454;--font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;--mono:"Fira Code","JetBrains Mono","Cascadia Code",monospace}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:var(--font);line-height:1.5;min-height:100vh}
+body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellipse at 20% 50%,rgba(57,186,230,0.03) 0%,transparent 50%),radial-gradient(ellipse at 80% 20%,rgba(210,166,255,0.02) 0%,transparent 40%);pointer-events:none;z-index:0}
+.header{position:sticky;top:0;z-index:10;background:var(--bg-card);border-bottom:1px solid var(--border);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
+.header-inner{max-width:1200px;margin:0 auto;padding:12px 24px;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:10px}
+.logo-icon{width:32px;height:32px;background:var(--accent);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:#0a0e14}
+.logo-text{font-size:18px;font-weight:600;letter-spacing:-0.3px}
+.nav{display:flex;gap:4px}
+.nav a{color:var(--text-dim);text-decoration:none;padding:6px 14px;border-radius:6px;font-size:14px;transition:all 0.15s}
+.nav a:hover,.nav a.active{color:var(--text);background:rgba(255,255,255,0.05)}
+main{max-width:1200px;margin:0 auto;padding:24px;position:relative;z-index:1}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:16px 20px;transition:border-color 0.2s}
+.card:hover{border-color:rgba(255,255,255,0.1)}
+.card-label{font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:6px;font-weight:600}
+.card-value{font-size:17px;font-weight:500;font-family:var(--mono);word-break:break-all}
+.card-value.big{font-size:24px;font-weight:700}
+.section-title{font-size:13px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;margin:32px 0 16px;font-weight:600}
+.section-title:first-child{margin-top:0}
+.accent{color:var(--accent)}.green{color:var(--green)}.red{color:var(--red)}.purple{color:var(--purple)}.amber{color:var(--amber)}
+</style>
 </head>
 <body>
-	<div class="navbar">
-		<a href="/">进程管理</a>
-		<a href="/system">系统信息</a>
-	</div>
-	<h1>GoSupervisor - 系统信息</h1>
-	<div class="info-container">
-		<div class="info-item">
-			<span class="info-label">操作系统:</span>
-			<span>{{.OS}} {{.Arch}}</span>
-		</div>
-		<div class="info-item">
-			<span class="info-label">主机名:</span>
-			<span>{{.Hostname}}</span>
-		</div>
-		<div class="info-item">
-			<span class="info-label">CPU核心数:</span>
-			<span>{{.CPUCount}}</span>
-		</div>
-		<div class="info-item">
-			<span class="info-label">内存总量:</span>
-			<span>{{.MemoryTotal}} bytes</span>
-		</div>
-		<div class="info-item">
-			<span class="info-label">内存使用:</span>
-			<span>{{.MemoryUsed}} bytes</span>
-		</div>
-		<div class="info-item">
-			<span class="info-label">磁盘总量:</span>
-			<span>{{.DiskTotal}} bytes</span>
-		</div>
-		<div class="info-item">
-			<span class="info-label">磁盘使用:</span>
-			<span>{{.DiskUsed}} bytes</span>
-		</div>
-		<div class="info-item">
-			<span class="info-label">系统运行时间:</span>
-			<span>{{.Uptime}}</span>
-		</div>
-		<div class="info-item">
-			<span class="info-label">Go版本:</span>
-			<span>{{.GoVersion}}</span>
-		</div>
-		<div class="info-item">
-			<span class="info-label">系统进程总数:</span>
-			<span>{{.ProcessCount}}</span>
-		</div>
-			<div class="info-item">
-				<span class="info-label">Supervisor版本:</span>
-				<span>{{.Version}}</span>
-			</div>
-			<div class="info-item">
-				<span class="info-label">Supervisor PID:</span>
-				<span>{{.DaemonPID}}</span>
-			</div>
-			<div class="info-item">
-				<span class="info-label">Supervisor运行时间:</span>
-				<span>{{.DaemonUptime}}</span>
-			</div>
-			<div class="info-item">
-				<span class="info-label">托管进程数:</span>
-				<span>{{.ManagedProcessCount}}</span>
-			</div>
-			<div class="info-item">
-				<span class="info-label">日志磁盘使用:</span>
-				<span>{{.TotalLogSize}} bytes</span>
-			</div>
-	</div>
-	<button class="back-button" onclick="window.location.href='/'">返回首页</button>
-	<div class="footer">
-		<p>GoSupervisor - 进程管理工具</p>
-	</div>
+<div class="header"><div class="header-inner">
+<div class="logo"><div class="logo-icon">GS</div><span class="logo-text">GoSupervisor</span></div>
+<nav class="nav"><a href="/">进程</a><a href="/system" class="active">系统</a></nav>
+</div></div>
+<main>
+<div class="section-title">系统</div>
+<div class="grid">
+<div class="card"><div class="card-label">操作系统</div><div class="card-value">{{.OS}} {{.Arch}}</div></div>
+<div class="card"><div class="card-label">主机名</div><div class="card-value">{{.Hostname}}</div></div>
+<div class="card"><div class="card-label">CPU 核心数</div><div class="card-value big">{{.CPUCount}}</div></div>
+<div class="card"><div class="card-label">内存总量</div><div class="card-value" id="mem-total">{{.MemoryTotal}}</div></div>
+<div class="card"><div class="card-label">内存已用</div><div class="card-value" id="mem-used">{{.MemoryUsed}}</div></div>
+<div class="card"><div class="card-label">磁盘总量</div><div class="card-value" id="disk-total">{{.DiskTotal}}</div></div>
+<div class="card"><div class="card-label">磁盘已用</div><div class="card-value" id="disk-used">{{.DiskUsed}}</div></div>
+<div class="card"><div class="card-label">系统运行时间</div><div class="card-value" id="sys-uptime">{{.Uptime}}</div></div>
+<div class="card"><div class="card-label">Go 版本</div><div class="card-value">{{.GoVersion}}</div></div>
+<div class="card"><div class="card-label">系统进程总数</div><div class="card-value big" id="proc-count">{{.ProcessCount}}</div></div>
+</div>
+<div class="section-title">Supervisor</div>
+<div class="grid">
+<div class="card"><div class="card-label">版本</div><div class="card-value">{{.Version}}</div></div>
+<div class="card"><div class="card-label">PID</div><div class="card-value accent">{{.DaemonPID}}</div></div>
+<div class="card"><div class="card-label">运行时间</div><div class="card-value" id="daemon-uptime">{{.DaemonUptime}}</div></div>
+<div class="card"><div class="card-label">托管进程数</div><div class="card-value big green" id="managed-count">{{.ManagedProcessCount}}</div></div>
+<div class="card"><div class="card-label">日志磁盘用量</div><div class="card-value" id="log-size">{{.TotalLogSize}}</div></div>
+</div>
+<div style="text-align:center;margin-top:24px;font-size:11px;color:var(--text-dim)">Auto-refresh: <span id="tick" style="color:var(--green)">0s</span> ago</div>
+</main>
+<script>
+(function(){
+var lastUpdate=Date.now();
+function refresh(){
+fetch('/api/v1/system').then(function(r){return r.json()}).then(function(d){
+var s=d.system;
+document.getElementById('mem-total').textContent=s.MemoryTotal||'-';
+document.getElementById('mem-used').textContent=s.MemoryUsed||'-';
+document.getElementById('disk-total').textContent=s.DiskTotal||'-';
+document.getElementById('disk-used').textContent=s.DiskUsed||'-';
+document.getElementById('sys-uptime').textContent=s.Uptime||'-';
+document.getElementById('proc-count').textContent=s.ProcessCount||'-';
+document.getElementById('daemon-uptime').textContent=s.DaemonUptime||'-';
+document.getElementById('managed-count').textContent=s.ManagedProcessCount||'-';
+document.getElementById('log-size').textContent=s.TotalLogSize||'-';
+lastUpdate=Date.now();
+}).catch(function(e){
+document.getElementById('tick').textContent='error';
+document.getElementById('tick').style.color='red';
+});
+}
+refresh();setInterval(refresh,1000);
+setInterval(function(){
+document.getElementById('tick').textContent=Math.floor((Date.now()-lastUpdate)/1000)+'s';
+},200);
+})();
+</script>
 </body>
 </html>`
 
 const processDetailTemplate = `<!DOCTYPE html>
-<html>
+<html lang="zh">
 <head>
-	<title>GoSupervisor - 进程详情</title>
-	<style>
-		body {
-			font-family: Arial, sans-serif;
-			margin: 20px;
-		}
-		h1 {
-			color: #333;
-		}
-		.detail-container {
-			background-color: #f5f5f5;
-			padding: 20px;
-			border-radius: 5px;
-			margin-top: 20px;
-		}
-		.detail-item {
-			margin-bottom: 10px;
-			padding: 10px;
-			background-color: white;
-			border-radius: 3px;
-			box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-		}
-		.detail-label {
-			font-weight: bold;
-			color: #555;
-			margin-right: 10px;
-		}
-		.status-running {
-			color: green;
-		}
-		.status-stopped {
-			color: red;
-		}
-		.status-starting {
-			color: orange;
-		}
-		.status-stopping {
-			color: orange;
-		}
-		.status-exited {
-			color: gray;
-		}
-		.status-fatal {
-			color: darkred;
-		}
-		.btn-group {
-			margin-top: 20px;
-		}
-		.btn {
-			padding: 10px 20px;
-			margin-right: 10px;
-			border: none;
-			border-radius: 3px;
-			cursor: pointer;
-		}
-		.btn-start {
-			background-color: green;
-			color: white;
-		}
-		.btn-stop {
-			background-color: red;
-			color: white;
-		}
-		.btn-restart {
-			background-color: blue;
-			color: white;
-		}
-		.btn-logs {
-			background-color: purple;
-			color: white;
-		}
-		.back-button {
-			margin-top: 20px;
-			padding: 10px 20px;
-			background-color: #333;
-			color: white;
-			border: none;
-			border-radius: 3px;
-			cursor: pointer;
-		}
-		.back-button:hover {
-			background-color: #555;
-		}
-		.footer {
-			margin-top: 20px;
-			font-size: 12px;
-			color: #666;
-		}
-		.navbar {
-			background-color: #333;
-			color: white;
-			padding: 10px;
-			border-radius: 5px;
-			margin-bottom: 20px;
-		}
-		.navbar a {
-			color: white;
-			text-decoration: none;
-			margin-right: 20px;
-		}
-		.navbar a:hover {
-			text-decoration: underline;
-		}
-	</style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{.Name}} — GoSupervisor</title>
+<style>
+:root{--bg:#0a0e14;--bg-card:#12171f;--border:#1e2a38;--text:#c8ccd4;--text-dim:#6c7380;--accent:#39bae6;--green:#7fd962;--red:#f26d78;--amber:#ffb454;--purple:#d2a6ff;--orange:#ff8f40;--blue:#59c2ff;--font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;--mono:"Fira Code","JetBrains Mono","Cascadia Code",monospace}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:var(--font);line-height:1.5;min-height:100vh}
+body::before{content:"";position:fixed;inset:0;background:radial-gradient(ellipse at 20% 50%,rgba(57,186,230,0.03) 0%,transparent 50%),radial-gradient(ellipse at 80% 20%,rgba(210,166,255,0.02) 0%,transparent 40%);pointer-events:none;z-index:0}
+.header{position:sticky;top:0;z-index:10;background:var(--bg-card);border-bottom:1px solid var(--border);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
+.header-inner{max-width:1200px;margin:0 auto;padding:12px 24px;display:flex;align-items:center;justify-content:space-between}
+.logo{display:flex;align-items:center;gap:10px}
+.logo-icon{width:32px;height:32px;background:var(--accent);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700;color:#0a0e14}
+.logo-text{font-size:18px;font-weight:600;letter-spacing:-0.3px}
+.back{color:var(--text-dim);text-decoration:none;padding:6px 14px;border-radius:6px;font-size:14px;transition:all 0.15s}
+.back:hover{color:var(--text);background:rgba(255,255,255,0.05)}
+main{max-width:1200px;margin:0 auto;padding:24px;position:relative;z-index:1}
+.hero{display:flex;align-items:center;gap:14px;margin-bottom:24px;flex-wrap:wrap}
+.hero h2{font-size:22px;font-weight:600}
+.status{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600;letter-spacing:0.3px}
+.status::before{content:"";width:7px;height:7px;border-radius:50%}
+.status-RUNNING{background:rgba(127,217,98,0.12);color:var(--green)}.status-RUNNING::before{background:var(--green);animation:pulse 2s infinite}
+.status-STOPPED{background:rgba(108,115,128,0.1);color:var(--text-dim)}.status-STOPPED::before{background:var(--text-dim)}
+.status-STARTING{background:rgba(255,180,84,0.1);color:var(--amber)}.status-STARTING::before{background:var(--amber);animation:pulse 0.8s infinite}
+.status-STOPPING{background:rgba(255,143,64,0.1);color:var(--orange)}.status-STOPPING::before{background:var(--orange);animation:pulse 0.8s infinite}
+.status-EXITED{background:rgba(108,115,128,0.06);color:var(--text-dim)}.status-EXITED::before{background:var(--text-dim)}
+.status-FATAL{background:rgba(242,109,120,0.12);color:var(--red)}.status-FATAL::before{background:var(--red)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:14px 18px;transition:border-color 0.2s}
+.card:hover{border-color:rgba(255,255,255,0.1)}
+.card-label{font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.8px;margin-bottom:4px;font-weight:600}
+.card-value{font-size:15px;font-family:var(--mono);word-break:break-all}
+.card-value.big{font-size:20px;font-weight:700}
+.actions{display:flex;gap:10px;margin-top:24px;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;gap:4px;padding:8px 18px;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;transition:all 0.12s;font-family:var(--font);letter-spacing:0.2px;text-decoration:none}
+.btn:hover{transform:translateY(-1px);filter:brightness(1.15)}
+.btn:active{transform:translateY(0)}
+.btn-start{background:rgba(127,217,98,0.15);color:var(--green)}
+.btn-start:hover{background:rgba(127,217,98,0.25)}
+.btn-stop{background:rgba(242,109,120,0.15);color:var(--red)}
+.btn-stop:hover{background:rgba(242,109,120,0.25)}
+.btn-restart{background:rgba(89,194,255,0.15);color:var(--blue)}
+.btn-restart:hover{background:rgba(89,194,255,0.25)}
+.btn-logs{background:rgba(210,166,255,0.15);color:var(--purple)}
+.btn-logs:hover{background:rgba(210,166,255,0.25)}
+.accent{color:var(--accent)}.green{color:var(--green)}.red{color:var(--red)}
+</style>
 </head>
 <body>
-	<div class="navbar">
-		<a href="/">进程管理</a>
-		<a href="/system">系统信息</a>
-	</div>
-	<h1>GoSupervisor - 进程详情</h1>
-	<h2>进程: {{.Name}}</h2>
-	<div class="detail-container">
-		<div class="detail-item">
-			<span class="detail-label">状态:</span>
-			<span class="status-{{lower .State}}">{{.State}}</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">PID:</span>
-			<span>{{if gt .PID 0}}{{.PID}}{{else}}-{{end}}</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">命令:</span>
-			<span>{{.Config.Command}}</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">工作目录:</span>
-			<span>{{.Config.Directory}}</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">运行时间:</span>
-			<span>{{.Uptime}}</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">启动时间:</span>
-			<span>{{if not .StartTime.IsZero}}{{.StartTime.Format "2006-01-02 15:04:05"}}{{else}}-{{end}}</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">停止时间:</span>
-			<span>{{if not .StopTime.IsZero}}{{.StopTime.Format "2006-01-02 15:04:05"}}{{else}}-{{end}}</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">退出码:</span>
-			<span>{{if ne .ExitCode 0}}{{.ExitCode}}{{else}}-{{end}}</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">启动重试次数:</span>
-			<span>{{.StartRetries}}</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">重启次数:</span>
-			<span>{{.RestartCount}}</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">最后重启时间:</span>
-			<span>{{if not .LastRestart.IsZero}}{{.LastRestart.Format "2006-01-02 15:04:05"}}{{else}}-{{end}}</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">CPU使用率:</span>
-			<span>{{.CPUUsage}}%</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">内存使用:</span>
-			<span>{{.MemoryUsage}} bytes</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">健康状态:</span>
-			<span>{{if .Healthy}}健康{{else}}异常{{end}}</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">自动启动:</span>
-			<span>{{.Config.AutoStart}}</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">自动重启:</span>
-			<span>{{.Config.AutoRestart}}</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">启动超时:</span>
-			<span>{{.Config.StartSecs}}秒</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">停止超时:</span>
-			<span>{{.Config.StopSecs}}秒</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">停止信号:</span>
-			<span>{{.Config.StopSignal}}</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">用户:</span>
-			<span>{{.Config.User}}</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">优先级:</span>
-			<span>{{.Config.Priority}}</span>
-		</div>
-		<div class="detail-item">
-			<span class="detail-label">依赖进程:</span>
-			<span>{{if gt (len .Config.DependsOn) 0}}{{.Config.DependsOn}}{{else}}无{{end}}</span>
-		</div>
-	</div>
-	<div class="btn-group">
-		{{if ne .State "RUNNING"}}
-		<form method="post" action="/start" style="display:inline">
-			<input type="hidden" name="name" value="{{.Name}}">
-			<button class="btn btn-start" type="submit">启动</button>
-		</form>
-		{{end}}
-		{{if eq .State "RUNNING"}}
-		<form method="post" action="/stop" style="display:inline">
-			<input type="hidden" name="name" value="{{.Name}}">
-			<button class="btn btn-stop" type="submit">停止</button>
-		</form>
-		{{end}}
-		<form method="post" action="/restart" style="display:inline">
-			<input type="hidden" name="name" value="{{.Name}}">
-			<button class="btn btn-restart" type="submit">重启</button>
-		</form>
-		<form method="get" action="/logs" style="display:inline">
-			<input type="hidden" name="name" value="{{.Name}}">
-			<button class="btn btn-logs" type="submit">查看日志</button>
-		</form>
-	</div>
-	<button class="back-button" onclick="window.location.href='/'">返回首页</button>
-	<div class="footer">
-		<p>GoSupervisor - 进程管理工具</p>
-	</div>
+<div class="header"><div class="header-inner">
+<div class="logo"><div class="logo-icon">GS</div><span class="logo-text">GoSupervisor</span></div>
+<a href="/" class="back">&larr; 返回</a>
+</div></div>
+<main>
+<div class="hero">
+<h2>{{.Name}}</h2>
+<span class="status status-{{lower .State}}" id="val-state">{{.State}}</span>
+</div>
+<div class="grid">
+<div class="card"><div class="card-label">PID</div><div class="card-value big accent" id="val-pid">{{if gt .PID 0}}{{.PID}}{{else}}-{{end}}</div></div>
+<div class="card"><div class="card-label">命令</div><div class="card-value">{{.Config.Command}}</div></div>
+<div class="card"><div class="card-label">工作目录</div><div class="card-value">{{if .Config.Directory}}{{.Config.Directory}}{{else}}-(继承){{end}}</div></div>
+<div class="card"><div class="card-label">运行时间</div><div class="card-value" id="val-uptime">{{.Uptime}}</div></div>
+<div class="card"><div class="card-label">启动时间</div><div class="card-value" id="val-start">{{if not .StartTime.IsZero}}{{.StartTime.Format "2006-01-02 15:04:05"}}{{else}}-{{end}}</div></div>
+<div class="card"><div class="card-label">停止时间</div><div class="card-value" id="val-stop">{{if not .StopTime.IsZero}}{{.StopTime.Format "2006-01-02 15:04:05"}}{{else}}-{{end}}</div></div>
+<div class="card"><div class="card-label">退出码</div><div class="card-value" id="val-ec">{{if ne .ExitCode 0}}{{.ExitCode}}{{else}}-{{end}}</div></div>
+<div class="card"><div class="card-label">启动重试</div><div class="card-value big" id="val-retries">{{.StartRetries}}</div></div>
+<div class="card"><div class="card-label">重启次数</div><div class="card-value big" id="val-restarts">{{.RestartCount}}</div></div>
+<div class="card"><div class="card-label">最后重启</div><div class="card-value" id="val-lastrestart">{{if not .LastRestart.IsZero}}{{.LastRestart.Format "2006-01-02 15:04:05"}}{{else}}-{{end}}</div></div>
+<div class="card"><div class="card-label">CPU 使用率</div><div class="card-value big" id="val-cpu">{{.CPUUsage}}%</div></div>
+<div class="card"><div class="card-label">内存使用</div><div class="card-value" id="val-mem">{{formatBytes .MemoryUsage}}</div></div>
+<div class="card"><div class="card-label">健康状态</div><div class="card-value {{if .Healthy}}green{{else}}red{{end}}" id="val-health">{{if .Healthy}}健康{{else}}异常{{end}}</div></div>
+<div class="card"><div class="card-label">自动启动</div><div class="card-value">{{if .Config.AutoStart}}是{{else}}否{{end}}</div></div>
+<div class="card"><div class="card-label">自动重启</div><div class="card-value">{{if .Config.AutoRestart}}是{{else}}否{{end}}</div></div>
+<div class="card"><div class="card-label">启动超时</div><div class="card-value">{{.Config.StartSecs}}s</div></div>
+<div class="card"><div class="card-label">停止超时</div><div class="card-value">{{.Config.StopSecs}}s</div></div>
+<div class="card"><div class="card-label">停止信号</div><div class="card-value">{{.Config.StopSignal}}</div></div>
+<div class="card"><div class="card-label">用户</div><div class="card-value">{{if .Config.User}}{{.Config.User}}{{else}}(继承){{end}}</div></div>
+<div class="card"><div class="card-label">优先级</div><div class="card-value">{{.Config.Priority}}</div></div>
+<div class="card"><div class="card-label">依赖进程</div><div class="card-value">{{if gt (len .Config.DependsOn) 0}}{{.Config.DependsOn}}{{else}}无{{end}}</div></div>
+</div>
+<div class="actions">
+{{if ne .State "RUNNING"}}<form method="post" action="/start" style="display:inline"><input type="hidden" name="name" value="{{.Name}}"><button class="btn btn-start" type="submit">启动</button></form>{{end}}
+{{if eq .State "RUNNING"}}<form method="post" action="/stop" style="display:inline"><input type="hidden" name="name" value="{{.Name}}"><button class="btn btn-stop" type="submit">停止</button></form>{{end}}
+<form method="post" action="/restart" style="display:inline"><input type="hidden" name="name" value="{{.Name}}"><button class="btn btn-restart" type="submit">重启</button></form>
+<a href="/logs?name={{.Name}}" class="btn btn-logs">查看日志</a>
+</div>
+</main>
+<div style="text-align:center;margin:16px 0 32px;font-size:11px;color:var(--text-dim)">Auto-refresh: <span id="tick" style="color:var(--green)">0s</span></div>
+<script>
+(function(){
+var lastUpdate=Date.now(),pname="{{.Name}}";
+function fmt(ts){if(!ts)return'-';var d=new Date(ts);if(d.getFullYear()<=1)return'-';
+return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')+' '
++String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')+':'+String(d.getSeconds()).padStart(2,'0')}
+function uptime(ts,st){if(!ts||st!=='RUNNING')return'-';var d=new Date(ts);
+if(d.getFullYear()<=1)return'-';var diff=Math.floor((Date.now()-d.getTime())/1000);
+if(diff<0)return'-';var h=Math.floor(diff/3600),m=Math.floor((diff%3600)/60),s=diff%60;
+return h>0?h+'h '+m+'m':m>0?m+'m '+s+'s':s+'s'}
+function refresh(){
+fetch('/api/processes').then(function(r){return r.json()}).then(function(procs){
+for(var i=0;i<procs.length;i++){if(procs[i].Name===pname){
+var p=procs[i];
+document.getElementById('val-state').textContent=p.State;
+document.getElementById('val-pid').textContent=p.PID>0?p.PID:'-';
+document.getElementById('val-uptime').textContent=uptime(p.StartTime,p.State);
+document.getElementById('val-start').textContent=fmt(p.StartTime);
+document.getElementById('val-stop').textContent=fmt(p.StopTime);
+document.getElementById('val-ec').textContent=p.ExitCode!==0?p.ExitCode:'-';
+document.getElementById('val-retries').textContent=p.StartRetries;
+document.getElementById('val-restarts').textContent=p.RestartCount;
+document.getElementById('val-lastrestart').textContent=fmt(p.LastRestart);
+document.getElementById('val-cpu').textContent=p.CPUUsage+'%';
+document.getElementById('val-mem').textContent=(p.MemoryUsage/1048576).toFixed(1)+' MB';
+document.getElementById('val-health').textContent=p.Healthy?'健康':'异常';
+document.getElementById('val-health').className='card-value '+(p.Healthy?'green':'red');
+var h=document.querySelector('.hero .status');
+if(h){h.textContent=p.State;h.className='status status-'+p.State.toUpperCase()}
+break
+}}
+lastUpdate=Date.now()
+}).catch(function(){document.getElementById('tick').style.color='red'})
+}
+refresh();setInterval(refresh,1000);
+setInterval(function(){document.getElementById('tick').textContent=Math.floor((Date.now()-lastUpdate)/1000)+'s'},200);
+})();
+</script>
 </body>
 </html>`

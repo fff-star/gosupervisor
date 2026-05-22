@@ -397,7 +397,7 @@ func (p *Process) Stop() error {
 		sig = syscall.SIGTERM
 	}
 	if p.Config.StopAsGroup || p.Config.KillsAsGroup {
-		signalProcessGroup(cmd.Process.Pid, sig)
+		_ = signalProcessGroup(cmd.Process.Pid, sig)
 	} else {
 		cmd.Process.Signal(sig)
 	}
@@ -421,7 +421,7 @@ func (p *Process) Stop() error {
 
 	// Force kill if still alive
 	if p.Config.StopAsGroup || p.Config.KillsAsGroup {
-		signalProcessGroup(cmd.Process.Pid, syscall.SIGKILL)
+		_ = signalProcessGroup(cmd.Process.Pid, syscall.SIGKILL)
 	} else {
 		cmd.Process.Kill()
 	}

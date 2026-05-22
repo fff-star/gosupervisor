@@ -2748,7 +2748,7 @@ func TestConcurrentSnapshotAndMonitor(t *testing.T) {
 		for i := 0; i < 10; i++ {
 			pm.RangeProcesses(func(name string, p *Process) {
 				if p.GetState() == StateRunning {
-					p.Restart()
+					_ = p.Restart()
 				}
 			})
 			time.Sleep(50 * time.Millisecond)

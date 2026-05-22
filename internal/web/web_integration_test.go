@@ -149,7 +149,9 @@ func TestWebServerRealHTTP_ProcessAction(t *testing.T) {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
 	var body map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&body)
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
 	if body["status"] != "ok" {
 		t.Errorf("expected ok status, got %v", body)
 	}
@@ -165,7 +167,9 @@ func TestWebServerRealHTTP_ProcessAction(t *testing.T) {
 	defer resp2.Body.Close()
 
 	var body2 map[string]interface{}
-	json.NewDecoder(resp2.Body).Decode(&body2)
+	if err := json.NewDecoder(resp2.Body).Decode(&body2); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
 	if body2["status"] != "ok" {
 		t.Errorf("expected ok status, got %v", body2["status"])
 	}
@@ -173,7 +177,7 @@ func TestWebServerRealHTTP_ProcessAction(t *testing.T) {
 	// Stop the process for cleanup
 	reqStop, _ := http.NewRequest("POST", baseURL+"/api/v1/processes/test1/stop", nil)
 	reqStop.Header.Set("Origin", baseURL)
-	http.DefaultClient.Do(reqStop)
+	_, _ = http.DefaultClient.Do(reqStop)
 }
 
 func TestWebServerRealHTTP_SystemAPI(t *testing.T) {

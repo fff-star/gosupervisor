@@ -121,7 +121,7 @@ func sendLine(conn net.Conn, cmd string) {
 	// Close write side to signal EOF so the server stops reading and the client
 	// scanner exits. The read side stays open to receive the full response.
 	if uc, ok := conn.(*net.UnixConn); ok {
-		uc.CloseWrite()
+		_ = uc.CloseWrite()
 	}
 	scanner := bufio.NewScanner(conn)
 	for scanner.Scan() {
@@ -143,7 +143,7 @@ func runREPL(socketPath string) {
 	// Load history
 	historyFile := historyPath()
 	if f, err := os.Open(historyFile); err == nil {
-		line.ReadHistory(f)
+		_, _ = line.ReadHistory(f)
 		f.Close()
 	}
 
@@ -185,7 +185,7 @@ func runREPL(socketPath string) {
 
 	// Save history
 	if f, err := os.Create(historyFile); err == nil {
-		line.WriteHistory(f)
+		_, _ = line.WriteHistory(f)
 		f.Close()
 	}
 	fmt.Println("再见!")

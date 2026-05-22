@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"gosupervisor/internal/config"
+	"gosupervisor/internal/eventlistener"
 	"gosupervisor/internal/logger"
 	"gosupervisor/internal/metrics"
 	"gosupervisor/internal/process"
@@ -26,6 +27,9 @@ const (
 
 // metricsManagerRef holds the current metrics manager for use by reloadConfiguration.
 var metricsManagerRef *metrics.MetricsManager
+
+// eventListenerManagerRef holds the current event listener manager for use by reloadConfiguration.
+var eventListenerManagerRef *eventlistener.EventListenerManager
 
 func main() {
 	var exitCode int
@@ -176,11 +180,32 @@ func main() {
 	monitor.Start()
 	defer monitor.Stop()
 
-	// Deferred cleanup for web server and metrics manager (if started)
+	// Initialize event listener manager if configured
+	var eventListenerManager *eventlistener.EventListenerManager
+	// Wire SSE broker (always on when web is enabled)
+	if *webEnable {
+		web.InitSSEBroker()
+	}
+	if len(cfg.EventListeners) > 0 {
+		eventListenerManager = eventlistener.NewManager(cfg, logManager.Info)
+		eventListenerManager.Start()
+		process.OnEvent = eventListenerManager.EmitEvent
+		eventListenerManagerRef = eventListenerManager
+		// Re-wire SSE after event listener manager to maintain chain
+		if *webEnable {
+			web.InitSSEBroker()
+		}
+	}
+
+	// Deferred cleanup for web server, event listeners, and metrics manager
 	var webServer *web.WebServer
 	defer func() {
 		if webServer != nil {
 			webServer.Stop()
+		}
+		if eventListenerManager != nil {
+			eventListenerManager.Stop()
+			process.OnEvent = nil
 		}
 		if metricsManagerRef != nil {
 			metricsManagerRef.Stop()
@@ -488,7 +513,7 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 	// Stop and remove processes that no longer exist
 	for _, name := range removed {
 		if p := processManager.GetProcess(name); p != nil {
-			p.Stop()
+			_ = p.Stop()
 			if p.CancelFunc != nil {
 				p.CancelFunc()
 			}
@@ -500,7 +525,7 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 	// Stop, remove, re-add, and restart modified processes
 	for _, name := range modified {
 		if p := processManager.GetProcess(name); p != nil {
-			p.Stop()
+			_ = p.Stop()
 			if p.CancelFunc != nil {
 				p.CancelFunc()
 			}
@@ -509,7 +534,7 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 		processManager.AddProcess(newConfigs[name])
 		if newConfigs[name].AutoStart {
 			if newP := processManager.GetProcess(name); newP != nil {
-				newP.Start()
+				_ = newP.Start()
 			}
 		}
 		logManager.Info("进程 %s 已修改", name)
@@ -520,7 +545,7 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 		processManager.AddProcess(newConfigs[name])
 		if newConfigs[name].AutoStart {
 			if newP := processManager.GetProcess(name); newP != nil {
-				newP.Start()
+				_ = newP.Start()
 			}
 		}
 		logManager.Info("进程 %s 已添加", name)
@@ -537,6 +562,12 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 		})
 		metricsManagerRef.ResetTracking()
 		metricsManagerRef.RecordConfigReload()
+	}
+
+	// Reload event listeners
+	if eventListenerManagerRef != nil {
+		eventListenerManagerRef.Reload(cfg)
+		process.OnEvent = eventListenerManagerRef.EmitEvent
 	}
 
 	return nil

@@ -231,7 +231,7 @@ func TestSocketRealConn_MultiCommand(t *testing.T) {
 	// Now close our write side so the server's scanner gets EOF and exits handleConn
 	// On Linux, we can use the underlying unix socket's CloseWrite
 	if uc, ok := conn.(*net.UnixConn); ok {
-		uc.CloseWrite()
+		_ = uc.CloseWrite()
 	}
 
 	// Read all responses

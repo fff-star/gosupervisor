@@ -1,0 +1,388 @@
+package eventlistener
+
+import (
+	"bufio"
+	"io"
+	"strings"
+	"testing"
+
+	"gosupervisor/internal/config"
+	"gosupervisor/internal/process"
+)
+
+func TestEventWireName(t *testing.T) {
+	tests := []struct {
+		typ      process.EventType
+		expected string
+	}{
+		{process.EventStart, "PROCESS_STATE_STARTING"},
+		{process.EventStop, "PROCESS_STATE_STOPPED"},
+		{process.EventExit, "PROCESS_STATE_EXITED"},
+		{process.EventFatal, "PROCESS_STATE_FATAL"},
+		{process.EventHealthFail, "PROCESS_STATE_FATAL"},
+		{process.EventHealthRestore, "PROCESS_STATE_RUNNING"},
+		{process.EventSignal, "PROCESS_STATE"},
+	}
+	for _, tt := range tests {
+		result := eventWireName(tt.typ)
+		if result != tt.expected {
+			t.Errorf("eventWireName(%s) = %q, want %q", tt.typ, result, tt.expected)
+		}
+	}
+}
+
+func TestEventWireName_Unknown(t *testing.T) {
+	result := eventWireName(process.EventType("nonexistent"))
+	if result != "UNKNOWN" {
+		t.Errorf("expected UNKNOWN, got %q", result)
+	}
+}
+
+func TestEncodeEvent(t *testing.T) {
+	event := process.Event{
+		Name:    "testproc",
+		Type:    process.EventStart,
+		PID:     42,
+		Message: "started",
+	}
+	encoded := encodeEvent(event, "gosupervisor", 1, 5, "mylistener")
+	s := string(encoded)
+
+	if !strings.Contains(s, "ver:3.0") {
+		t.Errorf("expected ver:3.0 in encoded event, got: %s", s)
+	}
+	if !strings.Contains(s, "server:gosupervisor") {
+		t.Errorf("expected server:gosupervisor in encoded event, got: %s", s)
+	}
+	if !strings.Contains(s, "pool:mylistener") {
+		t.Errorf("expected pool:mylistener in encoded event, got: %s", s)
+	}
+	if !strings.Contains(s, "eventname:PROCESS_STATE_STARTING") {
+		t.Errorf("expected eventname:PROCESS_STATE_STARTING in encoded event, got: %s", s)
+	}
+	if !strings.Contains(s, "processname:testproc") {
+		t.Errorf("expected processname:testproc in body, got: %s", s)
+	}
+	if !strings.Contains(s, "pid:42") {
+		t.Errorf("expected pid:42 in body, got: %s", s)
+	}
+}
+
+func TestSupervisordEventDerives(t *testing.T) {
+	// PROCESS_STATE should include all lifecycle events
+	types, ok := supervisordEventDerives["PROCESS_STATE"]
+	if !ok {
+		t.Fatal("PROCESS_STATE not in derives map")
+	}
+	expectedTypes := []process.EventType{
+		process.EventStart, process.EventStop, process.EventExit,
+		process.EventFatal, process.EventHealthFail, process.EventHealthRestore,
+	}
+	for _, exp := range expectedTypes {
+		found := false
+		for _, typ := range types {
+			if typ == exp {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("PROCESS_STATE should include %s", exp)
+		}
+	}
+}
+
+func TestWantsEvent(t *testing.T) {
+	cfg := &config.EventListenerConfig{
+		Name:   "test",
+		Events: []string{"PROCESS_STATE"},
+	}
+	l := newEventListener(cfg)
+
+	if !l.wantsEvent(process.EventStart) {
+		t.Error("PROCESS_STATE listener should want EventStart")
+	}
+	if !l.wantsEvent(process.EventExit) {
+		t.Error("PROCESS_STATE listener should want EventExit")
+	}
+
+	// Not in PROCESS_STATE
+	if l.wantsEvent(process.EventSignal) {
+		t.Error("PROCESS_STATE listener should not want EventSignal")
+	}
+}
+
+func TestWantsEvent_SpecificType(t *testing.T) {
+	cfg := &config.EventListenerConfig{
+		Name:   "test",
+		Events: []string{"PROCESS_STATE_STARTING"},
+	}
+	l := newEventListener(cfg)
+
+	if !l.wantsEvent(process.EventStart) {
+		t.Error("PROCESS_STATE_STARTING listener should want EventStart")
+	}
+	if l.wantsEvent(process.EventExit) {
+		t.Error("PROCESS_STATE_STARTING listener should not want EventExit")
+	}
+}
+
+func TestWantsEvent_EmptyEvents(t *testing.T) {
+	cfg := &config.EventListenerConfig{
+		Name:   "test",
+		Events: []string{},
+	}
+	l := newEventListener(cfg)
+
+	if l.wantsEvent(process.EventStart) {
+		t.Error("empty events listener should not want any event")
+	}
+}
+
+func TestEventQueue_FIFO(t *testing.T) {
+	q := newEventQueue(10)
+
+	e1 := process.Event{Name: "p1", Type: process.EventStart, PID: 1}
+	e2 := process.Event{Name: "p2", Type: process.EventExit, PID: 2}
+	e3 := process.Event{Name: "p3", Type: process.EventStop, PID: 3}
+
+	q.Push(e1)
+	q.Push(e2)
+	q.Push(e3)
+
+	if q.Len() != 3 {
+		t.Fatalf("expected 3 events, got %d", q.Len())
+	}
+
+	first := q.Pop()
+	if first.Name != "p1" {
+		t.Errorf("expected p1, got %s", first.Name)
+	}
+	q.RemoveFirst()
+
+	second := q.Pop()
+	if second.Name != "p2" {
+		t.Errorf("expected p2, got %s", second.Name)
+	}
+	q.RemoveFirst()
+
+	third := q.Pop()
+	if third.Name != "p3" {
+		t.Errorf("expected p3, got %s", third.Name)
+	}
+	q.RemoveFirst()
+
+	if q.Len() != 0 {
+		t.Errorf("expected empty queue, got %d", q.Len())
+	}
+}
+
+func TestEventQueue_Overflow(t *testing.T) {
+	q := newEventQueue(3)
+
+	for i := 0; i < 5; i++ {
+		q.Push(process.Event{Name: "p", PID: i})
+	}
+
+	if q.Len() != 3 {
+		t.Fatalf("expected 3 events after overflow, got %d", q.Len())
+	}
+
+	// Oldest should be dropped (PID 0 and 1), first remaining is PID 2
+	first := q.Pop()
+	if first.PID != 2 {
+		t.Errorf("expected PID 2 after overflow, got %d", first.PID)
+	}
+}
+
+func TestEventQueue_ClampCapacity(t *testing.T) {
+	q := newEventQueue(0)
+	q.Push(process.Event{PID: 1})
+	if q.Len() != 1 {
+		t.Errorf("expected capacity clamped to 1, got len %d", q.Len())
+	}
+}
+
+func TestProtocolLoop_READYSendRESULTOK(t *testing.T) {
+	// Simulate child process via pipes
+	childStdoutR, childStdoutW := io.Pipe()
+	childStdinR, childStdinW := io.Pipe()
+
+	cfg := &config.EventListenerConfig{
+		Name:   "test",
+		Events: []string{"PROCESS_STATE"},
+	}
+	l := newEventListener(cfg)
+
+	// Push an event
+	l.queue.Push(process.Event{Name: "proc1", Type: process.EventStart, PID: 10})
+
+	// Goroutine simulating the child listener process
+	go func() {
+		// 1. READY
+		childStdoutW.Write([]byte("READY\n"))
+		// 2. Read event from stdin
+		buf := make([]byte, 4096)
+		_, _ = childStdinR.Read(buf)
+		// 3. READY (ack)
+		childStdoutW.Write([]byte("READY\n"))
+		// 4. RESULT OK
+		childStdoutW.Write([]byte("RESULT 2\nOK"))
+		// Close to signal protocol loop to exit
+		childStdoutW.Close()
+	}()
+
+	l.protocolLoop(childStdoutR, childStdinW)
+
+	// After OK result, the event should be consumed
+	if l.queue.Len() != 0 {
+		t.Errorf("expected empty queue after OK, got %d", l.queue.Len())
+	}
+}
+
+func TestProtocolLoop_RESULTFAIL(t *testing.T) {
+	childStdoutR, childStdoutW := io.Pipe()
+	childStdinR, childStdinW := io.Pipe()
+
+	cfg := &config.EventListenerConfig{
+		Name:   "test",
+		Events: []string{"PROCESS_STATE"},
+	}
+	l := newEventListener(cfg)
+
+	l.queue.Push(process.Event{Name: "proc1", Type: process.EventStart, PID: 10})
+
+	go func() {
+		// First attempt: FAIL
+		childStdoutW.Write([]byte("READY\n"))
+		buf := make([]byte, 4096)
+		_, _ = childStdinR.Read(buf)
+		childStdoutW.Write([]byte("READY\n"))
+		childStdoutW.Write([]byte("RESULT 4\nFAIL"))
+
+		// Second attempt: OK
+		childStdoutW.Write([]byte("READY\n"))
+		_, _ = childStdinR.Read(buf)
+		childStdoutW.Write([]byte("READY\n"))
+		childStdoutW.Write([]byte("RESULT 2\nOK"))
+
+		childStdoutW.Close()
+	}()
+
+	l.protocolLoop(childStdoutR, childStdinW)
+
+	if l.queue.Len() != 0 {
+		t.Errorf("expected empty queue after retry+OK, got %d", l.queue.Len())
+	}
+}
+
+func TestParseStopSignal(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected int
+	}{
+		{"SIGTERM", 15},
+		{"SIGKILL", 9},
+		{"SIGINT", 2},
+		{"SIGHUP", 1},
+		{"BOGUS", 15}, // defaults to SIGTERM
+	}
+	for _, tt := range tests {
+		sig := parseStopSignal(tt.name)
+		if int(sig) != tt.expected {
+			t.Errorf("parseStopSignal(%q) = %d, want %d", tt.name, int(sig), tt.expected)
+		}
+	}
+}
+
+func TestNewManager(t *testing.T) {
+	cfg := &config.Config{
+		EventListeners: map[string]*config.EventListenerConfig{
+			"mylistener": {
+				Name:       "mylistener",
+				Command:    "echo ready",
+				Events:     []string{"PROCESS_STATE"},
+				BufferSize: 50,
+				AutoStart:  false,
+			},
+		},
+	}
+	m := NewManager(cfg, nil)
+	if m == nil {
+		t.Fatal("NewManager returned nil")
+	}
+	if len(m.listeners) != 1 {
+		t.Fatalf("expected 1 listener, got %d", len(m.listeners))
+	}
+	l, ok := m.listeners["mylistener"]
+	if !ok {
+		t.Fatal("listener 'mylistener' not found")
+	}
+	if l.Config.BufferSize != 50 {
+		t.Errorf("expected BufferSize 50, got %d", l.Config.BufferSize)
+	}
+}
+
+func TestEmitEvent(t *testing.T) {
+	cfg := &config.Config{
+		EventListeners: map[string]*config.EventListenerConfig{
+			"l1": {
+				Name:       "l1",
+				Events:     []string{"PROCESS_STATE"},
+				BufferSize: 10,
+			},
+			"l2": {
+				Name:       "l2",
+				Events:     []string{"PROCESS_STATE_STARTING"},
+				BufferSize: 10,
+			},
+		},
+	}
+	m := NewManager(cfg, nil)
+
+	// Emit EventStart: both l1 and l2 should receive it
+	m.EmitEvent("proc1", process.EventStart, 1, 0, "started")
+
+	if m.listeners["l1"].queue.Len() != 1 {
+		t.Errorf("l1 should have 1 event, got %d", m.listeners["l1"].queue.Len())
+	}
+	if m.listeners["l2"].queue.Len() != 1 {
+		t.Errorf("l2 should have 1 event, got %d", m.listeners["l2"].queue.Len())
+	}
+
+	// Emit EventExit: only l1 should receive it (PROCESS_STATE includes exit)
+	m.EmitEvent("proc1", process.EventExit, 1, 1, "exited")
+
+	if m.listeners["l1"].queue.Len() != 2 {
+		t.Errorf("l1 should have 2 events, got %d", m.listeners["l1"].queue.Len())
+	}
+	if m.listeners["l2"].queue.Len() != 1 {
+		t.Errorf("l2 should still have 1 event, got %d", m.listeners["l2"].queue.Len())
+	}
+}
+
+func TestReadResult_Valid(t *testing.T) {
+	reader := bufio.NewReader(strings.NewReader("RESULT 2\nOK"))
+	payload, err := readResult(reader)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if payload != "OK" {
+		t.Errorf("expected OK, got %q", payload)
+	}
+}
+
+func TestReadResult_Invalid(t *testing.T) {
+	tests := []string{
+		"NOTRESULT 2\nOK",
+		"RESULT\n",
+		"RESULT -1\n",
+	}
+	for _, input := range tests {
+		reader := bufio.NewReader(strings.NewReader(input))
+		_, err := readResult(reader)
+		if err == nil {
+			t.Errorf("expected error for input %q", input)
+		}
+	}
+}

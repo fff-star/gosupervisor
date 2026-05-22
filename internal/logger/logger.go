@@ -181,7 +181,7 @@ func (l *Logger) getOrCreateWriter(key, filePath string, maxSize int64, backupCo
 		maxSize: maxSize,
 		onExceed: func() {
 			go func() {
-				defer func() { recover() }()
+				defer func() { _ = recover() }()
 				l.rotateIfNeeded(key)
 			}()
 		},
@@ -255,7 +255,7 @@ func (l *Logger) rotateLogByKey(key, filePath string, maxSize int64, backupCount
 		maxSize: maxSize,
 		onExceed: func() {
 			go func() {
-				defer func() { recover() }()
+				defer func() { _ = recover() }()
 				l.rotateIfNeeded(key)
 			}()
 		},

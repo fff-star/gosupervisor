@@ -748,9 +748,9 @@ func TestCleanupBackupsKeepsNewest(t *testing.T) {
 	mid := time.Now().Add(-2 * time.Hour)
 
 	os.WriteFile(baseFile+".100", []byte("old"), 0644)
-	os.Chtimes(baseFile+".100", old, old)
+	_ = os.Chtimes(baseFile+".100", old, old)
 	os.WriteFile(baseFile+".200", []byte("mid"), 0644)
-	os.Chtimes(baseFile+".200", mid, mid)
+	_ = os.Chtimes(baseFile+".200", mid, mid)
 	os.WriteFile(baseFile+".300", []byte("new"), 0644)
 
 	logger.cleanupBackups(baseFile, 2)
@@ -879,7 +879,7 @@ func TestCloseProcessLog(t *testing.T) {
 		t.Fatalf("getOrCreateWriter failed: %v", err)
 	}
 
-	logger.CloseProcessLog("close_test")
+	_ = logger.CloseProcessLog("close_test")
 
 	if _, exists := logger.processLogs[key]; exists {
 		t.Error("expected log stream to be removed after CloseProcessLog")

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"gosupervisor/internal/config"
 	"gosupervisor/internal/logger"
@@ -394,4 +395,119 @@ func TestHandleLogsTailStream_WithProcessConfigStderr(t *testing.T) {
 	if !strings.Contains(resp["content"].(string), "custom stderr") {
 		t.Errorf("expected custom stderr content, got: %v", resp["content"])
 	}
+}
+
+// ---------------------------------------------------------------------------
+// handleAPIV1EventsStream (SSE event streaming)
+// ---------------------------------------------------------------------------
+
+func TestHandleEventStream_SSEHeaders(t *testing.T) {
+	ws := &WebServer{}
+
+	w := newMockFlusherWriter()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // exit immediately
+	r := httptest.NewRequest("GET", "/api/v1/events/stream", nil).WithContext(ctx)
+
+	ws.handleAPIV1EventsStream(w, r)
+
+	ct := w.Header().Get("Content-Type")
+	if ct != "text/event-stream" {
+		t.Errorf("expected Content-Type text/event-stream, got %q", ct)
+	}
+	if w.Header().Get("Cache-Control") != "no-cache" {
+		t.Errorf("expected Cache-Control no-cache")
+	}
+}
+
+func TestHandleEventStream_Broadcast(t *testing.T) {
+	ws := &WebServer{}
+
+	w := newMockFlusherWriter()
+	ctx, cancel := context.WithCancel(context.Background())
+	r := httptest.NewRequest("GET", "/api/v1/events/stream", nil).WithContext(ctx)
+
+	// Start streaming in background
+	done := make(chan struct{})
+	go func() {
+		ws.handleAPIV1EventsStream(w, r)
+		close(done)
+	}()
+
+	// Wait for handler to subscribe
+	time.Sleep(10 * time.Millisecond)
+
+	// Broadcast an event
+	globalSSEBroker.broadcast(process.Event{
+		Name:    "test",
+		Type:    process.EventStart,
+		PID:     42,
+		Message: "started",
+	})
+
+	// Give it time to deliver
+	time.Sleep(50 * time.Millisecond)
+
+	cancel()
+	<-done
+
+	body := w.buf.String()
+	if !strings.Contains(body, "data:") {
+		t.Errorf("expected SSE data prefix, got: %s", body)
+	}
+	if !strings.Contains(body, "test") {
+		t.Errorf("expected event name in output, got: %s", body)
+	}
+	if !strings.Contains(body, "EventStart") && !strings.Contains(body, "start") {
+		t.Errorf("expected event type in output, got: %s", body)
+	}
+}
+
+func TestSSEBroker_SubscribeUnsubscribe(t *testing.T) {
+	broker := &sseBroker{clients: make(map[chan []byte]bool)}
+
+	ch := broker.subscribe()
+	if len(broker.clients) != 1 {
+		t.Errorf("expected 1 client, got %d", len(broker.clients))
+	}
+
+	broker.unsubscribe(ch)
+	if len(broker.clients) != 0 {
+		t.Errorf("expected 0 clients, got %d", len(broker.clients))
+	}
+}
+
+func TestSSEBroker_Broadcast(t *testing.T) {
+	broker := &sseBroker{clients: make(map[chan []byte]bool)}
+
+	ch := broker.subscribe()
+
+	broker.broadcast(process.Event{
+		Name: "proc1", Type: process.EventStart, PID: 1, Message: "started",
+	})
+
+	select {
+	case data := <-ch:
+		s := string(data)
+		if !strings.Contains(s, "proc1") {
+			t.Errorf("expected proc1 in broadcast, got: %s", s)
+		}
+	case <-time.After(time.Second):
+		t.Error("timeout waiting for broadcast")
+	}
+}
+
+func TestSSEBroker_NonBlockingBroadcast(t *testing.T) {
+	broker := &sseBroker{clients: make(map[chan []byte]bool)}
+
+	// Small buffer that will fill quickly
+	ch := make(chan []byte, 1)
+	broker.clients[ch] = true
+
+	// Fill the buffer
+	broker.broadcast(process.Event{Name: "e1"})
+
+	// This should not block, even though buffer is full
+	broker.broadcast(process.Event{Name: "e2"})
+	broker.broadcast(process.Event{Name: "e3"})
 }

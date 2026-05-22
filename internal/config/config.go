@@ -88,6 +88,38 @@ type ProgramConfig struct {
 	StopAsGroup  bool `yaml:"stopasgroup" json:"stopasgroup"`
 }
 
+// EventListenerConfig represents the configuration for an event listener process.
+// These are defined in [eventlistener:x] sections and implement the supervisord
+// event listener protocol (READY/RESULT) over stdin/stdout.
+type EventListenerConfig struct {
+	Name       string   `yaml:"name" json:"name"`
+	Command    string   `yaml:"command" json:"command"`
+	Events     []string `yaml:"events" json:"events"`
+	BufferSize int      `yaml:"buffersize" json:"buffersize"`
+
+	// Standard process fields
+	Directory      string            `yaml:"directory" json:"directory"`
+	User           string            `yaml:"user" json:"user"`
+	Environment    map[string]string `yaml:"environment" json:"environment"`
+	AutoStart      bool              `yaml:"autostart" json:"autostart"`
+	AutoRestart    bool              `yaml:"autorestart" json:"autorestart"`
+	StartSecs      int               `yaml:"startsecs" json:"startsecs"`
+	StartRetries   int               `yaml:"startretries" json:"startretries"`
+	StopSecs       int               `yaml:"stopsecs" json:"stopsecs"`
+	StopSignal     string            `yaml:"stopsignal" json:"stopsignal"`
+	RedirectStdout bool              `yaml:"redirectstdout" json:"redirectstdout"`
+	RedirectStderr bool              `yaml:"redirectstderr" json:"redirectstderr"`
+	StdoutLogFile  string            `yaml:"stdoutlogfile" json:"stdoutlogfile"`
+	StderrLogFile  string            `yaml:"stderrlogfile" json:"stderrlogfile"`
+	StdoutLogMaxBytes    int64       `yaml:"stdoutlogmaxbytes" json:"stdoutlogmaxbytes"`
+	StdoutLogBackupCount int         `yaml:"stdoutlogbackupcount" json:"stdoutlogbackupcount"`
+	StderrLogMaxBytes    int64       `yaml:"stderrlogmaxbytes" json:"stderrlogmaxbytes"`
+	StderrLogBackupCount int         `yaml:"stderrlogbackupcount" json:"stderrlogbackupcount"`
+	Priority       int               `yaml:"priority" json:"priority"`
+	Umask          int               `yaml:"umask" json:"umask"`
+	Group          string            `yaml:"group" json:"group"`
+}
+
 // ServerConfig holds global server settings (typically from [supervisord] section).
 type ServerConfig struct {
 	WebAddr     string `yaml:"webaddr" json:"webaddr"`
@@ -107,6 +139,8 @@ type ServerConfig struct {
 type Config struct {
 	// Programs 存储所有进程的配置，键为进程名称
 	Programs map[string]*ProgramConfig
+	// EventListeners stores event listener configs (from [eventlistener:x] sections).
+	EventListeners map[string]*EventListenerConfig
 	// Server contains optional global server settings (from [supervisord] section)
 	Server *ServerConfig
 
@@ -116,16 +150,18 @@ type Config struct {
 
 // YAMLConfig 用于解析YAML格式的配置文件
 type YAMLConfig struct {
-	Programs map[string]*ProgramConfig `yaml:"programs"`
-	Server   *ServerConfig            `yaml:"supervisord"`
-	Includes []string                 `yaml:"includes"`
+	Programs       map[string]*ProgramConfig       `yaml:"programs"`
+	EventListeners map[string]*EventListenerConfig `yaml:"eventlisteners"`
+	Server         *ServerConfig                   `yaml:"supervisord"`
+	Includes       []string                        `yaml:"includes"`
 }
 
 // JSONConfig 用于解析JSON格式的配置文件
 type JSONConfig struct {
-	Programs map[string]*ProgramConfig `json:"programs"`
-	Server   *ServerConfig            `json:"supervisord"`
-	Includes []string                 `json:"includes"`
+	Programs       map[string]*ProgramConfig       `json:"programs"`
+	EventListeners map[string]*EventListenerConfig `json:"eventlisteners"`
+	Server         *ServerConfig                   `json:"supervisord"`
+	Includes       []string                        `json:"includes"`
 }
 
 // LoadConfig 加载配置文件，根据文件扩展名自动检测格式
@@ -190,6 +226,16 @@ func loadConfigWithIncludes(configPath string, visited map[string]bool) (*Config
 				}
 				cfg.Programs[name] = prog
 			}
+			// Merge event listeners from included file
+			for name, el := range incCfg.EventListeners {
+				if _, exists := cfg.EventListeners[name]; exists {
+					fmt.Printf("警告: 事件监听器 %s 在include文件 %s 中重复定义，将被覆盖\n", name, match)
+				}
+				if cfg.EventListeners == nil {
+					cfg.EventListeners = make(map[string]*EventListenerConfig)
+				}
+				cfg.EventListeners[name] = el
+			}
 			// Merge server config from included file (first one wins if not already set)
 			if incCfg.Server != nil && cfg.Server == nil {
 				cfg.Server = incCfg.Server
@@ -218,6 +264,7 @@ func loadINIConfig(configPath string) (*Config, error) {
 
 	scanner := bufio.NewScanner(file)
 	var currentProgram *ProgramConfig
+	var currentListener *EventListenerConfig
 	var currentSection string
 
 	for scanner.Scan() {
@@ -230,6 +277,7 @@ func loadINIConfig(configPath string) (*Config, error) {
 			section := strings.TrimSpace(line[1 : len(line)-1])
 			currentSection = section
 			currentProgram = nil
+			currentListener = nil
 			if strings.HasPrefix(section, "program:") {
 				programName := strings.TrimPrefix(section, "program:")
 				currentProgram = &ProgramConfig{
@@ -270,7 +318,34 @@ func loadINIConfig(configPath string) (*Config, error) {
 					config.Server = &ServerConfig{}
 				}
 			} else if section == "include" {
-				// [include] section — patterns are collected on the Config
+				// [include] section — patterns are collected on the Config;
+				// nothing to do here, the patterns are parsed in processIncludeSection.
+				_ = section
+			} else if strings.HasPrefix(section, "eventlistener:") {
+				listenerName := strings.TrimPrefix(section, "eventlistener:")
+				currentListener = &EventListenerConfig{
+					Name:                 listenerName,
+					AutoStart:            true,
+					AutoRestart:          true,
+					BufferSize:           100,
+					StartSecs:            1,
+					StartRetries:         3,
+					StopSecs:             10,
+					StopSignal:           "SIGTERM",
+					Environment:          make(map[string]string),
+					RedirectStdout:       true,
+					RedirectStderr:       true,
+					StdoutLogMaxBytes:    50 * 1024 * 1024,
+					StdoutLogBackupCount: 10,
+					StderrLogMaxBytes:    50 * 1024 * 1024,
+					StderrLogBackupCount: 10,
+					Priority:             999,
+					Umask:                022,
+				}
+				if config.EventListeners == nil {
+					config.EventListeners = make(map[string]*EventListenerConfig)
+				}
+				config.EventListeners[listenerName] = currentListener
 			}
 			continue
 		}
@@ -404,6 +479,73 @@ func loadINIConfig(configPath string) (*Config, error) {
 					currentProgram.StopAsGroup = value == "true"
 				}
 			}
+		} else if currentListener != nil {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+				switch key {
+				case "command":
+					currentListener.Command = value
+				case "events":
+					for _, e := range strings.Split(value, ",") {
+						e = strings.TrimSpace(e)
+						if e != "" {
+							currentListener.Events = append(currentListener.Events, e)
+						}
+					}
+				case "buffer_size":
+					parseIntWarn(value, "buffer_size", &currentListener.BufferSize)
+				case "directory":
+					currentListener.Directory = value
+				case "autostart":
+					currentListener.AutoStart = value == "true"
+				case "autorestart":
+					currentListener.AutoRestart = value == "true"
+				case "startsecs":
+					parseIntWarn(value, "startsecs", &currentListener.StartSecs)
+				case "startretries":
+					parseIntWarn(value, "startretries", &currentListener.StartRetries)
+				case "stopsecs":
+					parseIntWarn(value, "stopsecs", &currentListener.StopSecs)
+				case "stopsignal":
+					currentListener.StopSignal = value
+				case "user":
+					currentListener.User = value
+				case "environment":
+					envVars := strings.Split(value, ",")
+					for _, envVar := range envVars {
+						envParts := strings.SplitN(envVar, "=", 2)
+						if len(envParts) == 2 {
+							envKey := strings.TrimSpace(envParts[0])
+							envValue := strings.TrimSpace(envParts[1])
+							currentListener.Environment[envKey] = envValue
+						}
+					}
+				case "redirectstdout":
+					currentListener.RedirectStdout = value == "true"
+				case "redirectstderr":
+					currentListener.RedirectStderr = value == "true"
+				case "stdoutlogfile":
+					currentListener.StdoutLogFile = value
+				case "stderrlogfile":
+					currentListener.StderrLogFile = value
+				case "stdoutlogmaxbytes":
+					parseIntWarn(value, "stdoutlogmaxbytes", &currentListener.StdoutLogMaxBytes)
+				case "stdoutlogbackupcount":
+					parseIntWarn(value, "stdoutlogbackupcount", &currentListener.StdoutLogBackupCount)
+				case "stderrlogmaxbytes":
+					parseIntWarn(value, "stderrlogmaxbytes", &currentListener.StderrLogMaxBytes)
+				case "stderrlogbackupcount":
+					parseIntWarn(value, "stderrlogbackupcount", &currentListener.StderrLogBackupCount)
+				case "priority":
+					parseIntWarn(value, "priority", &currentListener.Priority)
+				case "umask":
+					parseIntWarn(value, "umask", &currentListener.Umask)
+				case "group":
+					currentListener.Group = value
+				}
+			}
 		} else if config.Server != nil && currentSection == "supervisord" {
 			parts := strings.SplitN(line, "=", 2)
 			if len(parts) == 2 {
@@ -499,6 +641,8 @@ func loadYAMLConfig(configPath string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	applyEventListenerDefaults(yamlConfig.EventListeners)
+	cfg.EventListeners = yamlConfig.EventListeners
 	cfg.Server = yamlConfig.Server
 	cfg.includeFiles = yamlConfig.Includes
 	return cfg, nil
@@ -637,9 +781,54 @@ func loadJSONConfig(configPath string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	applyEventListenerDefaults(jsonConfig.EventListeners)
+	cfg.EventListeners = jsonConfig.EventListeners
 	cfg.Server = jsonConfig.Server
 	cfg.includeFiles = jsonConfig.Includes
 	return cfg, nil
+}
+
+// applyEventListenerDefaults fills in defaults for event listener configs.
+func applyEventListenerDefaults(listeners map[string]*EventListenerConfig) {
+	for name, el := range listeners {
+		if el == nil {
+			listeners[name] = &EventListenerConfig{Name: name}
+			el = listeners[name]
+		}
+		if el.Name == "" {
+			el.Name = name
+		}
+		if el.BufferSize == 0 {
+			el.BufferSize = 100
+		}
+		if el.AutoStart && el.StartSecs == 0 {
+			el.StartSecs = 1
+		}
+		if el.StartRetries == 0 {
+			el.StartRetries = 3
+		}
+		if el.StopSecs == 0 {
+			el.StopSecs = 10
+		}
+		if el.StopSignal == "" {
+			el.StopSignal = "SIGTERM"
+		}
+		if el.Environment == nil {
+			el.Environment = make(map[string]string)
+		}
+		if el.Priority == 0 {
+			el.Priority = 999
+		}
+		if el.Umask == 0 {
+			el.Umask = 022
+		}
+		if el.StdoutLogMaxBytes == 0 {
+			el.StdoutLogMaxBytes = 50 * 1024 * 1024
+		}
+		if el.StderrLogMaxBytes == 0 {
+			el.StderrLogMaxBytes = 50 * 1024 * 1024
+		}
+	}
 }
 
 var knownSignals = map[string]bool{
@@ -668,6 +857,21 @@ func (c *Config) ValidateConfig() []string {
 		}
 		if prog.StopSignal != "" && !knownSignals[prog.StopSignal] {
 			warnings = append(warnings, fmt.Sprintf("进程 %s 的 stopsignal '%s' 可能无效", name, prog.StopSignal))
+		}
+	}
+	// Validate event listeners
+	for name, el := range c.EventListeners {
+		if el.Command == "" {
+			warnings = append(warnings, fmt.Sprintf("事件监听器 %s 配置缺少 command 字段", name))
+		}
+		if len(el.Events) == 0 {
+			warnings = append(warnings, fmt.Sprintf("事件监听器 %s 配置缺少 events 字段", name))
+		}
+		if el.BufferSize <= 0 {
+			warnings = append(warnings, fmt.Sprintf("事件监听器 %s 的 buffer_size 必须大于0", name))
+		}
+		if el.StopSignal != "" && !knownSignals[el.StopSignal] {
+			warnings = append(warnings, fmt.Sprintf("事件监听器 %s 的 stopsignal '%s' 可能无效", name, el.StopSignal))
 		}
 	}
 	// Detect dependency cycles

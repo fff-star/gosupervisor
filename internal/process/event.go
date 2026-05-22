@@ -51,6 +51,11 @@ func (eb *EventBuffer) Snapshot(limit int) []Event {
 // GlobalEventBuffer is the singleton event buffer for the supervisor.
 var GlobalEventBuffer = NewEventBuffer(500)
 
+// OnEvent is an optional callback invoked by RecordEvent for each event.
+// External subsystems (e.g., event listeners) can hook into this to observe
+// events in real time. The callback is called synchronously from RecordEvent.
+var OnEvent func(name string, typ EventType, pid int, exitCode int, message string)
+
 // RecordEvent pushes an event to the global buffer.
 func RecordEvent(name string, typ EventType, pid int, exitCode int, message string) {
 	GlobalEventBuffer.Push(Event{
@@ -61,4 +66,7 @@ func RecordEvent(name string, typ EventType, pid int, exitCode int, message stri
 		ExitCode:  exitCode,
 		Message:   message,
 	})
+	if OnEvent != nil {
+		OnEvent(name, typ, pid, exitCode, message)
+	}
 }
