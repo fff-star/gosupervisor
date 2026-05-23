@@ -626,3 +626,40 @@ func TestStart_WithSocketMode(t *testing.T) {
 		t.Error("file is not a socket")
 	}
 }
+
+func TestHandleCommand_InvalidFormat(t *testing.T) {
+	s := newTestSocketServer(t)
+	resp := s.handleCommand("garbage without structure")
+	if !strings.HasPrefix(resp, "ERR") {
+		t.Errorf("expected ERR for garbage command, got: %s", resp)
+	}
+}
+
+func TestHandleCommand_OnlyWhitespace(t *testing.T) {
+	s := newTestSocketServer(t)
+	resp := s.handleCommand("   ")
+	if resp == "" {
+		t.Error("expected non-empty response for whitespace-only command")
+	}
+}
+
+func TestIsValidName(t *testing.T) {
+	tests := []struct {
+		name     string
+		expected bool
+	}{
+		{"valid-name", true},
+		{"valid_name", true},
+		{"valid.name", true},
+		{"", false},
+		{"../escape", false},
+		{"/etc/passwd", false},
+		{"name with spaces", false},
+	}
+	for _, tt := range tests {
+		got := isValidName(tt.name)
+		if got != tt.expected {
+			t.Errorf("isValidName(%q) = %v, want %v", tt.name, got, tt.expected)
+		}
+	}
+}

@@ -224,9 +224,14 @@ func (ws *WebServer) corsMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		requestOrigin := r.Header.Get("Origin")
+		if requestOrigin == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		origin := ws.corsOrigin
 		if origin == "*" {
-			origin = r.Header.Get("Origin")
+			origin = requestOrigin
 		}
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")

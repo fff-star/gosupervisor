@@ -2289,3 +2289,26 @@ func TestCountProcesses(t *testing.T) {
 	}
 }
 
+// TestCORS_NoOrigin verifies that CORS headers are not set when the request
+// has no Origin header.
+func TestCORS_NoOrigin(t *testing.T) {
+	ws, err := NewWebServerFull(nil, t.TempDir(), "", "", false, "http://example.com", 0)
+	if err != nil {
+		t.Fatalf("NewWebServerFull: %v", err)
+	}
+
+	handler := ws.corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	r := httptest.NewRequest("GET", "/api/v1/processes", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	resp := w.Result()
+	acao := resp.Header.Get("Access-Control-Allow-Origin")
+	if acao != "" {
+		t.Errorf("expected no CORS header without Origin, got %q", acao)
+	}
+}
+

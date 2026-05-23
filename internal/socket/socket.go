@@ -292,5 +292,5 @@ func isValidName(name string) bool {
 	if name == "" {
 		return false
 	}
-	return !strings.Contains(name, "/") && !strings.Contains(name, "..") && !strings.Contains(name, "\\")
+	return !strings.Contains(name, "/") && !strings.Contains(name, "..") && !strings.Contains(name, "\\") && !strings.Contains(name, " ")
 }

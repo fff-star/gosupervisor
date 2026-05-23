@@ -330,8 +330,9 @@ func TestWebServerRealHTTP_CORSHeaders(t *testing.T) {
 
 	baseURL := startWebServer(t, ws)
 
-	// OPTIONS preflight
+	// OPTIONS preflight with Origin header (as browsers do)
 	req, _ := http.NewRequest("OPTIONS", baseURL+"/api/v1/processes", nil)
+	req.Header.Set("Origin", "http://example.com")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("OPTIONS: %v", err)
@@ -343,8 +344,10 @@ func TestWebServerRealHTTP_CORSHeaders(t *testing.T) {
 		t.Errorf("expected Access-Control-Allow-Origin 'http://example.com', got '%s'", acao)
 	}
 
-	// GET should also have CORS header
-	resp2, err := http.Get(baseURL + "/api/v1/processes")
+	// GET should also have CORS header when Origin is sent
+	req2, _ := http.NewRequest("GET", baseURL+"/api/v1/processes", nil)
+	req2.Header.Set("Origin", "http://example.com")
+	resp2, err := http.DefaultClient.Do(req2)
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
