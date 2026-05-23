@@ -585,3 +585,52 @@ func TestStop_RunningProcess(t *testing.T) {
 	}
 	l.mu.Unlock()
 }
+
+func TestEventQueue_Close_UnblocksPop(t *testing.T) {
+	q := newEventQueue(10)
+
+	done := make(chan struct{})
+	go func() {
+		_, ok := q.Pop()
+		if ok {
+			t.Error("Pop() should return false after Close()")
+		}
+		close(done)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	q.Close()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Pop() did not unblock after Close()")
+	}
+}
+
+func TestEventQueue_Close_WithRemaining(t *testing.T) {
+	q := newEventQueue(10)
+	q.Push(process.Event{Name: "e1"})
+	q.Push(process.Event{Name: "e2"})
+
+	q.Close()
+
+	// Events pushed before close should still be retrievable
+	e1, ok1 := q.Pop()
+	if !ok1 || e1.Name != "e1" {
+		t.Errorf("expected e1, got %v (ok=%v)", e1, ok1)
+	}
+	q.RemoveFirst()
+
+	e2, ok2 := q.Pop()
+	if !ok2 || e2.Name != "e2" {
+		t.Errorf("expected e2, got %v (ok=%v)", e2, ok2)
+	}
+	q.RemoveFirst()
+
+	// After draining, Pop should return false
+	_, ok3 := q.Pop()
+	if ok3 {
+		t.Error("Pop() should return false after draining closed queue")
+	}
+}
