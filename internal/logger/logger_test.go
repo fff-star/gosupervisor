@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/goleak"
+
 	"gosupervisor/internal/config"
 )
 
@@ -1054,4 +1056,8 @@ func TestSetFormat(t *testing.T) {
 	if logger.format != FormatJSON {
 		t.Errorf("SetFormat(FormatJSON): format = %s, want %s", logger.format, FormatJSON)
 	}
+}
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
 }

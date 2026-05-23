@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/goleak"
+
 	"gosupervisor/internal/config"
 	"gosupervisor/internal/logger"
 )
@@ -4266,6 +4268,7 @@ func TestStartAll_DependencyOrder(t *testing.T) {
 	}
 
 	pm.StopAll()
+	goleak.VerifyNone(t)
 }
 
 func TestStopAll_ReverseDependencyOrder(t *testing.T) {

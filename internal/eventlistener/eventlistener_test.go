@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/goleak"
+
 	"gosupervisor/internal/config"
 	"gosupervisor/internal/process"
 )
@@ -783,4 +785,8 @@ func TestManager_Reload(t *testing.T) {
 	} else {
 		t.Fatal("new listener not found after reload")
 	}
+}
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
 }

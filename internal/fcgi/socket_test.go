@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"go.uber.org/goleak"
 )
 
 func TestParseSocketAddrUnix(t *testing.T) {
@@ -167,4 +169,8 @@ func TestShellEscape(t *testing.T) {
 			t.Errorf("shellEscape(%q) = %q, expected to contain %q", tc.input, result, tc.contains)
 		}
 	}
+}
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
 }
