@@ -386,3 +386,115 @@ func TestReadResult_Invalid(t *testing.T) {
 		}
 	}
 }
+
+func TestStart_RunningStateSkips(t *testing.T) {
+	cfg := &config.EventListenerConfig{
+		Name:    "test",
+		Command: "sleep 999",
+	}
+	l := newEventListener(cfg)
+	l.mu.Lock()
+	l.state = "RUNNING"
+	l.mu.Unlock()
+
+	err := l.start()
+	if err != nil {
+		t.Errorf("start() on RUNNING listener should return nil, got: %v", err)
+	}
+}
+
+func TestStart_StartingStateSkips(t *testing.T) {
+	cfg := &config.EventListenerConfig{
+		Name:    "test",
+		Command: "sleep 999",
+	}
+	l := newEventListener(cfg)
+	l.mu.Lock()
+	l.state = "STARTING"
+	l.mu.Unlock()
+
+	err := l.start()
+	if err != nil {
+		t.Errorf("start() on STARTING listener should return nil, got: %v", err)
+	}
+}
+
+func TestStart_Success(t *testing.T) {
+	cfg := &config.EventListenerConfig{
+		Name:       "test",
+		Command:    "sleep 10",
+		BufferSize: 10,
+	}
+	l := newEventListener(cfg)
+
+	err := l.start()
+	if err != nil {
+		t.Fatalf("start() failed: %v", err)
+	}
+	defer l.stop()
+
+	l.mu.Lock()
+	state := l.state
+	l.mu.Unlock()
+	if state != "RUNNING" {
+		t.Errorf("expected RUNNING state, got %q", state)
+	}
+	if l.cmd == nil {
+		t.Error("expected cmd to be non-nil")
+	}
+	if l.stdinR == nil {
+		t.Error("expected stdinR to be non-nil (child stdout)")
+	}
+	if l.stdoutW == nil {
+		t.Error("expected stdoutW to be non-nil (child stdin)")
+	}
+	if l.ctx == nil {
+		t.Error("expected ctx to be non-nil")
+	}
+	if l.done == nil {
+		t.Error("expected done channel to be non-nil")
+	}
+}
+
+func TestStart_CmdStartFailure(t *testing.T) {
+	// start() wraps commands with /bin/sh -c, so /bin/sh starts
+	// successfully even when the wrapped command doesn't exist.
+	cfg := &config.EventListenerConfig{
+		Name:    "test",
+		Command: "/nonexistent/binary/that/cannot/be/found",
+	}
+	l := newEventListener(cfg)
+
+	err := l.start()
+	if err != nil {
+		t.Fatalf("start() should not fail (shell wraps command): %v", err)
+	}
+	defer l.stop()
+
+	l.mu.Lock()
+	state := l.state
+	l.mu.Unlock()
+	if state != "RUNNING" {
+		t.Errorf("expected RUNNING state after start(), got %q", state)
+	}
+}
+
+func TestStart_Directory(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.EventListenerConfig{
+		Name:      "test",
+		Command:   "pwd",
+		Directory: dir,
+	}
+	l := newEventListener(cfg)
+
+	err := l.start()
+	if err != nil {
+		t.Fatalf("start() failed: %v", err)
+	}
+	defer l.stop()
+
+	if l.cmd.Dir != dir {
+		t.Errorf("expected Dir=%q, got %q", dir, l.cmd.Dir)
+	}
+}
