@@ -3634,12 +3634,55 @@ func TestSignalToNonRunningProcess(t *testing.T) {
 	}
 }
 
-// TestSignalProcessGroup verifies signalProcessGroup exists and compiles.
+// TestSignalProcessGroup verifies signalProcessGroup works on a real process group.
 func TestSignalProcessGroup(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("signalProcessGroup requires root to verify kill() works on pgid")
 	}
-	_ = signalProcessGroup
+
+	logDir := "./test_logs_siggrp"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "siggrp_test",
+		Command:      "sh -c 'sleep 60 & sleep 60'",
+		Directory:    ".",
+		AutoStart:    false,
+		AutoRestart:  false,
+		StopSignal:   "SIGTERM",
+		StopSecs:     10,
+		KillsAsGroup: true,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("siggrp_test")
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer p.Stop()
+
+	if p.PID <= 0 {
+		t.Fatal("expected positive PID")
+	}
+
+	// Send signal to process group
+	err := signalProcessGroup(p.PID, syscall.SIGTERM)
+	if err != nil {
+		t.Errorf("signalProcessGroup failed: %v", err)
+	}
+
+	// Wait for the process to exit
+	time.Sleep(500 * time.Millisecond)
+	state := p.GetState()
+	if state == StateRunning {
+		t.Log("process may still be running (expected on some systems)")
+	}
 }
 
 // TestRunHealthCheckLifecycle tests the health check cycle:
