@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"gosupervisor/internal/config"
 	"gosupervisor/internal/process"
@@ -497,4 +498,90 @@ func TestStart_Directory(t *testing.T) {
 	if l.cmd.Dir != dir {
 		t.Errorf("expected Dir=%q, got %q", dir, l.cmd.Dir)
 	}
+}
+
+func TestStop_NotRunning(t *testing.T) {
+	cfg := &config.EventListenerConfig{
+		Name:    "test",
+		Command: "sleep 1",
+	}
+	l := newEventListener(cfg)
+	l.mu.Lock()
+	l.state = "STOPPED"
+	l.mu.Unlock()
+
+	// Must not panic
+	l.stop()
+
+	l.mu.Lock()
+	if l.state != "STOPPED" {
+		t.Errorf("expected STOPPED, got %q", l.state)
+	}
+	l.mu.Unlock()
+}
+
+func TestStop_WhileStarting(t *testing.T) {
+	cfg := &config.EventListenerConfig{
+		Name:       "test",
+		Command:    "sleep 10",
+		BufferSize: 10,
+	}
+	l := newEventListener(cfg)
+	l.mu.Lock()
+	l.state = "STARTING"
+	l.startDone = make(chan struct{})
+	// nil out done since no protocolLoop runs to close it
+	l.done = nil
+	l.mu.Unlock()
+
+	// Release start after a short delay
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		l.mu.Lock()
+		l.state = "RUNNING"
+		close(l.startDone)
+		l.mu.Unlock()
+	}()
+
+	// stop() should wait for startDone, then proceed
+	l.stop()
+
+	l.mu.Lock()
+	if l.state != "STOPPED" {
+		t.Errorf("expected STOPPED after stop-during-start, got %q", l.state)
+	}
+	l.mu.Unlock()
+}
+
+func TestStop_RunningProcess(t *testing.T) {
+	cfg := &config.EventListenerConfig{
+		Name:       "test",
+		Command:    "sleep 60",
+		BufferSize: 10,
+		StopSecs:   1,
+	}
+	l := newEventListener(cfg)
+
+	if err := l.start(); err != nil {
+		t.Fatalf("start() failed: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		l.stop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Expected: stop returned
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop() timed out")
+	}
+
+	l.mu.Lock()
+	if l.state != "STOPPED" {
+		t.Errorf("expected STOPPED, got %q", l.state)
+	}
+	l.mu.Unlock()
 }
