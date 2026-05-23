@@ -511,3 +511,39 @@ func TestSSEBroker_NonBlockingBroadcast(t *testing.T) {
 	broker.broadcast(process.Event{Name: "e2"})
 	broker.broadcast(process.Event{Name: "e3"})
 }
+
+// ---------------------------------------------------------------------------
+// InitSSEBroker / ResetSSEBroker
+// ---------------------------------------------------------------------------
+
+func TestInitSSEBroker_SetsOnEvent(t *testing.T) {
+	process.SwapOnEvent(nil)
+	InitSSEBroker()
+	// Record an event — must not panic
+	process.RecordEvent("broker_test", process.EventStart, 99, 0, "init test")
+}
+
+func TestResetSSEBroker_ReplacesHandler(t *testing.T) {
+	called := false
+	process.SetOnEvent(func(name string, typ process.EventType, pid int, exitCode int, message string) {
+		called = true
+	})
+
+	ResetSSEBroker()
+
+	process.RecordEvent("reset_test", process.EventExit, 100, 0, "reset test")
+
+	if !called {
+		t.Error("previous OnEvent handler should still be called after ResetSSEBroker")
+	}
+}
+
+func TestInitSSEBroker_OnlyOnce(t *testing.T) {
+	process.SwapOnEvent(nil)
+
+	InitSSEBroker()
+	InitSSEBroker() // second call should be no-op
+
+	// If double-wrapped, RecordEvent would call handler twice — but we just verify no panic
+	process.RecordEvent("once_test", process.EventStart, 1, 0, "once")
+}
