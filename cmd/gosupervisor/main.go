@@ -177,6 +177,11 @@ func main() {
 			processManager.AddProcess(expandedCfg)
 		}
 	}
+	for _, fcgiCfg := range cfg.FcgiPrograms {
+		for _, expandedCfg := range config.ExpandProgramConfig(fcgiCfg) {
+			processManager.AddProcess(expandedCfg)
+		}
+	}
 
 	// Restore persistent state if configured
 	if *stateFile != "" {
@@ -524,6 +529,11 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 			newConfigs[expandedCfg.Name] = expandedCfg
 		}
 	}
+	for _, fcgiCfg := range cfg.FcgiPrograms {
+		for _, expandedCfg := range config.ExpandProgramConfig(fcgiCfg) {
+			newConfigs[expandedCfg.Name] = expandedCfg
+		}
+	}
 
 	// Diff against current processes
 	added, removed, modified := processManager.CompareConfigs(newConfigs)
@@ -607,6 +617,15 @@ func updateProcessConfig(processManager *process.ProcessManager, configPath stri
 		if cfg.Name == processName {
 			programCfg = cfg
 			break
+		}
+	}
+
+	if programCfg == nil {
+		for _, cfg := range cfg.FcgiPrograms {
+			if cfg.Name == processName {
+				programCfg = cfg
+				break
+			}
 		}
 	}
 
