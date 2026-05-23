@@ -43,9 +43,9 @@ type ProgramConfig struct {
 	Priority             int               `yaml:"priority" json:"priority"`
 	// Umask: the Go default (022) is octal=18 decimal, but config files must use decimal.
 	// In INI/YAML/JSON: umask=18 corresponds to traditional octal 022 (write umask: 18 not 022).
-	Umask int `yaml:"umask" json:"umask"`
-	DependsOn            []string          `yaml:"dependson" json:"dependson"`
-	Group                string            `yaml:"group" json:"group"`
+	Umask     int      `yaml:"umask" json:"umask"`
+	DependsOn []string `yaml:"dependson" json:"dependson"`
+	Group     string   `yaml:"group" json:"group"`
 
 	// Health checks
 	HealthCheckURL                string  `yaml:"healthcheckurl" json:"healthcheckurl"`
@@ -61,7 +61,7 @@ type ProgramConfig struct {
 	PostStopScript string `yaml:"poststopscript" json:"poststopscript"`
 
 	// Restart rate limiting
-	RestartMaxCount  int `yaml:"restartmaxcount" json:"restartmaxcount"`
+	RestartMaxCount   int `yaml:"restartmaxcount" json:"restartmaxcount"`
 	RestartWindowSecs int `yaml:"restartwindowsecs" json:"restartwindowsecs"`
 
 	// Exit code-based restart policy
@@ -97,6 +97,12 @@ type ProgramConfig struct {
 	RlimitNproc  uint64 `yaml:"rlimitnproc" json:"rlimitnproc"`
 	RlimitStack  uint64 `yaml:"rlimitstack" json:"rlimitstack"`
 
+	// FastCGI socket configuration (non-empty Socket means this is an fcgi-program)
+	Socket        string `yaml:"socket" json:"socket"`
+	SocketBacklog int    `yaml:"socket_backlog" json:"socket_backlog"`
+	SocketOwner   string `yaml:"socket_owner" json:"socket_owner"`
+	SocketMode    uint32 `yaml:"socket_mode" json:"socket_mode"`
+
 	// Exit codes considered "expected" — they do not exhaust StartRetries
 	ExitCodes []int `yaml:"exitcodes" json:"exitcodes"`
 }
@@ -111,45 +117,45 @@ type EventListenerConfig struct {
 	BufferSize int      `yaml:"buffersize" json:"buffersize"`
 
 	// Standard process fields
-	Directory      string            `yaml:"directory" json:"directory"`
-	User           string            `yaml:"user" json:"user"`
-	Environment    map[string]string `yaml:"environment" json:"environment"`
-	AutoStart      bool              `yaml:"autostart" json:"autostart"`
-	AutoRestart    bool              `yaml:"autorestart" json:"autorestart"`
-	StartSecs      int               `yaml:"startsecs" json:"startsecs"`
-	StartRetries   int               `yaml:"startretries" json:"startretries"`
-	StopSecs       int               `yaml:"stopsecs" json:"stopsecs"`
-	StopSignal     string            `yaml:"stopsignal" json:"stopsignal"`
-	RedirectStdout bool              `yaml:"redirectstdout" json:"redirectstdout"`
-	RedirectStderr bool              `yaml:"redirectstderr" json:"redirectstderr"`
-	StdoutLogFile  string            `yaml:"stdoutlogfile" json:"stdoutlogfile"`
-	StderrLogFile  string            `yaml:"stderrlogfile" json:"stderrlogfile"`
-	StdoutLogMaxBytes    int64       `yaml:"stdoutlogmaxbytes" json:"stdoutlogmaxbytes"`
-	StdoutLogBackupCount int         `yaml:"stdoutlogbackupcount" json:"stdoutlogbackupcount"`
-	StderrLogMaxBytes    int64       `yaml:"stderrlogmaxbytes" json:"stderrlogmaxbytes"`
-	StderrLogBackupCount int         `yaml:"stderrlogbackupcount" json:"stderrlogbackupcount"`
-	Priority       int               `yaml:"priority" json:"priority"`
-	Umask          int               `yaml:"umask" json:"umask"`
-	Group          string            `yaml:"group" json:"group"`
+	Directory            string            `yaml:"directory" json:"directory"`
+	User                 string            `yaml:"user" json:"user"`
+	Environment          map[string]string `yaml:"environment" json:"environment"`
+	AutoStart            bool              `yaml:"autostart" json:"autostart"`
+	AutoRestart          bool              `yaml:"autorestart" json:"autorestart"`
+	StartSecs            int               `yaml:"startsecs" json:"startsecs"`
+	StartRetries         int               `yaml:"startretries" json:"startretries"`
+	StopSecs             int               `yaml:"stopsecs" json:"stopsecs"`
+	StopSignal           string            `yaml:"stopsignal" json:"stopsignal"`
+	RedirectStdout       bool              `yaml:"redirectstdout" json:"redirectstdout"`
+	RedirectStderr       bool              `yaml:"redirectstderr" json:"redirectstderr"`
+	StdoutLogFile        string            `yaml:"stdoutlogfile" json:"stdoutlogfile"`
+	StderrLogFile        string            `yaml:"stderrlogfile" json:"stderrlogfile"`
+	StdoutLogMaxBytes    int64             `yaml:"stdoutlogmaxbytes" json:"stdoutlogmaxbytes"`
+	StdoutLogBackupCount int               `yaml:"stdoutlogbackupcount" json:"stdoutlogbackupcount"`
+	StderrLogMaxBytes    int64             `yaml:"stderrlogmaxbytes" json:"stderrlogmaxbytes"`
+	StderrLogBackupCount int               `yaml:"stderrlogbackupcount" json:"stderrlogbackupcount"`
+	Priority             int               `yaml:"priority" json:"priority"`
+	Umask                int               `yaml:"umask" json:"umask"`
+	Group                string            `yaml:"group" json:"group"`
 }
 
 // ServerConfig holds global server settings (typically from [supervisord] section).
 type ServerConfig struct {
-	WebAddr     string `yaml:"webaddr" json:"webaddr"`
-	WebUser     string `yaml:"webuser" json:"webuser"`
-	WebPass     string `yaml:"webpass" json:"webpass"`
-	MetricsAddr string `yaml:"metricsaddr" json:"metricsaddr"`
-	SocketPath  string `yaml:"socketpath" json:"socketpath"`
-	StateFile   string `yaml:"statefile" json:"statefile"`
-	LogDir      string `yaml:"logdir" json:"logdir"`
-	LogFormat   string `yaml:"logformat" json:"logformat"` // "text" or "json", default "text"
-	LogLevel    string `yaml:"loglevel" json:"loglevel"`   // "debug", "info", "warn", "error", default "info"
-	CORSOrigin  string `yaml:"corsorigin" json:"corsorigin"`
-	RateLimitRPS int   `yaml:"ratelimitrps" json:"ratelimitrps"`
-	WebCert     string `yaml:"webcert" json:"webcert"`
-	WebKey      string `yaml:"webkey" json:"webkey"`
-	SocketMode  uint32 `yaml:"socketmode" json:"socketmode"`   // octal, e.g. 0644
-	SocketOwner string `yaml:"socketowner" json:"socketowner"` // "uid:gid" or "user:group"
+	WebAddr      string `yaml:"webaddr" json:"webaddr"`
+	WebUser      string `yaml:"webuser" json:"webuser"`
+	WebPass      string `yaml:"webpass" json:"webpass"`
+	MetricsAddr  string `yaml:"metricsaddr" json:"metricsaddr"`
+	SocketPath   string `yaml:"socketpath" json:"socketpath"`
+	StateFile    string `yaml:"statefile" json:"statefile"`
+	LogDir       string `yaml:"logdir" json:"logdir"`
+	LogFormat    string `yaml:"logformat" json:"logformat"` // "text" or "json", default "text"
+	LogLevel     string `yaml:"loglevel" json:"loglevel"`   // "debug", "info", "warn", "error", default "info"
+	CORSOrigin   string `yaml:"corsorigin" json:"corsorigin"`
+	RateLimitRPS int    `yaml:"ratelimitrps" json:"ratelimitrps"`
+	WebCert      string `yaml:"webcert" json:"webcert"`
+	WebKey       string `yaml:"webkey" json:"webkey"`
+	SocketMode   uint32 `yaml:"socketmode" json:"socketmode"`   // octal, e.g. 0644
+	SocketOwner  string `yaml:"socketowner" json:"socketowner"` // "uid:gid" or "user:group"
 }
 
 // Config 表示整个配置文件的结构
@@ -158,6 +164,8 @@ type Config struct {
 	Programs map[string]*ProgramConfig
 	// EventListeners stores event listener configs (from [eventlistener:x] sections).
 	EventListeners map[string]*EventListenerConfig
+	// FcgiPrograms stores fcgi-program configs (from [fcgi-program:x] sections).
+	FcgiPrograms map[string]*ProgramConfig
 	// Server contains optional global server settings (from [supervisord] section)
 	Server *ServerConfig
 
@@ -169,6 +177,7 @@ type Config struct {
 type YAMLConfig struct {
 	Programs       map[string]*ProgramConfig       `yaml:"programs"`
 	EventListeners map[string]*EventListenerConfig `yaml:"eventlisteners"`
+	FcgiPrograms   map[string]*ProgramConfig       `yaml:"fcgiprograms"`
 	Server         *ServerConfig                   `yaml:"supervisord"`
 	Includes       []string                        `yaml:"includes"`
 }
@@ -177,6 +186,7 @@ type YAMLConfig struct {
 type JSONConfig struct {
 	Programs       map[string]*ProgramConfig       `json:"programs"`
 	EventListeners map[string]*EventListenerConfig `json:"eventlisteners"`
+	FcgiPrograms   map[string]*ProgramConfig       `json:"fcgiprograms"`
 	Server         *ServerConfig                   `json:"supervisord"`
 	Includes       []string                        `json:"includes"`
 }
@@ -298,26 +308,26 @@ func loadINIConfig(configPath string) (*Config, error) {
 			if strings.HasPrefix(section, "program:") {
 				programName := strings.TrimPrefix(section, "program:")
 				currentProgram = &ProgramConfig{
-					Name:                         programName,
-					AutoStart:                    true,
-					AutoRestart:                  true,
-					StartSecs:                    1,
-					StartRetries:                 3,
-					StopSecs:                     10,
-					StopSignal:                   "SIGTERM",
-					Environment:                  make(map[string]string),
-					RedirectStdout:               true,
-					RedirectStderr:               true,
-					StdoutLogMaxBytes:            50 * 1024 * 1024, // 50MB
-					StdoutLogBackupCount:         10,
-					StderrLogMaxBytes:            50 * 1024 * 1024, // 50MB
-					StderrLogBackupCount:         10,
-					Priority:                     999,
-					Umask:                        022,
-					DependsOn:                    []string{},
-					RestartCodes:                 []int{},
-					NoRestartCodes:               []int{},
-					ExitCodes:                    []int{},
+					Name:                          programName,
+					AutoStart:                     true,
+					AutoRestart:                   true,
+					StartSecs:                     1,
+					StartRetries:                  3,
+					StopSecs:                      10,
+					StopSignal:                    "SIGTERM",
+					Environment:                   make(map[string]string),
+					RedirectStdout:                true,
+					RedirectStderr:                true,
+					StdoutLogMaxBytes:             50 * 1024 * 1024, // 50MB
+					StdoutLogBackupCount:          10,
+					StderrLogMaxBytes:             50 * 1024 * 1024, // 50MB
+					StderrLogBackupCount:          10,
+					Priority:                      999,
+					Umask:                         022,
+					DependsOn:                     []string{},
+					RestartCodes:                  []int{},
+					NoRestartCodes:                []int{},
+					ExitCodes:                     []int{},
 					HealthCheckInterval:           30,
 					HealthCheckTimeout:            5,
 					HealthCheckUnhealthyThreshold: 3,
@@ -447,8 +457,8 @@ func loadINIConfig(configPath string) (*Config, error) {
 					currentProgram.HealthCheckRestart = value == "true"
 				case "cputhresholdpercent":
 					if _, err := fmt.Sscanf(value, "%f", &currentProgram.CPUThresholdPercent); err != nil {
-					fmt.Printf("警告: 无法解析 cputhresholdpercent 的值 '%s'，使用默认值\n", value)
-				}
+						fmt.Printf("警告: 无法解析 cputhresholdpercent 的值 '%s'，使用默认值\n", value)
+					}
 				case "memorythresholdbytes":
 					parseIntWarn(value, "memorythresholdbytes", &currentProgram.MemoryThresholdBytes)
 				case "prestartscript":
@@ -699,6 +709,40 @@ func loadYAMLConfig(configPath string) (*Config, error) {
 	}
 	applyEventListenerDefaults(yamlConfig.EventListeners)
 	cfg.EventListeners = yamlConfig.EventListeners
+	// Merge fcgi programs — apply defaults and add to FcgiPrograms
+	cfg.FcgiPrograms = make(map[string]*ProgramConfig)
+	for name, prog := range yamlConfig.FcgiPrograms {
+		if prog.Name == "" {
+			prog.Name = name
+		}
+		if prog.Environment == nil {
+			prog.Environment = make(map[string]string)
+		}
+		if prog.NumProcs == 0 {
+			prog.NumProcs = 1
+		}
+		if prog.ProcessName == "" {
+			prog.ProcessName = "%(program_name)s"
+		}
+		if prog.StopSecs == 0 {
+			prog.StopSecs = 10
+		}
+		if prog.StartSecs == 0 {
+			prog.StartSecs = 1
+		}
+		if prog.StartRetries == 0 {
+			prog.StartRetries = 3
+		}
+		if prog.SocketMode == 0 {
+			prog.SocketMode = 0700
+		}
+		if prog.SocketBacklog == 0 {
+			prog.SocketBacklog = -1 // SOMAXCONN sentinel
+		}
+		prog.RedirectStdout = true
+		prog.RedirectStderr = true
+		cfg.FcgiPrograms[name] = prog
+	}
 	cfg.Server = yamlConfig.Server
 	cfg.includeFiles = yamlConfig.Includes
 	return cfg, nil
@@ -842,6 +886,40 @@ func loadJSONConfig(configPath string) (*Config, error) {
 	}
 	applyEventListenerDefaults(jsonConfig.EventListeners)
 	cfg.EventListeners = jsonConfig.EventListeners
+	// Merge fcgi programs — apply defaults and add to FcgiPrograms
+	cfg.FcgiPrograms = make(map[string]*ProgramConfig)
+	for name, prog := range jsonConfig.FcgiPrograms {
+		if prog.Name == "" {
+			prog.Name = name
+		}
+		if prog.Environment == nil {
+			prog.Environment = make(map[string]string)
+		}
+		if prog.NumProcs == 0 {
+			prog.NumProcs = 1
+		}
+		if prog.ProcessName == "" {
+			prog.ProcessName = "%(program_name)s"
+		}
+		if prog.StopSecs == 0 {
+			prog.StopSecs = 10
+		}
+		if prog.StartSecs == 0 {
+			prog.StartSecs = 1
+		}
+		if prog.StartRetries == 0 {
+			prog.StartRetries = 3
+		}
+		if prog.SocketMode == 0 {
+			prog.SocketMode = 0700
+		}
+		if prog.SocketBacklog == 0 {
+			prog.SocketBacklog = -1 // SOMAXCONN sentinel
+		}
+		prog.RedirectStdout = true
+		prog.RedirectStderr = true
+		cfg.FcgiPrograms[name] = prog
+	}
 	cfg.Server = jsonConfig.Server
 	cfg.includeFiles = jsonConfig.Includes
 	return cfg, nil
@@ -985,7 +1063,6 @@ func findDependencyCycle(programs map[string]*ProgramConfig) string {
 	}
 	return ""
 }
-
 
 // expandTemplate expands %(program_name)s and %(process_num)Xd in a string.
 func expandTemplate(tmpl string, programName string, processNum int) string {
