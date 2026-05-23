@@ -587,12 +587,12 @@ type Snapshot struct {
 	MemoryUsage  uint64
 	Healthy      bool
 	Config       *config.ProgramConfig
+	FcgiSocket   string `json:"fcgi_socket,omitempty"`
+	FcgiRefCount int    `json:"fcgi_refcount,omitempty"`
 }
 
 func (p *Process) Snapshot() Snapshot {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	// Combined health: AND across all configured health sources.
 	healthy := true
 	if p.Config.HealthCheckURL != "" {
 		healthy = healthy && p.Healthy
@@ -600,7 +600,7 @@ func (p *Process) Snapshot() Snapshot {
 	if p.Config.CPUThresholdPercent > 0 || p.Config.MemoryThresholdBytes > 0 {
 		healthy = healthy && p.ResourceHealthy
 	}
-	return Snapshot{
+	snap := Snapshot{
 		Name:         p.Name,
 		State:        p.State,
 		PID:          p.PID,
@@ -615,6 +615,19 @@ func (p *Process) Snapshot() Snapshot {
 		Healthy:      healthy,
 		Config:       p.Config,
 	}
+	p.mu.Unlock()
+
+	// Populate fcgi fields from immutable references (no p.mu needed).
+	if p.Config != nil && p.Config.Socket != "" && p.manager != nil {
+		baseName := fcgiBaseName(p.Config.Name)
+		p.manager.mu.RLock()
+		if sm, ok := p.manager.fcgiSockets[baseName]; ok {
+			snap.FcgiSocket = sm.SocketAddr()
+			snap.FcgiRefCount = sm.RefCount()
+		}
+		p.manager.mu.RUnlock()
+	}
+	return snap
 }
 
 // fcgiBaseName strips the _NN suffix from numprocs-expanded names
