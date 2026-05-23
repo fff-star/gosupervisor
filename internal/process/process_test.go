@@ -3998,3 +3998,162 @@ func TestStart_ExecFails_Flaky(t *testing.T) {
 		}
 	}
 }
+
+func TestFcgiProcessStartStop(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "fcgi.sock")
+
+	Logf = t.Logf
+
+	pm := NewProcessManager(nil)
+	cfg := &config.ProgramConfig{
+		Name:    "fcgi-test",
+		Command: "sleep 10",
+		Socket:  "unix://" + sockPath,
+		SocketMode: 0700,
+		StopSecs:   1,
+		StartSecs:  1,
+		StartRetries: 1,
+	}
+
+	p := pm.AddProcess(cfg)
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
+		t.Fatal("socket file was not created after start")
+	}
+
+	pm.mu.RLock()
+	sm, ok := pm.fcgiSockets["fcgi-test"]
+	pm.mu.RUnlock()
+	if !ok {
+		t.Fatal("fcgi socket not found in manager")
+	}
+	if sm.RefCount() != 1 {
+		t.Errorf("expected refcount=1, got %d", sm.RefCount())
+	}
+
+	if err := p.Stop(); err != nil {
+		t.Fatalf("Stop failed: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	pm.mu.RLock()
+	_, ok = pm.fcgiSockets["fcgi-test"]
+	pm.mu.RUnlock()
+	if ok {
+		t.Error("fcgi socket should be removed from manager after stop")
+	}
+	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
+		t.Error("socket file should be removed after last child stops")
+	}
+}
+
+func TestFcgiNumProcsSocketShared(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "shared.sock")
+
+	Logf = t.Logf
+
+	pm := NewProcessManager(nil)
+	cfg1 := &config.ProgramConfig{
+		Name:    "fcgi-shared_1",
+		Command: "sleep 30",
+		Socket:  "unix://" + sockPath,
+		SocketMode: 0700,
+		StopSecs:   1,
+		StartSecs:  1,
+		StartRetries: 1,
+	}
+	cfg2 := &config.ProgramConfig{
+		Name:    "fcgi-shared_2",
+		Command: "sleep 30",
+		Socket:  "unix://" + sockPath,
+		SocketMode: 0700,
+		StopSecs:   1,
+		StartSecs:  1,
+		StartRetries: 1,
+	}
+
+	p1 := pm.AddProcess(cfg1)
+	p2 := pm.AddProcess(cfg2)
+
+	if err := p1.Start(); err != nil {
+		t.Fatalf("p1 Start failed: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	if err := p2.Start(); err != nil {
+		t.Fatalf("p2 Start failed: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	pm.mu.RLock()
+	sm, ok := pm.fcgiSockets["fcgi-shared"]
+	pm.mu.RUnlock()
+	if !ok {
+		t.Fatal("fcgi socket not found")
+	}
+	if sm.RefCount() != 2 {
+		t.Errorf("expected refcount=2, got %d", sm.RefCount())
+	}
+
+	if err := p1.Stop(); err != nil {
+		t.Fatalf("p1 Stop failed: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	pm.mu.RLock()
+	if sm.RefCount() != 1 {
+		t.Errorf("expected refcount=1 after p1 stop, got %d", sm.RefCount())
+	}
+	pm.mu.RUnlock()
+	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
+		t.Error("socket should still exist after p1 stop")
+	}
+
+	if err := p2.Stop(); err != nil {
+		t.Fatalf("p2 Stop failed: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
+		t.Error("socket should be removed after last child stops")
+	}
+}
+
+func TestFcgiSnapshotFields(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "snap.sock")
+
+	Logf = t.Logf
+
+	pm := NewProcessManager(nil)
+	cfg := &config.ProgramConfig{
+		Name:    "fcgi-snap",
+		Command: "sleep 10",
+		Socket:  "unix://" + sockPath,
+		SocketMode: 0700,
+		StopSecs:   1,
+		StartSecs:  1,
+		StartRetries: 1,
+	}
+
+	p := pm.AddProcess(cfg)
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	defer p.Stop()
+
+	snap := p.Snapshot()
+	if snap.FcgiSocket != "unix://"+sockPath {
+		t.Errorf("expected fcgi_socket in snapshot, got %s", snap.FcgiSocket)
+	}
+	if snap.FcgiRefCount != 1 {
+		t.Errorf("expected fcgi_refcount=1, got %d", snap.FcgiRefCount)
+	}
+}

@@ -420,10 +420,22 @@ func (p *Process) Start() error {
 func (p *Process) Stop() error {
 	p.mu.Lock()
 	cmd := p.Cmd
+	cfg := p.Config
 
 	if cmd == nil || cmd.Process == nil {
 		p.State = StateStopped
 		p.mu.Unlock()
+		// Clean up fcgi socket even if process already exited.
+		if cfg != nil && cfg.Socket != "" && p.manager != nil {
+			baseName := fcgiBaseName(p.Name)
+			p.manager.mu.Lock()
+			sm, ok := p.manager.fcgiSockets[baseName]
+			if ok && sm.Detach() {
+				sm.Close()
+				delete(p.manager.fcgiSockets, baseName)
+			}
+			p.manager.mu.Unlock()
+		}
 		return nil
 	}
 
@@ -431,6 +443,17 @@ func (p *Process) Stop() error {
 		cmd.Process.Kill()
 		p.State = StateStopped
 		p.mu.Unlock()
+		// Clean up fcgi socket even if process has already exited.
+		if cfg != nil && cfg.Socket != "" && p.manager != nil {
+			baseName := fcgiBaseName(p.Name)
+			p.manager.mu.Lock()
+			sm, ok := p.manager.fcgiSockets[baseName]
+			if ok && sm.Detach() {
+				sm.Close()
+				delete(p.manager.fcgiSockets, baseName)
+			}
+			p.manager.mu.Unlock()
+		}
 		return nil
 	}
 
@@ -443,6 +466,7 @@ func (p *Process) Stop() error {
 		p.startCancel()
 	}
 	waitCh := p.waitCh
+	pidBefore := p.PID
 	p.mu.Unlock()
 
 	// Send graceful stop signal
@@ -451,7 +475,7 @@ func (p *Process) Stop() error {
 		sig = syscall.SIGTERM
 	}
 	if p.Config.StopAsGroup || p.Config.KillsAsGroup {
-		_ = signalProcessGroup(cmd.Process.Pid, sig)
+		_ = signalProcessGroup(pidBefore, sig)
 	} else {
 		cmd.Process.Signal(sig)
 	}
@@ -475,7 +499,7 @@ func (p *Process) Stop() error {
 
 	// Force kill if still alive
 	if p.Config.StopAsGroup || p.Config.KillsAsGroup {
-		_ = signalProcessGroup(cmd.Process.Pid, syscall.SIGKILL)
+		_ = signalProcessGroup(pidBefore, syscall.SIGKILL)
 	} else {
 		cmd.Process.Kill()
 	}
@@ -497,9 +521,8 @@ done:
 	p.mu.Unlock()
 
 	// Detach fcgi socket
-	if p.Config.Socket != "" && p.manager != nil {
-		baseName := fcgiBaseName(p.Config.Name)
-
+	if cfg != nil && cfg.Socket != "" && p.manager != nil {
+		baseName := fcgiBaseName(p.Name)
 		p.manager.mu.Lock()
 		sm, ok := p.manager.fcgiSockets[baseName]
 		if ok && sm.Detach() {
