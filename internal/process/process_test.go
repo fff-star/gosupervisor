@@ -2449,6 +2449,8 @@ func TestSendWebhookServerError(t *testing.T) {
 		WebhookURL:   "http://" + ln.Addr().String() + "/hook",
 		Environment:  make(map[string]string),
 	}
+	Logf = t.Logf
+
 	p := pm.AddProcess(cfg)
 	p.mu.Lock()
 	p.PID = 1
@@ -4123,6 +4125,8 @@ func TestFcgiNumProcsSocketShared(t *testing.T) {
 	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
 		t.Error("socket should be removed after last child stops")
 	}
+
+	time.Sleep(200 * time.Millisecond)
 }
 
 func TestFcgiSnapshotFields(t *testing.T) {
@@ -4147,7 +4151,6 @@ func TestFcgiSnapshotFields(t *testing.T) {
 		t.Fatalf("Start failed: %v", err)
 	}
 	time.Sleep(200 * time.Millisecond)
-	defer p.Stop()
 
 	snap := p.Snapshot()
 	if snap.FcgiSocket != "unix://"+sockPath {
@@ -4156,4 +4159,9 @@ func TestFcgiSnapshotFields(t *testing.T) {
 	if snap.FcgiRefCount != 1 {
 		t.Errorf("expected fcgi_refcount=1, got %d", snap.FcgiRefCount)
 	}
+
+	if err := p.Stop(); err != nil {
+		t.Logf("Stop error: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
 }
