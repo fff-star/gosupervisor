@@ -539,11 +539,26 @@ func TestResetSSEBroker_ReplacesHandler(t *testing.T) {
 }
 
 func TestInitSSEBroker_OnlyOnce(t *testing.T) {
-	process.SwapOnEvent(nil)
+	// Reset to a clean state — ResetSSEBroker always re-wires the handler
+	// regardless of sync.Once.
+	ResetSSEBroker()
 
+	// Calling InitSSEBroker again should be a no-op (sync.Once already
+	// consumed by a previous test or by ResetSSEBroker).
 	InitSSEBroker()
-	InitSSEBroker() // second call should be no-op
 
-	// If double-wrapped, RecordEvent would call handler twice — but we just verify no panic
+	// Subscribe a client and record an event.
+	ch := globalSSEBroker.subscribe()
 	process.RecordEvent("once_test", process.EventStart, 1, 0, "once")
+	globalSSEBroker.unsubscribe(ch)
+
+	// Event should have been broadcast to the client.
+	select {
+	case data := <-ch:
+		if !strings.Contains(string(data), "once_test") {
+			t.Errorf("expected event data containing 'once_test', got: %s", string(data))
+		}
+	default:
+		t.Error("expected event to be broadcast, but channel was empty")
+	}
 }

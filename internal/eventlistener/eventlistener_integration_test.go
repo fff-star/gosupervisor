@@ -121,5 +121,12 @@ func TestEventListenerE2E_ChildCrash(t *testing.T) {
 
 	time.Sleep(300 * time.Millisecond)
 	l.stop()
-	// Must not hang
+
+	// After a crashing child, stop() should clean up and leave state STOPPED.
+	l.mu.Lock()
+	state := l.state
+	l.mu.Unlock()
+	if state != "STOPPED" {
+		t.Errorf("expected STOPPED after crash+stop, got %q", state)
+	}
 }

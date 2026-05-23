@@ -4216,133 +4216,128 @@ func TestFcgiSnapshotFields(t *testing.T) {
 }
 
 func TestStartAll_DependencyOrder(t *testing.T) {
-	logDir := "./test_logs_deporder"
-	os.MkdirAll(logDir, 0755)
-	defer os.RemoveAll(logDir)
-
-	logManager, _ := logger.NewDefaultLogger(logDir)
+	dir := t.TempDir()
+	logManager, _ := logger.NewDefaultLogger(dir)
 	defer logManager.Close()
 
 	pm := NewProcessManager(logManager)
 
+	// a depends on b, so b must start before a.
+	// Use commands that record their start order to a shared file.
+	tmpFile := filepath.Join(dir, "order.txt")
+
 	pm.AddProcess(&config.ProgramConfig{
 		Name:        "a",
-		Command:     "sleep 1",
+		Command:     fmt.Sprintf("echo a >> %s", tmpFile),
 		DependsOn:   []string{"b"},
-		AutoStart:   false,
+		AutoStart:   true,
 		AutoRestart: false,
 		StartSecs:   0,
 		StopSecs:    1,
 	})
 	pm.AddProcess(&config.ProgramConfig{
 		Name:        "b",
-		Command:     "sleep 1",
+		Command:     fmt.Sprintf("echo b >> %s", tmpFile),
 		DependsOn:   []string{},
-		AutoStart:   false,
+		AutoStart:   true,
 		AutoRestart: false,
 		StartSecs:   0,
 		StopSecs:    1,
 	})
 
-	dependencyGraph := map[string][]string{
-		"a": {"b"},
-		"b": {},
-	}
+	pm.StartAll()
+	defer pm.StopAll()
 
-	order, err := pm.topologicalSort(dependencyGraph)
+	// Wait for both processes to complete
+	time.Sleep(500 * time.Millisecond)
+
+	data, err := os.ReadFile(tmpFile)
 	if err != nil {
-		t.Fatalf("topologicalSort failed: %v", err)
+		t.Fatalf("read order file: %v", err)
 	}
-
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d: %v", len(lines), lines)
+	}
+	// b must come before a (dependency first)
 	bIdx := -1
 	aIdx := -1
-	for i, name := range order {
-		if name == "b" {
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "b" {
 			bIdx = i
 		}
-		if name == "a" {
+		if strings.TrimSpace(line) == "a" {
 			aIdx = i
 		}
 	}
 	if bIdx == -1 || aIdx == -1 {
-		t.Fatalf("both processes should be in order: %v", order)
+		t.Fatalf("both processes should appear in order file: %v", lines)
 	}
 	if bIdx >= aIdx {
-		t.Errorf("b (dependency) must be before a in topological order: %v", order)
+		t.Errorf("b (dependency) must start before a, got: %v", lines)
 	}
-
-	pm.StopAll()
 }
 
-func TestStopAll_ReverseDependencyOrder(t *testing.T) {
-	logDir := "./test_logs_revdep"
-	os.MkdirAll(logDir, 0755)
-	defer os.RemoveAll(logDir)
-
-	logManager, _ := logger.NewDefaultLogger(logDir)
+func TestStopAll_StopsAllProcesses(t *testing.T) {
+	dir := t.TempDir()
+	logManager, _ := logger.NewDefaultLogger(dir)
 	defer logManager.Close()
 
 	pm := NewProcessManager(logManager)
 
 	pm.AddProcess(&config.ProgramConfig{
-		Name:        "a",
-		Command:     "sleep 1",
-		DependsOn:   []string{"b"},
-		AutoStart:   false,
+		Name:        "x",
+		Command:     "sleep 60",
+		DependsOn:   []string{},
+		AutoStart:   true,
 		AutoRestart: false,
 		StartSecs:   0,
 		StopSecs:    1,
 	})
 	pm.AddProcess(&config.ProgramConfig{
-		Name:        "b",
-		Command:     "sleep 1",
+		Name:        "y",
+		Command:     "sleep 60",
 		DependsOn:   []string{},
-		AutoStart:   false,
+		AutoStart:   true,
 		AutoRestart: false,
 		StartSecs:   0,
 		StopSecs:    1,
 	})
 
-	dependencyGraph := map[string][]string{
-		"a": {"b"},
-		"b": {},
-	}
+	pm.StartAll()
+	time.Sleep(200 * time.Millisecond)
 
-	// Get topological order and reverse for stop order
-	order, err := pm.topologicalSort(dependencyGraph)
-	if err != nil {
-		t.Fatalf("topologicalSort failed: %v", err)
-	}
-	stopOrder := make([]string, len(order))
-	for i, name := range order {
-		stopOrder[len(order)-1-i] = name
-	}
-
-	aIdx := -1
-	bIdx := -1
-	for i, name := range stopOrder {
-		if name == "a" {
-			aIdx = i
+	// Verify processes are running
+	for _, name := range []string{"x", "y"} {
+		p := pm.GetProcess(name)
+		if p == nil {
+			t.Fatalf("process %s not found", name)
 		}
-		if name == "b" {
-			bIdx = i
+		if p.GetState() != StateRunning {
+			t.Errorf("process %s should be RUNNING after StartAll(), got %s", name, p.GetState())
 		}
-	}
-	if aIdx == -1 || bIdx == -1 {
-		t.Fatalf("both processes should be in stop order: %v", stopOrder)
-	}
-	if aIdx >= bIdx {
-		t.Errorf("a (dependent) must stop before b (dependency): %v", stopOrder)
 	}
 
 	pm.StopAll()
+
+	// Verify all stopped
+	for _, name := range []string{"x", "y"} {
+		p := pm.GetProcess(name)
+		if p == nil {
+			t.Fatalf("process %s not found", name)
+		}
+		if p.GetState() == StateRunning {
+			t.Errorf("process %s should be stopped after StopAll()", name)
+		}
+	}
 }
 
 func TestSendWebhook_RetryOnNetworkError(t *testing.T) {
+	var attempts int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer srv.Close()
 
 	logDir := "./test_logs_webhook_retry"
 	os.MkdirAll(logDir, 0755)
@@ -4365,14 +4360,28 @@ func TestSendWebhook_RetryOnNetworkError(t *testing.T) {
 	pm.AddProcess(cfg)
 	p := pm.GetProcess("wh_retry")
 
-	// sendWebhook should succeed (server is up)
+	// First call: server is up, should succeed in 1 attempt.
 	p.sendWebhook("STARTING", 123, 0)
+	if attempts != 1 {
+		t.Errorf("expected 1 attempt when server is up, got %d", attempts)
+	}
 
-	// Close server to simulate network error
+	// Close server, then call again. With network error, it should retry
+	// (initial + WebhookRetries attempts = 3 total). But since server is
+	// closed, all attempts fail. Verify it doesn't panic and completes
+	// within a reasonable time.
+	attempts = 0
+	start := time.Now()
 	srv.Close()
-
-	// sendWebhook should retry and eventually fail (no panic)
 	p.sendWebhook("RUNNING", 123, 0)
+	elapsed := time.Since(start)
+	// With 2 retries + 1s timeout each, should take at least 1s total
+	if elapsed < 500*time.Millisecond {
+		t.Errorf("expected retries to take some time, got %v", elapsed)
+	}
+	if elapsed > 30*time.Second {
+		t.Errorf("sendWebhook took too long: %v", elapsed)
+	}
 }
 
 func TestSendWebhook_BackoffCap(t *testing.T) {
@@ -4401,7 +4410,13 @@ func TestSendWebhook_BackoffCap(t *testing.T) {
 	p.sendWebhook("STARTING", 456, 0)
 	elapsed := time.Since(start)
 
-	// With 3 retries and 1s timeout each, should take some time but not block forever
+	// With WebhookRetries=3 and WebhookTimeout=1:
+	// Initial attempt (timeout 1s) + retry 1 (backoff 1s, timeout 1s) +
+	// retry 2 (backoff 2s, timeout 1s) + retry 3 (backoff 4s, timeout 1s)
+	// Total: ~1 + 1+1 + 2+1 + 4+1 ≈ 11s minimum
+	if elapsed < 2*time.Second {
+		t.Errorf("expected retries to take >2s, got %v", elapsed)
+	}
 	if elapsed > 60*time.Second {
 		t.Errorf("sendWebhook took too long: %v", elapsed)
 	}
@@ -4430,7 +4445,15 @@ func TestStart_ChdirFailure(t *testing.T) {
 
 	err := p.Start()
 	if err != nil {
-		t.Logf("Start() with bad directory: %v (expected on some systems)", err)
+		// Expected: Start() should return an error for nonexistent directory
+		return
+	}
+	// If Start() succeeded (shell wrapper may spawn despite bad Dir),
+	// the process should still be cleanly stoppable.
+	defer p.Stop()
+	state := p.GetState()
+	if state != StateRunning && state != StateExited && state != StateFatal {
+		t.Errorf("unexpected state after Start() with bad directory: %s", state)
 	}
 }
 

@@ -1024,7 +1024,8 @@ func TestDebug_OutputsWhenEnabled(t *testing.T) {
 	}
 }
 
-// TestSetLevel verifies that SetLevel changes the minimum log level.
+// TestSetLevel verifies that SetLevel changes the minimum log level and
+// that the new level actually filters subsequent log output.
 func TestSetLevel(t *testing.T) {
 	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
@@ -1035,13 +1036,24 @@ func TestSetLevel(t *testing.T) {
 	}
 	defer logger.Close()
 
-	logger.SetLevel(LevelError)
-	if logger.level != LevelError {
-		t.Errorf("SetLevel(LevelError): level = %d, want %d", logger.level, LevelError)
+	// Default is INFO — Debug should be filtered
+	logger.Debug("before setlevel")
+	content := readSystemLog(t, logDir)
+	if strings.Contains(content, "before setlevel") {
+		t.Error("Debug message should be filtered at default INFO level")
+	}
+
+	logger.SetLevel(LevelDebug)
+	logger.Debug("after setlevel")
+
+	content = readSystemLog(t, logDir)
+	if !strings.Contains(content, "after setlevel") {
+		t.Error("Debug message should appear after SetLevel(LevelDebug)")
 	}
 }
 
-// TestSetFormat verifies that SetFormat changes the system log output format.
+// TestSetFormat verifies that SetFormat changes the system log output format
+// and subsequent log messages use the new format.
 func TestSetFormat(t *testing.T) {
 	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
@@ -1052,9 +1064,23 @@ func TestSetFormat(t *testing.T) {
 	}
 	defer logger.Close()
 
+	// Default is text format
+	logger.Info("text format message")
+	content := readSystemLog(t, logDir)
+	if !strings.Contains(content, "[INFO]") {
+		t.Error("text format should contain [INFO] prefix")
+	}
+
+	// Switch to JSON format and verify output format changes
 	logger.SetFormat(FormatJSON)
-	if logger.format != FormatJSON {
-		t.Errorf("SetFormat(FormatJSON): format = %s, want %s", logger.format, FormatJSON)
+	logger.Info("json format message")
+
+	content = readSystemLog(t, logDir)
+	if !strings.Contains(content, `"level":"INFO"`) {
+		t.Error("JSON format should contain level field")
+	}
+	if !strings.Contains(content, `"message":"json format message"`) {
+		t.Error("JSON format should contain message field")
 	}
 }
 

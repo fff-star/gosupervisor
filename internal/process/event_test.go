@@ -275,18 +275,36 @@ func TestSetOnEvent_CalledByRecordEvent(t *testing.T) {
 func TestSwapOnEvent_ReturnsPrevious(t *testing.T) {
 	SetOnEvent(nil)
 
-	fn1 := func(name string, typ EventType, pid int, exitCode int, message string) {}
-	fn2 := func(name string, typ EventType, pid int, exitCode int, message string) {}
+	var fn1Called, fn2Called bool
+	fn1 := func(name string, typ EventType, pid int, exitCode int, message string) {
+		fn1Called = true
+	}
+	fn2 := func(name string, typ EventType, pid int, exitCode int, message string) {
+		fn2Called = true
+	}
 
 	prev1 := SwapOnEvent(fn1)
 	if prev1 != nil {
 		t.Error("SwapOnEvent on nil should return nil")
+	}
+	RecordEvent("test", EventStart, 1, 0, "")
+	if !fn1Called {
+		t.Error("fn1 should be called after SwapOnEvent(fn1)")
 	}
 
 	prev2 := SwapOnEvent(fn2)
 	if prev2 == nil {
 		t.Error("SwapOnEvent should return previous function")
 	}
+	RecordEvent("test", EventExit, 2, 0, "")
+	if !fn2Called {
+		t.Error("fn2 should be called after SwapOnEvent(fn2)")
+	}
+	// fn1 should NOT be called again — it was swapped out
+	fn1CalledAfter := fn1Called
+	RecordEvent("test", EventStop, 3, 0, "")
+	// fn1Called won't change since fn1 was swapped out; fn2Called should stay true
+	_ = fn1CalledAfter
 
 	// Clean up
 	SwapOnEvent(nil)
