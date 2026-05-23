@@ -911,3 +911,147 @@ func TestLogSystemRotation(t *testing.T) {
 		t.Error("expected backup file after system log rotation")
 	}
 }
+
+// readSystemLog reads the system.log file from the given directory.
+func readSystemLog(t *testing.T, dir string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "system.log"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ""
+		}
+		t.Fatalf("read system.log: %v", err)
+	}
+	return string(data)
+}
+
+// TestParseLevel_AllValues tests ParseLevel with all valid and edge-case inputs.
+func TestParseLevel_AllValues(t *testing.T) {
+	tests := []struct {
+		input string
+		want  Level
+	}{
+		{"debug", LevelDebug},
+		{"DEBUG", LevelDebug},
+		{"info", LevelInfo},
+		{"warn", LevelWarn},
+		{"warning", LevelWarn},
+		{"error", LevelError},
+		{"unknown", LevelInfo},
+		{"", LevelInfo},
+	}
+	for _, tt := range tests {
+		got := ParseLevel(tt.input)
+		if got != tt.want {
+			t.Errorf("ParseLevel(%q) = %d, want %d", tt.input, got, tt.want)
+		}
+	}
+}
+
+// TestSetLevel_FiltersOutput verifies that setting the log level to WARN
+// filters out DEBUG and INFO messages from system.log.
+func TestSetLevel_FiltersOutput(t *testing.T) {
+	logDir := t.TempDir()
+	os.MkdirAll(logDir, 0755)
+
+	logger, err := NewLogger(logDir, 50*1024*1024, 10, false, LevelWarn, FormatText)
+	if err != nil {
+		t.Fatalf("NewLogger failed: %v", err)
+	}
+	defer logger.Close()
+
+	logger.Debug("debug message should be filtered")
+	logger.Info("info message should be filtered")
+	logger.Warning("warning message should appear")
+	logger.Error("error message should appear")
+
+	content := readSystemLog(t, logDir)
+	if strings.Contains(content, "debug message should be filtered") {
+		t.Error("DEBUG message was written to system.log despite WARN level")
+	}
+	if strings.Contains(content, "info message should be filtered") {
+		t.Error("INFO message was written to system.log despite WARN level")
+	}
+	if !strings.Contains(content, "warning message should appear") {
+		t.Error("WARNING message was NOT written to system.log at WARN level")
+	}
+	if !strings.Contains(content, "error message should appear") {
+		t.Error("ERROR message was NOT written to system.log at WARN level")
+	}
+}
+
+// TestSetFormat_JSON verifies that JSON formatted logs contain the expected fields.
+func TestSetFormat_JSON(t *testing.T) {
+	logDir := t.TempDir()
+	os.MkdirAll(logDir, 0755)
+
+	logger, err := NewLogger(logDir, 50*1024*1024, 10, false, LevelInfo, FormatJSON)
+	if err != nil {
+		t.Fatalf("NewLogger failed: %v", err)
+	}
+	defer logger.Close()
+
+	logger.Info("test json message")
+
+	content := readSystemLog(t, logDir)
+	if !strings.Contains(content, `"level":"INFO"`) {
+		t.Errorf("system.log does not contain expected level field: %s", content)
+	}
+	if !strings.Contains(content, `"message":"test json message"`) {
+		t.Errorf("system.log does not contain expected message field: %s", content)
+	}
+}
+
+// TestDebug_OutputsWhenEnabled verifies that Debug messages appear in
+// system.log when the log level is set to DEBUG.
+func TestDebug_OutputsWhenEnabled(t *testing.T) {
+	logDir := t.TempDir()
+	os.MkdirAll(logDir, 0755)
+
+	logger, err := NewLogger(logDir, 50*1024*1024, 10, false, LevelDebug, FormatText)
+	if err != nil {
+		t.Fatalf("NewLogger failed: %v", err)
+	}
+	defer logger.Close()
+
+	logger.Debug("debug message at debug level")
+
+	content := readSystemLog(t, logDir)
+	if !strings.Contains(content, "debug message at debug level") {
+		t.Errorf("DEBUG message not found in system.log at DEBUG level, content: %s", content)
+	}
+}
+
+// TestSetLevel verifies that SetLevel changes the minimum log level.
+func TestSetLevel(t *testing.T) {
+	logDir := t.TempDir()
+	os.MkdirAll(logDir, 0755)
+
+	logger, err := NewDefaultLogger(logDir)
+	if err != nil {
+		t.Fatalf("NewDefaultLogger failed: %v", err)
+	}
+	defer logger.Close()
+
+	logger.SetLevel(LevelError)
+	if logger.level != LevelError {
+		t.Errorf("SetLevel(LevelError): level = %d, want %d", logger.level, LevelError)
+	}
+}
+
+// TestSetFormat verifies that SetFormat changes the system log output format.
+func TestSetFormat(t *testing.T) {
+	logDir := t.TempDir()
+	os.MkdirAll(logDir, 0755)
+
+	logger, err := NewDefaultLogger(logDir)
+	if err != nil {
+		t.Fatalf("NewDefaultLogger failed: %v", err)
+	}
+	defer logger.Close()
+
+	logger.SetFormat(FormatJSON)
+	if logger.format != FormatJSON {
+		t.Errorf("SetFormat(FormatJSON): format = %s, want %s", logger.format, FormatJSON)
+	}
+}
