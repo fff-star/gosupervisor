@@ -11,6 +11,8 @@ import (
 	"gosupervisor/internal/config"
 	"gosupervisor/internal/logger"
 	"gosupervisor/internal/process"
+
+	"go.uber.org/goleak"
 )
 
 func newTestSocketServer(t *testing.T) *SocketServer {
@@ -668,4 +670,8 @@ func TestIsValidName(t *testing.T) {
 			t.Errorf("isValidName(%q) = %v, want %v", tt.name, got, tt.expected)
 		}
 	}
+}
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
 }
