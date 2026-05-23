@@ -1,10 +1,13 @@
 package web
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -410,6 +413,122 @@ func TestWebServerRealHTTP_NotFound(t *testing.T) {
 	ct := resp.Header.Get("Content-Type")
 	if ct != "application/json" {
 		t.Errorf("expected Content-Type application/json for 404, got %s", ct)
+	}
+}
+
+func TestWebServerRealHTTP_SSEEventStream(t *testing.T) {
+	pm, cleanup := newIntegrationPM(t)
+	defer cleanup()
+
+	// Wire the SSE broker so process events are broadcast to SSE clients.
+	// ResetSSEBroker always re-wires the handler regardless of sync.Once.
+	ResetSSEBroker()
+
+	logDir := t.TempDir()
+	ws, err := NewWebServer(pm, logDir)
+	if err != nil {
+		t.Fatalf("NewWebServer: %v", err)
+	}
+	defer ws.Stop()
+
+	baseURL := startWebServer(t, ws)
+
+	// Open SSE connection in a goroutine; read frames via a channel.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	type sseEvent struct {
+		data string
+	}
+	events := make(chan sseEvent, 20)
+
+	go func() {
+		defer close(done)
+		req, _ := http.NewRequestWithContext(ctx, "GET", baseURL+"/api/v1/events/stream", nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Logf("SSE request failed: %v", err)
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Logf("SSE status: %d", resp.StatusCode)
+			return
+		}
+		ct := resp.Header.Get("Content-Type")
+		if ct != "text/event-stream" {
+			t.Logf("unexpected Content-Type: %s", ct)
+			return
+		}
+
+		reader := bufio.NewReader(resp.Body)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "data: ") {
+				events <- sseEvent{data: strings.TrimPrefix(line, "data: ")}
+			}
+		}
+	}()
+
+	// Wait for the SSE connection to be established
+	time.Sleep(100 * time.Millisecond)
+
+	// Broadcast events directly — simulating what RecordEvent does via OnEvent.
+	globalSSEBroker.broadcast(process.Event{
+		Timestamp: time.Now(),
+		Name:      "test1",
+		Type:      process.EventStart,
+		PID:       42,
+		Message:   "started",
+	})
+	globalSSEBroker.broadcast(process.Event{
+		Timestamp: time.Now(),
+		Name:      "test1",
+		Type:      process.EventStop,
+		PID:       42,
+		Message:   "stopped",
+	})
+
+	// Collect events
+	deadline := time.After(2 * time.Second)
+	var received []sseEvent
+collect:
+	for len(received) < 2 {
+		select {
+		case ev := <-events:
+			received = append(received, ev)
+		case <-deadline:
+			break collect
+		}
+	}
+
+	cancel()
+	<-done
+
+	if len(received) < 2 {
+		t.Fatalf("expected at least 2 SSE events, got %d: %v", len(received), received)
+	}
+	foundStart := false
+	foundStop := false
+	for _, ev := range received {
+		if strings.Contains(ev.data, `"type":"start"`) {
+			foundStart = true
+		}
+		if strings.Contains(ev.data, `"type":"stop"`) {
+			foundStop = true
+		}
+	}
+	if !foundStart {
+		t.Error("expected STARTING event in SSE stream")
+	}
+	if !foundStop {
+		t.Error("expected STOPPED event in SSE stream")
 	}
 }
 
