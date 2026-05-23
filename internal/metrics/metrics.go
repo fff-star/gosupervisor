@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"runtime"
@@ -281,11 +282,17 @@ func (mm *MetricsManager) RecordHealthCheckFailure(name string) {
 func (mm *MetricsManager) StartMetricsServer(addr string) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(mm.registry, promhttp.HandlerOpts{}))
+
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("metrics server listen: %w", err)
+	}
+
 	mm.mu.Lock()
-	mm.httpServer = &http.Server{Addr: addr, Handler: mux}
+	mm.httpServer = &http.Server{Addr: listener.Addr().String(), Handler: mux}
 	mm.mu.Unlock()
-	fmt.Printf("Prometheus指标服务器启动在 %s\n", addr)
-	return mm.httpServer.ListenAndServe()
+	fmt.Printf("Prometheus指标服务器启动在 %s\n", mm.httpServer.Addr)
+	return mm.httpServer.Serve(listener)
 }
 
 // StartMetricsCollector 启动指标收集器

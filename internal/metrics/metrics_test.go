@@ -1,6 +1,8 @@
 package metrics
 
 import (
+	"io"
+	"net/http"
 	"testing"
 	"time"
 
@@ -291,4 +293,44 @@ func TestRecordHealthCheckFailure(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestStartMetricsServer(t *testing.T) {
+	processManager := setupMetricsTestEnvironment(t)
+	mm := NewMetricsManager(processManager)
+
+	// Start on random port
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- mm.StartMetricsServer("127.0.0.1:0")
+	}()
+
+	// Give server time to start
+	time.Sleep(100 * time.Millisecond)
+
+	mm.mu.Lock()
+	if mm.httpServer == nil {
+		mm.mu.Unlock()
+		t.Fatal("httpServer is nil after StartMetricsServer")
+	}
+	actualAddr := mm.httpServer.Addr
+	mm.mu.Unlock()
+
+	// Hit the /metrics endpoint
+	resp, err := http.Get("http://" + actualAddr + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if len(body) == 0 {
+		t.Error("expected non-empty metrics response")
+	}
+
+	mm.Stop()
 }
