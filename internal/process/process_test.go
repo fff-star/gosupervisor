@@ -4403,3 +4403,97 @@ func TestSendWebhook_BackoffCap(t *testing.T) {
 		t.Errorf("sendWebhook took too long: %v", elapsed)
 	}
 }
+
+func TestStart_ChdirFailure(t *testing.T) {
+	logDir := "./test_logs_chdir"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:        "chdir_test",
+		Command:     "echo test",
+		Directory:   "/nonexistent/path/that/does/not/exist",
+		AutoStart:   false,
+		AutoRestart: false,
+		StopSecs:    1,
+		Environment: make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("chdir_test")
+
+	err := p.Start()
+	if err != nil {
+		t.Logf("Start() with bad directory: %v (expected on some systems)", err)
+	}
+}
+
+func TestStop_WaitTimeout(t *testing.T) {
+	logDir := "./test_logs_stoptimeout"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:        "timeout_test",
+		Command:     "trap '' TERM; sleep 60", // ignore SIGTERM
+		AutoStart:   false,
+		AutoRestart: false,
+		StopSignal:  "SIGTERM",
+		StopSecs:    1, // short timeout to trigger SIGKILL
+		Environment: make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("timeout_test")
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+
+	start := time.Now()
+	p.Stop()
+	elapsed := time.Since(start)
+
+	if elapsed > 5*time.Second {
+		t.Errorf("Stop() took too long: %v (expected < 5s with StopSecs=1)", elapsed)
+	}
+
+	if p.GetState() == StateRunning {
+		t.Error("process should not be RUNNING after Stop()")
+	}
+}
+
+func TestSignal_InvalidSignal(t *testing.T) {
+	logDir := "./test_logs_siginvalid"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:        "siginvalid",
+		Command:     "sleep 60",
+		AutoStart:   false,
+		AutoRestart: false,
+		StopSecs:    1,
+		Environment: make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("siginvalid")
+
+	_ = p.Start()
+	defer p.Stop()
+
+	err := p.Signal(syscall.Signal(999))
+	if err == nil {
+		t.Error("expected error for invalid signal number")
+	}
+}
