@@ -20,7 +20,7 @@ internal/*/test_logs/
 
 # Claude
 CLAUDE.md
-Docs/
+docs/
 
 # 配置文件
 *.ini

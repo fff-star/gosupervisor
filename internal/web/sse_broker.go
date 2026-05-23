@@ -18,6 +18,8 @@ var globalSSEBroker = &sseBroker{
 	clients: make(map[chan []byte]bool),
 }
 
+var initSSEBrokerOnce sync.Once
+
 // subscribe registers a new SSE client and returns its event channel.
 func (b *sseBroker) subscribe() chan []byte {
 	ch := make(chan []byte, 64)
@@ -56,13 +58,30 @@ func (b *sseBroker) broadcast(event process.Event) {
 }
 
 // InitSSEBroker wires the global SSE broker to process.OnEvent.
-// Called from main.go after OnEvent is set.
+// Safe to call multiple times; subsequent calls are no-ops.
 func InitSSEBroker() {
-	// Atomically clear and capture the previous handler chain.
-	// oldFn is an ordinary local — immutable after this assignment,
-	// so the closure below captures it without any data race.
-	oldFn := process.SwapOnEvent(nil)
+	initSSEBrokerOnce.Do(func() {
+		oldFn := process.SwapOnEvent(nil)
+		process.SetOnEvent(func(name string, typ process.EventType, pid int, exitCode int, message string) {
+			if oldFn != nil {
+				oldFn(name, typ, pid, exitCode, message)
+			}
+			globalSSEBroker.broadcast(process.Event{
+				Timestamp: time.Now(),
+				Name:      name,
+				Type:      typ,
+				PID:       pid,
+				ExitCode:  exitCode,
+				Message:   message,
+			})
+		})
+	})
+}
 
+// ResetSSEBroker unbinds and re-binds the SSE broker. Used on config reload
+// to re-establish the handler chain after the event listener manager is replaced.
+func ResetSSEBroker() {
+	oldFn := process.SwapOnEvent(nil)
 	process.SetOnEvent(func(name string, typ process.EventType, pid int, exitCode int, message string) {
 		if oldFn != nil {
 			oldFn(name, typ, pid, exitCode, message)
