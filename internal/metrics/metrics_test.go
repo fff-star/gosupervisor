@@ -222,3 +222,73 @@ func TestMetricsStopDoubleClose(t *testing.T) {
 	mm.Stop()
 	mm.Stop()
 }
+
+func TestRecordConfigReload(t *testing.T) {
+	processManager := setupMetricsTestEnvironment(t)
+	mm := NewMetricsManager(processManager)
+
+	mm.RecordConfigReload()
+	mm.RecordConfigReload()
+
+	metrics, err := mm.registry.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	found := false
+	for _, mf := range metrics {
+		if mf.GetName() == "gosupervisor_config_reloads_total" {
+			if len(mf.Metric) > 0 && mf.Metric[0].Counter != nil {
+				if mf.Metric[0].Counter.GetValue() != 2 {
+					t.Errorf("expected config_reloads_total=2, got %v", mf.Metric[0].Counter.GetValue())
+				}
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("config_reloads_total metric not found")
+	}
+}
+
+func TestResetTracking(t *testing.T) {
+	processManager := setupMetricsTestEnvironment(t)
+	mm := NewMetricsManager(processManager)
+
+	mm.prevRestarts["test"] = 5
+	mm.prevStartCounts["test"] = 3
+
+	mm.ResetTracking()
+
+	if len(mm.prevRestarts) != 0 {
+		t.Errorf("prevRestarts should be empty after ResetTracking, got %d entries", len(mm.prevRestarts))
+	}
+	if len(mm.prevStartCounts) != 0 {
+		t.Errorf("prevStartCounts should be empty after ResetTracking, got %d entries", len(mm.prevStartCounts))
+	}
+}
+
+func TestRecordHealthCheckFailure(t *testing.T) {
+	processManager := setupMetricsTestEnvironment(t)
+	mm := NewMetricsManager(processManager)
+
+	mm.RecordHealthCheckFailure("test_process")
+	mm.RecordHealthCheckFailure("test_process")
+
+	metrics, err := mm.registry.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	for _, mf := range metrics {
+		if mf.GetName() == "gosupervisor_healthcheck_failures_total" {
+			for _, m := range mf.Metric {
+				for _, l := range m.Label {
+					if l.GetName() == "name" && l.GetValue() == "test_process" {
+						if m.Counter.GetValue() != 2 {
+							t.Errorf("expected healthcheck_failures_total=2, got %v", m.Counter.GetValue())
+						}
+					}
+				}
+			}
+		}
+	}
+}
