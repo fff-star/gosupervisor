@@ -1178,8 +1178,36 @@ func (c *Config) ValidateConfig() []string {
 			warnings = append(warnings, fmt.Sprintf("事件监听器 %s 的 stopsignal '%s' 可能无效", name, el.StopSignal))
 		}
 	}
-	// Detect dependency cycles
-	if cycle := findDependencyCycle(c.Programs); cycle != "" {
+	// Validate fcgi programs
+	for name, prog := range c.FcgiPrograms {
+		if prog.Socket == "" {
+			warnings = append(warnings, fmt.Sprintf("fcgi-program %s 配置缺少 socket 字段", name))
+		} else if !strings.HasPrefix(prog.Socket, "unix://") && !strings.HasPrefix(prog.Socket, "tcp://") {
+			warnings = append(warnings, fmt.Sprintf("fcgi-program %s 的 socket '%s' 格式无效，需要 unix:// 或 tcp:// 前缀", name, prog.Socket))
+		}
+		if prog.Command == "" {
+			warnings = append(warnings, fmt.Sprintf("fcgi-program %s 配置缺少 command 字段", name))
+		}
+		for _, dep := range prog.DependsOn {
+			if _, ok := c.Programs[dep]; !ok {
+				if _, ok2 := c.FcgiPrograms[dep]; !ok2 {
+					warnings = append(warnings, fmt.Sprintf("fcgi-program %s 依赖了不存在的进程 %s", name, dep))
+				}
+			}
+			if dep == name {
+				warnings = append(warnings, fmt.Sprintf("fcgi-program %s 不能依赖自身", name))
+			}
+		}
+	}
+	// Detect dependency cycles (include fcgi programs)
+	allProgs := make(map[string]*ProgramConfig)
+	for k, v := range c.Programs {
+		allProgs[k] = v
+	}
+	for k, v := range c.FcgiPrograms {
+		allProgs[k] = v
+	}
+	if cycle := findDependencyCycle(allProgs); cycle != "" {
 		warnings = append(warnings, cycle)
 	}
 	return warnings
