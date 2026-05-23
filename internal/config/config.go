@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -384,6 +385,43 @@ func loadINIConfig(configPath string) (*Config, error) {
 					config.EventListeners = make(map[string]*EventListenerConfig)
 				}
 				config.EventListeners[listenerName] = currentListener
+			} else if strings.HasPrefix(section, "fcgi-program:") {
+				fcgiName := strings.TrimPrefix(section, "fcgi-program:")
+				currentProgram = &ProgramConfig{
+					Name:                 fcgiName,
+					AutoStart:            true,
+					AutoRestart:          true,
+					StartSecs:            1,
+					StartRetries:         3,
+					StopSecs:             10,
+					StopSignal:           "SIGTERM",
+					Environment:          make(map[string]string),
+					RedirectStdout:       true,
+					RedirectStderr:       true,
+					StdoutLogMaxBytes:    50 * 1024 * 1024,
+					StdoutLogBackupCount: 10,
+					StderrLogMaxBytes:    50 * 1024 * 1024,
+					StderrLogBackupCount: 10,
+					Priority:             999,
+					Umask:                022,
+					DependsOn:            []string{},
+					RestartCodes:         []int{},
+					NoRestartCodes:       []int{},
+					ExitCodes:            []int{},
+					HealthCheckInterval:           30,
+					HealthCheckTimeout:            5,
+					HealthCheckUnhealthyThreshold: 3,
+					HealthCheckRestart:            false,
+					CPUThresholdPercent:           90.0,
+					MemoryThresholdBytes:          2 * 1024 * 1024 * 1024,
+					RestartWindowSecs:             60,
+					SocketMode:                    0700,
+					SocketBacklog:                 -1,
+				}
+				if config.FcgiPrograms == nil {
+					config.FcgiPrograms = make(map[string]*ProgramConfig)
+				}
+				config.FcgiPrograms[fcgiName] = currentProgram
 			}
 			continue
 		}
@@ -531,6 +569,19 @@ func loadINIConfig(configPath string) (*Config, error) {
 					parseIntWarn(value, "rlimitnproc", &currentProgram.RlimitNproc)
 				case "rlimitstack":
 					parseIntWarn(value, "rlimitstack", &currentProgram.RlimitStack)
+				case "socket":
+					currentProgram.Socket = value
+				case "socket_backlog":
+					parseIntWarn(value, "socket_backlog", &currentProgram.SocketBacklog)
+				case "socket_owner":
+					currentProgram.SocketOwner = value
+				case "socket_mode":
+					mode, err := strconv.ParseUint(value, 8, 32)
+					if err != nil {
+						fmt.Printf("警告: 无法解析 socket_mode 的值 '%s'，使用默认值\n", value)
+					} else {
+						currentProgram.SocketMode = uint32(mode)
+					}
 				case "exitcodes":
 					for _, s := range strings.Split(value, ",") {
 						var code int
