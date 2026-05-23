@@ -2647,11 +2647,12 @@ func TestConcurrentExitAndStart(t *testing.T) {
 		pm := NewProcessManager(logManager)
 		cfg := &config.ProgramConfig{
 			Name:         fmt.Sprintf("conc_%d", i),
-			Command:      "sleep 60",
+			Command:      "sleep 2",
 			AutoStart:    true,
 			AutoRestart:  true,
 			StartSecs:    0,
-			StartRetries: 99,
+			StartRetries: 3,
+			StopSecs:     1,
 			Environment:  make(map[string]string),
 		}
 		pm.AddProcess(cfg)
@@ -2659,7 +2660,6 @@ func TestConcurrentExitAndStart(t *testing.T) {
 		if err := p.Start(); err != nil {
 			t.Fatalf("start failed: %v", err)
 		}
-		defer p.Stop()
 
 		m := &Monitor{Manager: pm}
 
@@ -2669,6 +2669,9 @@ func TestConcurrentExitAndStart(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			time.Sleep(time.Duration(i%10) * time.Millisecond)
+			// Stop the process first so the original monitor goroutine
+			// exits cleanly before we simulate exit handling.
+			p.Stop()
 			p.mu.Lock()
 			p.State = StateExited
 			p.ExitCode = 1
@@ -2686,7 +2689,8 @@ func TestConcurrentExitAndStart(t *testing.T) {
 		}()
 
 		wg.Wait()
-		time.Sleep(200 * time.Millisecond)
+		// Stop again in case handleExitedProcess restarted the process.
+		p.Stop()
 	}
 }
 
