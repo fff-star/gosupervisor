@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"gosupervisor/internal/config"
+	"gosupervisor/internal/fcgi"
 	"gosupervisor/internal/logger"
 )
 
@@ -115,18 +116,22 @@ type Process struct {
 
 	// Resource history ring buffer (60 samples at 5s = 5 minutes)
 	ResourceHistory *ResourceHistory
+
+	manager *ProcessManager // back-reference for fcgi socket access
 }
 
 type ProcessManager struct {
-	mu        sync.RWMutex
-	Processes map[string]*Process
-	Logger    *logger.Logger
+	mu          sync.RWMutex
+	Processes   map[string]*Process
+	Logger      *logger.Logger
+	fcgiSockets map[string]*fcgi.SocketManager // fcgi socket lifecycle, keyed by base program name
 }
 
 func NewProcessManager(logger *logger.Logger) *ProcessManager {
 	return &ProcessManager{
-		Processes: make(map[string]*Process),
-		Logger:    logger,
+		Processes:   make(map[string]*Process),
+		Logger:      logger,
+		fcgiSockets: make(map[string]*fcgi.SocketManager),
 	}
 }
 
@@ -141,6 +146,7 @@ func (pm *ProcessManager) AddProcess(cfg *config.ProgramConfig) *Process {
 		Logger:          pm.Logger,
 		Group:           cfg.Group,
 		ResourceHistory: NewResourceHistory(60),
+		manager:         pm,
 	}
 	pm.mu.Lock()
 	pm.Processes[cfg.Name] = process
@@ -279,6 +285,37 @@ func (p *Process) Start() error {
 			Gid:         uint32(gid),
 			Groups:      groups,
 			NoSetGroups: false,
+		}
+	}
+
+	// Attach fcgi socket if configured
+	if p.Config.Socket != "" && p.manager != nil {
+		baseName := fcgiBaseName(p.Config.Name)
+
+		p.manager.mu.Lock()
+		sm, ok := p.manager.fcgiSockets[baseName]
+		if !ok {
+			sm = fcgi.NewSocketManager(p.Config.Socket, p.Config.SocketMode, p.Config.SocketOwner)
+			// Store first so failed-listen cleanup can find it
+			p.manager.fcgiSockets[baseName] = sm
+		}
+		p.manager.mu.Unlock()
+
+		if !ok {
+			if err := sm.Listen(); err != nil {
+				p.manager.mu.Lock()
+				delete(p.manager.fcgiSockets, baseName)
+				p.manager.mu.Unlock()
+				p.State = StateExited
+				p.mu.Unlock()
+				return fmt.Errorf("fcgi socket listen: %v", err)
+			}
+		}
+
+		if err := sm.Attach(cmd); err != nil {
+			p.State = StateExited
+			p.mu.Unlock()
+			return fmt.Errorf("fcgi socket attach: %v", err)
 		}
 	}
 
@@ -459,6 +496,19 @@ done:
 	exitCode := p.ExitCode
 	p.mu.Unlock()
 
+	// Detach fcgi socket
+	if p.Config.Socket != "" && p.manager != nil {
+		baseName := fcgiBaseName(p.Config.Name)
+
+		p.manager.mu.Lock()
+		sm, ok := p.manager.fcgiSockets[baseName]
+		if ok && sm.Detach() {
+			sm.Close()
+			delete(p.manager.fcgiSockets, baseName)
+		}
+		p.manager.mu.Unlock()
+	}
+
 	p.sendWebhook(StateStopped, pid, exitCode)
 	RecordEvent(p.Name, EventStop, pid, exitCode, "stopped")
 	return nil
@@ -565,6 +615,21 @@ func (p *Process) Snapshot() Snapshot {
 		Healthy:      healthy,
 		Config:       p.Config,
 	}
+}
+
+// fcgiBaseName strips the _NN suffix from numprocs-expanded names
+// so siblings share one socket. "php_1" → "php", "php" → "php".
+func fcgiBaseName(name string) string {
+	if idx := strings.LastIndex(name, "_"); idx > 0 {
+		rest := name[idx+1:]
+		for _, c := range rest {
+			if c < '0' || c > '9' {
+				return name
+			}
+		}
+		return name[:idx]
+	}
+	return name
 }
 
 func (p *Process) monitor() {
