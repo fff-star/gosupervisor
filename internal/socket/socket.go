@@ -148,14 +148,22 @@ func (s *SocketServer) handleCommand(line string) string {
 				return "ERR process not found"
 			}
 			snap := p.Snapshot()
-			return fmt.Sprintf("OK %s %s pid=%d exit=%d restarts=%d cpu=%.2f mem=%d",
-				snap.Name, snap.State, snap.PID, snap.ExitCode, snap.RestartCount, snap.CPUUsage, snap.MemoryUsage)
+			kind := ""
+			if snap.FcgiSocket != "" {
+				kind = "(fcgi) "
+			}
+			return fmt.Sprintf("OK %s%s %s pid=%d exit=%d restarts=%d cpu=%.2f mem=%d",
+				kind, snap.Name, snap.State, snap.PID, snap.ExitCode, snap.RestartCount, snap.CPUUsage, snap.MemoryUsage)
 		}
 		var lines []string
 		s.pm.RangeProcesses(func(n string, p *process.Process) {
 			snap := p.Snapshot()
-			lines = append(lines, fmt.Sprintf("%s %s pid=%d restarts=%d",
-				snap.Name, snap.State, snap.PID, snap.RestartCount))
+			kind := ""
+			if snap.FcgiSocket != "" {
+				kind = "(fcgi) "
+			}
+			lines = append(lines, fmt.Sprintf("%s%s %s pid=%d restarts=%d",
+				kind, snap.Name, snap.State, snap.PID, snap.RestartCount))
 		})
 		return fmt.Sprintf("OK %d processes\n%s", len(lines), strings.Join(lines, "\n"))
 
