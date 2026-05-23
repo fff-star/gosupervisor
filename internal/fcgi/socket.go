@@ -90,17 +90,19 @@ func (sm *SocketManager) Listen() error {
 
 // Attach dups the listener fd and attaches it to the child command.
 // The child receives the listening socket as fd 0 (stdin).
-func (sm *SocketManager) Attach(cmd *exec.Cmd) error {
+// Returns a cleanup function that must be called after cmd.Start() succeeds
+// to close the dup'd fd in the parent process.
+func (sm *SocketManager) Attach(cmd *exec.Cmd) (func(), error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	if sm.closed || sm.listener == nil {
-		return fmt.Errorf("fcgi socket not listening")
+		return nil, fmt.Errorf("fcgi socket not listening")
 	}
 
 	listenerFile, err := sm.listenerFile()
 	if err != nil {
-		return fmt.Errorf("fcgi socket file: %v", err)
+		return nil, fmt.Errorf("fcgi socket file: %v", err)
 	}
 
 	cmd.ExtraFiles = []*os.File{listenerFile}
@@ -110,7 +112,13 @@ func (sm *SocketManager) Attach(cmd *exec.Cmd) error {
 		fmt.Sprintf("exec 0<&3 3<&-; exec %s", originalCmd)}
 
 	sm.refCount++
-	return nil
+
+	// cleanup closes the dup'd fd in the parent after fork/exec.
+	// The child has its own copy via ExtraFiles, so this is safe to close.
+	cleanup := func() {
+		listenerFile.Close()
+	}
+	return cleanup, nil
 }
 
 // Detach decrements the reference count. Returns true if this was the last reference.

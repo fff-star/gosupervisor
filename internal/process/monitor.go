@@ -55,6 +55,24 @@ func (m *Monitor) checkProcess(process *Process) {
 	switch process.GetState() {
 	case StateExited:
 		m.handleExitedProcess(process)
+
+		// If the process is done (not restarting), detach fcgi socket.
+		// handleExitedProcess sets StateStarting when it schedules a restart,
+		// and StateFatal when it won't restart.
+		if process.Config.Socket != "" && process.manager != nil {
+			state := process.GetState()
+			if state == StateFatal || state == StateExited || state == StateStopped {
+				baseName := fcgiBaseName(process.Config.Name)
+				process.manager.mu.Lock()
+				if sm, ok := process.manager.fcgiSockets[baseName]; ok {
+					if sm.Detach() {
+						sm.Close()
+						delete(process.manager.fcgiSockets, baseName)
+					}
+				}
+				process.manager.mu.Unlock()
+			}
+		}
 	case StateRunning:
 		m.checkRunningProcess(process)
 	}

@@ -288,6 +288,8 @@ func (p *Process) Start() error {
 		}
 	}
 
+	var fcgiCleanup func()
+
 	// Attach fcgi socket if configured
 	if p.Config.Socket != "" && p.manager != nil {
 		baseName := fcgiBaseName(p.Config.Name)
@@ -312,7 +314,9 @@ func (p *Process) Start() error {
 			}
 		}
 
-		if err := sm.Attach(cmd); err != nil {
+		var err error
+		fcgiCleanup, err = sm.Attach(cmd)
+		if err != nil {
 			p.State = StateExited
 			p.mu.Unlock()
 			return fmt.Errorf("fcgi socket attach: %v", err)
@@ -367,6 +371,9 @@ func (p *Process) Start() error {
 		if stdinFile != nil {
 			_ = stdinFile.Close()
 		}
+		if fcgiCleanup != nil {
+			fcgiCleanup()
+		}
 		p.mu.Lock()
 		p.State = StateExited
 		p.mu.Unlock()
@@ -381,6 +388,11 @@ func (p *Process) Start() error {
 	// Close stdin file in parent — child has its own fd copy
 	if stdinFile != nil {
 		_ = stdinFile.Close()
+	}
+
+	// Close fcgi dup'd fd in parent — child has its own copy via ExtraFiles
+	if fcgiCleanup != nil {
+		fcgiCleanup()
 	}
 
 	p.mu.Lock()

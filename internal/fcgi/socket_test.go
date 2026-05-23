@@ -87,9 +87,12 @@ func TestSocketManagerAttachDetach(t *testing.T) {
 	defer sm.Close()
 
 	cmd := exec.Command("true")
-	if err := sm.Attach(cmd); err != nil {
+	cleanup, err := sm.Attach(cmd)
+	if err != nil {
 		t.Fatalf("Attach() failed: %v", err)
 	}
+	// Do not start the command in this test; close the fd directly.
+	cleanup()
 	if sm.RefCount() != 1 {
 		t.Errorf("expected RefCount=1, got %d", sm.RefCount())
 	}
