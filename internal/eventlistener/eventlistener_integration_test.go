@@ -85,10 +85,15 @@ printf "RESULT 2\nOK"
 		t.Fatalf("start() failed: %v", err)
 	}
 
-	time.Sleep(300 * time.Millisecond)
-
-	if l.queue.Len() != 0 {
-		t.Errorf("expected empty queue after retry+OK, got %d", l.queue.Len())
+	// Wait for protocol loop to process the event (first FAIL, then retry OK)
+	deadline := time.After(2 * time.Second)
+	for l.queue.Len() > 0 {
+		select {
+		case <-deadline:
+			t.Fatalf("queue not empty after retry+OK: still %d events", l.queue.Len())
+		default:
+			time.Sleep(50 * time.Millisecond)
+		}
 	}
 
 	l.stop()
