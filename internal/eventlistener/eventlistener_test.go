@@ -634,3 +634,153 @@ func TestEventQueue_Close_WithRemaining(t *testing.T) {
 		t.Error("Pop() should return false after draining closed queue")
 	}
 }
+
+func TestManager_Start_StartsAutoStartListeners(t *testing.T) {
+	cfg := &config.Config{
+		EventListeners: map[string]*config.EventListenerConfig{
+			"auto": {
+				Name:       "auto",
+				Command:    "sleep 10",
+				Events:     []string{"PROCESS_STATE"},
+				BufferSize: 10,
+				AutoStart:  true,
+			},
+			"manual": {
+				Name:       "manual",
+				Command:    "sleep 10",
+				Events:     []string{"PROCESS_STATE"},
+				BufferSize: 10,
+				AutoStart:  false,
+			},
+		},
+	}
+	m := NewManager(cfg, nil)
+	m.Start()
+	defer m.Stop()
+
+	// Auto-start listener should be RUNNING
+	if l, ok := m.listeners["auto"]; ok {
+		l.mu.Lock()
+		if l.state != "RUNNING" {
+			t.Errorf("auto listener: expected RUNNING, got %q", l.state)
+		}
+		l.mu.Unlock()
+	} else {
+		t.Fatal("auto listener not found")
+	}
+
+	// Manual listener should not be started yet
+	if l, ok := m.listeners["manual"]; ok {
+		l.mu.Lock()
+		state := l.state
+		l.mu.Unlock()
+		if state != "" && state != "STOPPED" {
+			t.Errorf("manual listener: expected initial/STOPPED state, got %q", state)
+		}
+	}
+}
+
+func TestManager_Start_BadCommandRunsViaShell(t *testing.T) {
+	// start() wraps commands with /bin/sh -c, so even a nonexistent binary
+	// starts /bin/sh successfully (the child exits immediately but start()
+	// returns nil). The listener transitions to RUNNING before the child exits.
+	cfg := &config.Config{
+		EventListeners: map[string]*config.EventListenerConfig{
+			"bad": {
+				Name:      "bad",
+				Command:   "/nonexistent/binary/xyz",
+				Events:    []string{"PROCESS_STATE"},
+				AutoStart: true,
+			},
+		},
+	}
+	m := NewManager(cfg, nil)
+	m.Start()
+	defer m.Stop()
+
+	if l, ok := m.listeners["bad"]; ok {
+		l.mu.Lock()
+		state := l.state
+		l.mu.Unlock()
+		if state != "RUNNING" {
+			t.Errorf("bad command listener: expected RUNNING (shell wraps), got %q", state)
+		}
+	} else {
+		t.Fatal("bad listener not found")
+	}
+}
+
+func TestManager_Stop(t *testing.T) {
+	cfg := &config.Config{
+		EventListeners: map[string]*config.EventListenerConfig{
+			"l1": {
+				Name:       "l1",
+				Command:    "sleep 10",
+				Events:     []string{"PROCESS_STATE"},
+				BufferSize: 10,
+				AutoStart:  true,
+			},
+			"l2": {
+				Name:       "l2",
+				Command:    "sleep 10",
+				Events:     []string{"PROCESS_STATE"},
+				BufferSize: 10,
+				AutoStart:  true,
+			},
+		},
+	}
+	m := NewManager(cfg, nil)
+	m.Start()
+	m.Stop()
+
+	for name, l := range m.listeners {
+		l.mu.Lock()
+		if l.state != "STOPPED" {
+			t.Errorf("listener %s: expected STOPPED after Manager.Stop(), got %q", name, l.state)
+		}
+		l.mu.Unlock()
+	}
+}
+
+func TestManager_Reload(t *testing.T) {
+	cfg1 := &config.Config{
+		EventListeners: map[string]*config.EventListenerConfig{
+			"old": {
+				Name:       "old",
+				Command:    "sleep 10",
+				Events:     []string{"PROCESS_STATE"},
+				BufferSize: 10,
+				AutoStart:  true,
+			},
+		},
+	}
+	m := NewManager(cfg1, nil)
+	m.Start()
+	defer m.Stop()
+
+	cfg2 := &config.Config{
+		EventListeners: map[string]*config.EventListenerConfig{
+			"new": {
+				Name:       "new",
+				Command:    "sleep 10",
+				Events:     []string{"PROCESS_STATE"},
+				BufferSize: 10,
+				AutoStart:  true,
+			},
+		},
+	}
+	m.Reload(cfg2)
+
+	if _, ok := m.listeners["old"]; ok {
+		t.Error("old listener should be removed after reload")
+	}
+	if l, ok := m.listeners["new"]; ok {
+		l.mu.Lock()
+		if l.state != "RUNNING" {
+			t.Errorf("new listener: expected RUNNING after reload, got %q", l.state)
+		}
+		l.mu.Unlock()
+	} else {
+		t.Fatal("new listener not found after reload")
+	}
+}
