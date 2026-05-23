@@ -1,6 +1,7 @@
 package socket
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -551,5 +552,77 @@ func TestHandleCommandEventsWithLimit(t *testing.T) {
 	resp := s.handleCommand("events 3")
 	if !strings.HasPrefix(resp, "OK 3 events") {
 		t.Errorf("expected OK 3 events, got: %s", resp)
+	}
+}
+
+func TestSetSocketMode_Applied(t *testing.T) {
+	s := newTestSocketServer(t)
+	s.SetSocketMode(0700)
+	if s.socketMode != 0700 {
+		t.Errorf("expected socketMode=0700, got %o", s.socketMode)
+	}
+}
+
+func TestSetSocketOwner_Applied(t *testing.T) {
+	s := newTestSocketServer(t)
+	s.SetSocketOwner("1000:1000")
+	if s.socketOwner != "1000:1000" {
+		t.Errorf("expected socketOwner='1000:1000', got %q", s.socketOwner)
+	}
+}
+
+func TestApplySocketOwner_Invalid(t *testing.T) {
+	s := newTestSocketServer(t)
+	s.socketOwner = "invalid_format_no_colon"
+	err := s.applySocketOwner("/tmp/fake.sock")
+	if err == nil {
+		t.Error("expected error for invalid socketOwner format")
+	}
+	if !strings.Contains(err.Error(), "格式无效") {
+		t.Errorf("expected format error message, got: %v", err)
+	}
+}
+
+func TestApplySocketOwner_UIDGID(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("requires root to chown files")
+	}
+	s := newTestSocketServer(t)
+	tmpFile := filepath.Join(t.TempDir(), "test.sock")
+	f, err := os.Create(tmpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	uid := os.Getuid()
+	gid := os.Getgid()
+	s.socketOwner = fmt.Sprintf("%d:%d", uid, gid)
+	err = s.applySocketOwner(tmpFile)
+	if err != nil {
+		t.Errorf("applySocketOwner with valid uid:gid should succeed: %v", err)
+	}
+}
+
+func TestStart_WithSocketMode(t *testing.T) {
+	s := newTestSocketServer(t)
+	socketPath := filepath.Join(t.TempDir(), "test.sock")
+	cleanupSocket(socketPath)
+
+	s.SetSocketMode(0700)
+
+	if err := s.Start(socketPath); err != nil {
+		t.Fatalf("Start with socket mode failed: %v", err)
+	}
+	defer s.Stop()
+	defer cleanupSocket(socketPath)
+
+	info, err := os.Stat(socketPath)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	mode := info.Mode()
+	if mode&os.ModeSocket == 0 {
+		t.Error("file is not a socket")
 	}
 }
