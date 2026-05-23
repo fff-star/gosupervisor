@@ -4208,3 +4208,126 @@ func TestFcgiSnapshotFields(t *testing.T) {
 	}
 	time.Sleep(200 * time.Millisecond)
 }
+
+func TestStartAll_DependencyOrder(t *testing.T) {
+	logDir := "./test_logs_deporder"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+
+	pm.AddProcess(&config.ProgramConfig{
+		Name:        "a",
+		Command:     "sleep 1",
+		DependsOn:   []string{"b"},
+		AutoStart:   false,
+		AutoRestart: false,
+		StartSecs:   0,
+		StopSecs:    1,
+	})
+	pm.AddProcess(&config.ProgramConfig{
+		Name:        "b",
+		Command:     "sleep 1",
+		DependsOn:   []string{},
+		AutoStart:   false,
+		AutoRestart: false,
+		StartSecs:   0,
+		StopSecs:    1,
+	})
+
+	dependencyGraph := map[string][]string{
+		"a": {"b"},
+		"b": {},
+	}
+
+	order, err := pm.topologicalSort(dependencyGraph)
+	if err != nil {
+		t.Fatalf("topologicalSort failed: %v", err)
+	}
+
+	bIdx := -1
+	aIdx := -1
+	for i, name := range order {
+		if name == "b" {
+			bIdx = i
+		}
+		if name == "a" {
+			aIdx = i
+		}
+	}
+	if bIdx == -1 || aIdx == -1 {
+		t.Fatalf("both processes should be in order: %v", order)
+	}
+	if bIdx >= aIdx {
+		t.Errorf("b (dependency) must be before a in topological order: %v", order)
+	}
+
+	pm.StopAll()
+}
+
+func TestStopAll_ReverseDependencyOrder(t *testing.T) {
+	logDir := "./test_logs_revdep"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+
+	pm.AddProcess(&config.ProgramConfig{
+		Name:        "a",
+		Command:     "sleep 1",
+		DependsOn:   []string{"b"},
+		AutoStart:   false,
+		AutoRestart: false,
+		StartSecs:   0,
+		StopSecs:    1,
+	})
+	pm.AddProcess(&config.ProgramConfig{
+		Name:        "b",
+		Command:     "sleep 1",
+		DependsOn:   []string{},
+		AutoStart:   false,
+		AutoRestart: false,
+		StartSecs:   0,
+		StopSecs:    1,
+	})
+
+	dependencyGraph := map[string][]string{
+		"a": {"b"},
+		"b": {},
+	}
+
+	// Get topological order and reverse for stop order
+	order, err := pm.topologicalSort(dependencyGraph)
+	if err != nil {
+		t.Fatalf("topologicalSort failed: %v", err)
+	}
+	stopOrder := make([]string, len(order))
+	for i, name := range order {
+		stopOrder[len(order)-1-i] = name
+	}
+
+	aIdx := -1
+	bIdx := -1
+	for i, name := range stopOrder {
+		if name == "a" {
+			aIdx = i
+		}
+		if name == "b" {
+			bIdx = i
+		}
+	}
+	if aIdx == -1 || bIdx == -1 {
+		t.Fatalf("both processes should be in stop order: %v", stopOrder)
+	}
+	if aIdx >= bIdx {
+		t.Errorf("a (dependent) must stop before b (dependency): %v", stopOrder)
+	}
+
+	pm.StopAll()
+}
