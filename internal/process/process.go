@@ -685,6 +685,11 @@ func (p *Process) monitor() {
 
 	err := p.Cmd.Wait()
 
+	// Signal monitorResources to exit immediately now that the process is done.
+	if p.startCancel != nil {
+		p.startCancel()
+	}
+
 	p.mu.Lock()
 	if p.waitCh != nil {
 		close(p.waitCh)

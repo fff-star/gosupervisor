@@ -47,7 +47,13 @@ func newIntegrationSocketServer(t *testing.T) (*SocketServer, string) {
 		Environment:  make(map[string]string),
 	})
 	socketPath := filepath.Join(t.TempDir(), "test.sock")
-	return NewSocketServer(pm), socketPath
+	ss := NewSocketServer(pm)
+	t.Cleanup(func() {
+		ss.Stop()
+		pm.StopAll()
+		logManager.Close()
+	})
+	return ss, socketPath
 }
 
 // socketConn is a helper for sending a command and reading the response.

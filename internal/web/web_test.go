@@ -13,6 +13,8 @@ import (
 
 	"gosupervisor/internal/config"
 	"gosupervisor/internal/logger"
+
+
 	"gosupervisor/internal/process"
 )
 
@@ -221,6 +223,7 @@ func TestHandleStop(t *testing.T) {
 	p := processManager.GetProcess("test_process")
 	if p != nil {
 		p.Start()
+		defer p.Stop()
 		time.Sleep(1 * time.Second)
 	}
 
@@ -269,6 +272,7 @@ func TestHandleRestart(t *testing.T) {
 	p := processManager.GetProcess("test_process")
 	if p != nil {
 		p.Start()
+		defer p.Stop()
 		time.Sleep(1 * time.Second)
 	}
 
@@ -2311,4 +2315,7 @@ func TestCORS_NoOrigin(t *testing.T) {
 		t.Errorf("expected no CORS header without Origin, got %q", acao)
 	}
 }
+
+
+
 

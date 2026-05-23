@@ -46,15 +46,10 @@ func newIntegrationPM(t *testing.T) (*process.ProcessManager, func()) {
 		Environment:  make(map[string]string),
 	})
 	cleanup := func() {
-		// Stop any running processes
-		pm.RangeProcesses(func(_ string, p *process.Process) {
-			st := p.GetState()
-			if st == process.StateRunning || st == process.StateStarting {
-				p.Stop()
-			}
-		})
+		pm.StopAll()
 		logManager.Close()
 	}
+	t.Cleanup(cleanup)
 	return pm, cleanup
 }
 

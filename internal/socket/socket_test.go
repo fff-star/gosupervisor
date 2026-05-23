@@ -32,7 +32,13 @@ func newTestSocketServer(t *testing.T) *SocketServer {
 		Group:     "web",
 		AutoStart: true,
 	})
-	return NewSocketServer(pm)
+	ss := NewSocketServer(pm)
+	t.Cleanup(func() {
+		ss.Stop()
+		pm.StopAll()
+		logManager.Close()
+	})
+	return ss
 }
 
 func cleanupSocket(path string) {
