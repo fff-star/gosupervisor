@@ -1037,3 +1037,115 @@ func TestExpandProgramConfigZeroProcs(t *testing.T) {
 		t.Errorf("expected NumProcs=1 after normalization, got %d", result[0].NumProcs)
 	}
 }
+
+func TestFcgiProgramINIParsing(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "fcgi.ini")
+	content := `
+[fcgi-program:php]
+socket=unix:///var/run/php.sock
+socket_mode=0660
+socket_owner=www:www
+socket_backlog=128
+command=/usr/sbin/php-fpm --nodaemonize
+numprocs=3
+autorestart=true
+user=www
+`
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	if len(cfg.FcgiPrograms) != 1 {
+		t.Fatalf("expected 1 fcgi program, got %d", len(cfg.FcgiPrograms))
+	}
+	php := cfg.FcgiPrograms["php"]
+	if php == nil {
+		t.Fatal("php fcgi program not found")
+	}
+	if php.Socket != "unix:///var/run/php.sock" {
+		t.Errorf("expected socket unix:///var/run/php.sock, got %s", php.Socket)
+	}
+	if php.SocketMode != 0660 {
+		t.Errorf("expected socket_mode 0660, got %o", php.SocketMode)
+	}
+	if php.SocketOwner != "www:www" {
+		t.Errorf("expected socket_owner www:www, got %s", php.SocketOwner)
+	}
+	if php.NumProcs != 3 {
+		t.Errorf("expected numprocs=3, got %d", php.NumProcs)
+	}
+	if php.Command != "/usr/sbin/php-fpm --nodaemonize" {
+		t.Errorf("expected command, got %s", php.Command)
+	}
+}
+
+func TestFcgiProgramYAMLParsing(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "fcgi.yaml")
+	content := `
+fcgiprograms:
+  php:
+    command: /usr/sbin/php-fpm
+    socket: tcp://localhost:9002
+    numprocs: 2
+`
+	if err := os.WriteFile(configPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+	if len(cfg.FcgiPrograms) != 1 {
+		t.Fatalf("expected 1 fcgi program, got %d", len(cfg.FcgiPrograms))
+	}
+	php := cfg.FcgiPrograms["php"]
+	if php == nil {
+		t.Fatal("php fcgi program not found")
+	}
+	if php.Socket != "tcp://localhost:9002" {
+		t.Errorf("expected socket tcp://localhost:9002, got %s", php.Socket)
+	}
+}
+
+func TestFcgiValidationMissingSocket(t *testing.T) {
+	cfg := &Config{
+		Programs:     make(map[string]*ProgramConfig),
+		FcgiPrograms: map[string]*ProgramConfig{
+			"bad": {Name: "bad", Command: "/bin/true"},
+		},
+	}
+	warnings := cfg.ValidateConfig()
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, "socket") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected warning about missing socket")
+	}
+}
+
+func TestFcgiValidationBadSocketURL(t *testing.T) {
+	cfg := &Config{
+		Programs: make(map[string]*ProgramConfig),
+		FcgiPrograms: map[string]*ProgramConfig{
+			"bad": {Name: "bad", Command: "/bin/true", Socket: "invalid://x"},
+		},
+	}
+	warnings := cfg.ValidateConfig()
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, "格式无效") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected warning about invalid socket URL format")
+	}
+}
