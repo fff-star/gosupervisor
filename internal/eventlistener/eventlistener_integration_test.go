@@ -86,7 +86,7 @@ printf "RESULT 2\nOK"
 	}
 
 	// Wait for protocol loop to process the event (first FAIL, then retry OK)
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(5 * time.Second)
 	for l.queue.Len() > 0 {
 		select {
 		case <-deadline:

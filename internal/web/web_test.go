@@ -14,12 +14,15 @@ import (
 	"gosupervisor/internal/config"
 	"gosupervisor/internal/logger"
 
+	"go.uber.org/goleak"
+
 
 	"gosupervisor/internal/process"
 )
 
 // 初始化测试环境
-func setupTestEnvironment() (*process.ProcessManager, error) {
+func setupTestEnvironment(t *testing.T) (*process.ProcessManager, error) {
+	t.Helper()
 	// 创建测试日志目录
 	logDir := "./test_logs"
 	os.MkdirAll(logDir, 0755)
@@ -36,12 +39,13 @@ func setupTestEnvironment() (*process.ProcessManager, error) {
 	// 创建测试进程配置
 	programCfg := &config.ProgramConfig{
 		Name:         "test_process",
-		Command:      "echo \"Hello, World!\"",
+		Command:      "sleep 2",
 		Directory:    ".",
-		AutoStart:    true,
-		AutoRestart:  true,
-		StartSecs:    1,
-		StartRetries: 3,
+		AutoStart:    false,
+		AutoRestart:  false,
+		StartSecs:    0,
+		StartRetries: 0,
+		StopSecs:     1,
 		User:         "",
 		Environment:  make(map[string]string),
 	}
@@ -49,23 +53,22 @@ func setupTestEnvironment() (*process.ProcessManager, error) {
 	// 添加进程
 	processManager.AddProcess(programCfg)
 
-	return processManager, nil
-}
+	t.Cleanup(func() {
+		processManager.StopAll()
+		logManager.Close()
+		os.RemoveAll("./test_logs")
+	})
 
-// 清理测试环境
-func cleanupTestEnvironment() {
-	// 删除测试日志目录
-	os.RemoveAll("./test_logs")
+	return processManager, nil
 }
 
 // TestNewWebServer 测试Web服务器初始化
 func TestNewWebServer(t *testing.T) {
 	// 初始化测试环境
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
 	webServer, err := NewWebServer(processManager, "./test_logs")
@@ -92,11 +95,10 @@ func TestNewWebServer(t *testing.T) {
 // TestHandleIndex 测试首页处理
 func TestHandleIndex(t *testing.T) {
 	// 初始化测试环境
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
 	webServer, err := NewWebServer(processManager, "./test_logs")
@@ -130,11 +132,10 @@ func TestHandleIndex(t *testing.T) {
 // TestHandleStart 测试启动进程
 func TestHandleStart(t *testing.T) {
 	// 初始化测试环境
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
 	webServer, err := NewWebServer(processManager, "./test_logs")
@@ -171,11 +172,10 @@ func TestHandleStart(t *testing.T) {
 // TestHandleStartWithInvalidProcess 测试启动不存在的进程
 func TestHandleStartWithInvalidProcess(t *testing.T) {
 	// 初始化测试环境
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
 	webServer, err := NewWebServer(processManager, "./test_logs")
@@ -207,11 +207,10 @@ func TestHandleStartWithInvalidProcess(t *testing.T) {
 // TestHandleStop 测试停止进程
 func TestHandleStop(t *testing.T) {
 	// 初始化测试环境
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
 	webServer, err := NewWebServer(processManager, "./test_logs")
@@ -256,11 +255,10 @@ func TestHandleStop(t *testing.T) {
 // TestHandleRestart 测试重启进程
 func TestHandleRestart(t *testing.T) {
 	// 初始化测试环境
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
 	webServer, err := NewWebServer(processManager, "./test_logs")
@@ -305,11 +303,10 @@ func TestHandleRestart(t *testing.T) {
 // TestHandleLogs 测试查看日志
 func TestHandleLogs(t *testing.T) {
 	// 初始化测试环境
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
 	webServer, err := NewWebServer(processManager, "./test_logs")
@@ -347,11 +344,10 @@ func TestHandleLogs(t *testing.T) {
 // TestHandleSystemInfo 测试系统信息页面
 func TestHandleSystemInfo(t *testing.T) {
 	// 初始化测试环境
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
 	webServer, err := NewWebServer(processManager, "./test_logs")
@@ -385,11 +381,10 @@ func TestHandleSystemInfo(t *testing.T) {
 // TestHandleProcessDetail 测试进程详情页面
 func TestHandleProcessDetail(t *testing.T) {
 	// 初始化测试环境
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
 	webServer, err := NewWebServer(processManager, "./test_logs")
@@ -423,11 +418,10 @@ func TestHandleProcessDetail(t *testing.T) {
 // TestHandleProcessDetailWithInvalidProcess 测试查看不存在的进程详情
 func TestHandleProcessDetailWithInvalidProcess(t *testing.T) {
 	// 初始化测试环境
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	// 创建Web服务器
 	webServer, err := NewWebServer(processManager, "./test_logs")
@@ -455,11 +449,10 @@ func TestHandleProcessDetailWithInvalidProcess(t *testing.T) {
 
 // TestHandleStartGetMethodNotAllowed tests that GET to /start returns 405.
 func TestHandleStartGetMethodNotAllowed(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
@@ -477,11 +470,10 @@ func TestHandleStartGetMethodNotAllowed(t *testing.T) {
 
 // TestHandleStopGetMethodNotAllowed tests that GET to /stop returns 405.
 func TestHandleStopGetMethodNotAllowed(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
@@ -499,11 +491,10 @@ func TestHandleStopGetMethodNotAllowed(t *testing.T) {
 
 // TestHandleRestartGetMethodNotAllowed tests that GET to /restart returns 405.
 func TestHandleRestartGetMethodNotAllowed(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
@@ -521,11 +512,10 @@ func TestHandleRestartGetMethodNotAllowed(t *testing.T) {
 
 // TestPathTraversalRejected tests that names with path separators are rejected.
 func TestPathTraversalRejected(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
@@ -693,11 +683,10 @@ func TestReadTailLinesSkipsPartialFirstLine(t *testing.T) {
 
 // TestCSRFProtection tests that POST requests without Origin/Referer are rejected.
 func TestCSRFProtection(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
@@ -802,11 +791,10 @@ func TestHandleLogsCustomPath(t *testing.T) {
 
 // TestWebServerSeparateMux tests independent ServeMux instances.
 func TestWebServerSeparateMux(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws1, _ := NewWebServer(processManager, "./test_logs")
 	ws2, _ := NewWebServer(processManager, "./test_logs")
@@ -818,11 +806,10 @@ func TestWebServerSeparateMux(t *testing.T) {
 
 // TestHandleAPIProcesses tests the JSON API endpoint returns process data.
 func TestHandleAPIProcesses(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	// Add a long-running process so we can check RUNNING state
 	cfg := &config.ProgramConfig{
@@ -895,11 +882,10 @@ func TestHandleAPIProcesses(t *testing.T) {
 
 // TestHandleAPIProcessesMethodNotAllowed tests that POST returns 405.
 func TestHandleAPIProcessesMethodNotAllowed(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
@@ -955,11 +941,10 @@ func TestHandleAPIProcessesEmptyList(t *testing.T) {
 
 // TestHandleAPIProcessesSnapshotFields tests all expected Snapshot fields are populated.
 func TestHandleAPIProcessesSnapshotFields(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	cfg := &config.ProgramConfig{
 		Name:                 "fields_test",
@@ -1039,11 +1024,10 @@ func TestHandleAPIProcessesSnapshotFields(t *testing.T) {
 // --- API v1 tests ---
 
 func TestAPIV1ProcessesList(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
@@ -1066,11 +1050,10 @@ func TestAPIV1ProcessesList(t *testing.T) {
 }
 
 func TestAPIV1ProcessDetail(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
@@ -1090,11 +1073,10 @@ func TestAPIV1ProcessDetail(t *testing.T) {
 }
 
 func TestAPIV1ProcessStart(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
@@ -1117,15 +1099,15 @@ func TestAPIV1ProcessStart(t *testing.T) {
 }
 
 func TestAPIV1ProcessStop(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	p := processManager.GetProcess("test_process")
 	if p != nil {
 		p.Start()
+		defer p.Stop()
 		time.Sleep(200 * time.Millisecond)
 	}
 
@@ -1143,11 +1125,10 @@ func TestAPIV1ProcessStop(t *testing.T) {
 }
 
 func TestAPIV1ProcessRestart(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
@@ -1164,11 +1145,10 @@ func TestAPIV1ProcessRestart(t *testing.T) {
 }
 
 func TestAPIV1ProcessNotFound(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
@@ -1182,11 +1162,10 @@ func TestAPIV1ProcessNotFound(t *testing.T) {
 }
 
 func TestAPIV1ProcessBadName(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
@@ -1200,11 +1179,10 @@ func TestAPIV1ProcessBadName(t *testing.T) {
 }
 
 func TestAPIV1GroupStart(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	cfg := &config.ProgramConfig{
 		Name:         "grp_test",
@@ -1239,11 +1217,10 @@ func TestAPIV1GroupStart(t *testing.T) {
 }
 
 func TestAPIV1GroupBadName(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
@@ -1259,11 +1236,10 @@ func TestAPIV1GroupBadName(t *testing.T) {
 }
 
 func TestAPIV1CSRFProtection(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
@@ -1279,11 +1255,10 @@ func TestAPIV1CSRFProtection(t *testing.T) {
 // --- Basic Auth tests ---
 
 func TestBasicAuthEnabled(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws, _ := NewWebServerWithAuth(processManager, "./test_logs", "admin", "secret", false)
 
@@ -1315,11 +1290,10 @@ func TestBasicAuthEnabled(t *testing.T) {
 }
 
 func TestBasicAuthDisabled(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws, _ := NewWebServerWithAuth(processManager, "./test_logs", "", "", false)
 
@@ -1333,11 +1307,10 @@ func TestBasicAuthDisabled(t *testing.T) {
 }
 
 func TestAPIV1BypassesAuth(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws, _ := NewWebServerWithAuth(processManager, "./test_logs", "admin", "secret", false)
 
@@ -1351,11 +1324,10 @@ func TestAPIV1BypassesAuth(t *testing.T) {
 }
 
 func TestNewWebServerWithAuth(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws, err := NewWebServerWithAuth(processManager, "./test_logs", "user", "pass", false)
 	if err != nil {
@@ -1367,11 +1339,10 @@ func TestNewWebServerWithAuth(t *testing.T) {
 }
 
 func TestAPIV1MethodNotAllowed(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
@@ -1393,11 +1364,10 @@ func TestAPIV1MethodNotAllowed(t *testing.T) {
 }
 
 func TestBasicAuthWrapper(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	// Test with credentials configured
 	ws, _ := NewWebServerWithAuth(processManager, "./test_logs", "admin", "secret", false)
@@ -1436,11 +1406,10 @@ func TestBasicAuthWrapper(t *testing.T) {
 }
 
 func TestBasicAuthWrapperDisabled(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	// No auth configured
 	ws, _ := NewWebServer(processManager, "./test_logs")
@@ -1459,11 +1428,10 @@ func TestBasicAuthWrapperDisabled(t *testing.T) {
 }
 
 func TestAPIV1GroupStop(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	// Add a process with a group
 	processManager.AddProcess(&config.ProgramConfig{
@@ -1491,11 +1459,10 @@ func TestAPIV1GroupStop(t *testing.T) {
 }
 
 func TestAPIV1GroupRestart(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	processManager.AddProcess(&config.ProgramConfig{
 		Name:      "grouped_restart",
@@ -1522,11 +1489,10 @@ func TestAPIV1GroupRestart(t *testing.T) {
 }
 
 func TestAPIV1GroupCSRFProtection(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
@@ -1541,11 +1507,10 @@ func TestAPIV1GroupCSRFProtection(t *testing.T) {
 }
 
 func TestAPIV1GroupBadNamePaths(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
@@ -1565,11 +1530,10 @@ func TestAPIV1GroupBadNamePaths(t *testing.T) {
 }
 
 func TestAPIV1GroupUnknownAction(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
@@ -1585,11 +1549,10 @@ func TestAPIV1GroupUnknownAction(t *testing.T) {
 }
 
 func TestAPIV1ProcessUnknownAction(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
@@ -1625,11 +1588,10 @@ func FuzzValidateProcessName(f *testing.F) {
 // --- New API v1 endpoint tests ---
 
 func TestAPIV1System(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/system", nil)
@@ -1660,11 +1622,10 @@ func TestAPIV1System(t *testing.T) {
 }
 
 func TestAPIV1Config(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
@@ -1685,11 +1646,10 @@ func TestAPIV1Config(t *testing.T) {
 }
 
 func TestAPIV1Events(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
 	process.RecordEvent("test1", process.EventStart, 1, 0, "test")
@@ -1712,11 +1672,10 @@ func TestAPIV1Events(t *testing.T) {
 }
 
 func TestAPIV1ProcessesPagination(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/processes?limit=1", nil)
@@ -1738,11 +1697,10 @@ func TestAPIV1ProcessesPagination(t *testing.T) {
 }
 
 func TestAPIV1SystemMethodNotAllowed(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/system", nil)
@@ -1755,11 +1713,10 @@ func TestAPIV1SystemMethodNotAllowed(t *testing.T) {
 }
 
 func TestAPIV1ConfigMethodNotAllowed(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/config", nil)
@@ -1772,11 +1729,10 @@ func TestAPIV1ConfigMethodNotAllowed(t *testing.T) {
 }
 
 func TestAPIV1ProcessResources(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
 	var name string
@@ -1813,11 +1769,10 @@ func TestAPIV1ProcessResources(t *testing.T) {
 }
 
 func TestAPIV1ProcessResourcesWithMinutes(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
 	var name string
@@ -1838,11 +1793,10 @@ func TestAPIV1ProcessResourcesWithMinutes(t *testing.T) {
 }
 
 func TestAPIV1ProcessResourcesInvalidMinutes(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
 	var name string
@@ -1860,11 +1814,10 @@ func TestAPIV1ProcessResourcesInvalidMinutes(t *testing.T) {
 // TestAPIV1ProcessSignalUnknownSignal verifies signal endpoint returns
 // 400 when given an unknown signal name.
 func TestAPIV1ProcessSignalUnknownSignal(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
 	body := strings.NewReader(`{"signal":"INVALID_SIGNAL_XYZ"}`)
@@ -1882,11 +1835,10 @@ func TestAPIV1ProcessSignalUnknownSignal(t *testing.T) {
 // TestAPIV1ProcessSignalBadJSON verifies signal endpoint returns
 // 400 when given invalid JSON.
 func TestAPIV1ProcessSignalBadJSON(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
 	body := strings.NewReader(`not json`)
@@ -1904,11 +1856,10 @@ func TestAPIV1ProcessSignalBadJSON(t *testing.T) {
 // TestAPIV1ProcessReload verifies the reload endpoint sends SIGHUP
 // (error expected since test process is not running).
 func TestAPIV1ProcessReload(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/processes/test_process/reload", nil)
@@ -1925,11 +1876,10 @@ func TestAPIV1ProcessReload(t *testing.T) {
 
 // TestAPIV1ProcessLogsTail verifies the logs/tail endpoint.
 func TestAPIV1ProcessLogsTail(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 	ws, _ := NewWebServer(processManager, "./test_logs")
 
 	// Create a log file for the test process.
@@ -1947,11 +1897,10 @@ func TestAPIV1ProcessLogsTail(t *testing.T) {
 
 // TestCorsMiddleware verifies CORS headers are added when enabled.
 func TestCorsMiddleware(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws, _ := NewWebServerFull(processManager, "./test_logs", "", "", false, "http://example.com", 0)
 
@@ -1971,11 +1920,10 @@ func TestCorsMiddleware(t *testing.T) {
 
 // TestNewWebServerFullTLS verifies TLS web server creation with all options.
 func TestNewWebServerFullTLS(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("初始化测试环境失败: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	ws, err := NewWebServerFullTLS(processManager, "./test_logs", "admin", "pass", true, "*", 10, "", "")
 	if err != nil {
@@ -1999,11 +1947,10 @@ func TestNewWebServerFullTLS(t *testing.T) {
 // TestXSS_ProcessNameInAPI verifies that a process name containing HTML/JS
 // is safely encoded in the JSON API response.
 func TestXSS_ProcessNameInAPI(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("setup failed: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	// Add a process with XSS name
 	xssName := "<script>alert('xss')</script>"
@@ -2035,11 +1982,10 @@ func TestXSS_ProcessNameInAPI(t *testing.T) {
 // TestXSS_CommandInAPI verifies that a process command containing HTML is
 // safely encoded in the JSON API response.
 func TestXSS_CommandInAPI(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("setup failed: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	processManager.AddProcess(&config.ProgramConfig{
 		Name: "xss_test", Command: "<img src=x onerror=alert(1)>",
@@ -2063,11 +2009,10 @@ func TestXSS_CommandInAPI(t *testing.T) {
 
 // TestXSS_EventsAPI verifies that the events JSON API returns valid JSON.
 func TestXSS_EventsAPI(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("setup failed: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
@@ -2090,11 +2035,10 @@ func TestXSS_EventsAPI(t *testing.T) {
 // TestContentType_APIV1Processes verifies the processes list endpoint returns
 // Content-Type: application/json.
 func TestContentType_APIV1Processes(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("setup failed: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
@@ -2114,11 +2058,10 @@ func TestContentType_APIV1Processes(t *testing.T) {
 // TestContentType_APIV1System verifies the system info endpoint returns
 // Content-Type: application/json.
 func TestContentType_APIV1System(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("setup failed: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
@@ -2138,11 +2081,10 @@ func TestContentType_APIV1System(t *testing.T) {
 // TestContentType_APIV1Config verifies the config endpoint returns
 // Content-Type: application/json.
 func TestContentType_APIV1Config(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("setup failed: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
@@ -2162,11 +2104,10 @@ func TestContentType_APIV1Config(t *testing.T) {
 // TestContentType_APIV1Events verifies the events endpoint returns
 // Content-Type: application/json.
 func TestContentType_APIV1Events(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("setup failed: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
@@ -2186,16 +2127,16 @@ func TestContentType_APIV1Events(t *testing.T) {
 // TestContentType_APIV1ProcessAction verifies the process action endpoint
 // returns Content-Type: application/json.
 func TestContentType_APIV1ProcessAction(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("setup failed: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	// Start the test process first so stop can work
 	p := processManager.GetProcess("test_process")
 	if p != nil {
 		p.Start()
+		defer p.Stop()
 		time.Sleep(200 * time.Millisecond)
 	}
 
@@ -2225,11 +2166,10 @@ func TestContentType_APIV1ProcessAction(t *testing.T) {
 // TestContentType_ProcessNotFound verifies that error responses also carry
 // Content-Type: application/json.
 func TestContentType_ProcessNotFound(t *testing.T) {
-	processManager, err := setupTestEnvironment()
+	processManager, err := setupTestEnvironment(t)
 	if err != nil {
 		t.Fatalf("setup failed: %v", err)
 	}
-	defer cleanupTestEnvironment()
 
 	webServer, err := NewWebServer(processManager, "./test_logs")
 	if err != nil {
@@ -2319,3 +2259,10 @@ func TestCORS_NoOrigin(t *testing.T) {
 
 
 
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m,
+		goleak.IgnoreTopFunction("net/http.(*persistConn).readLoop"),
+		goleak.IgnoreTopFunction("net/http.(*persistConn).writeLoop"),
+	)
+}
