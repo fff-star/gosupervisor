@@ -263,6 +263,16 @@ func loadConfigWithIncludes(configPath string, visited map[string]bool) (*Config
 				}
 				cfg.EventListeners[name] = el
 			}
+			// Merge fcgi programs from included file
+			for name, prog := range incCfg.FcgiPrograms {
+				if _, exists := cfg.FcgiPrograms[name]; exists {
+					fmt.Printf("警告: fcgi程序 %s 在include文件 %s 中重复定义，将被覆盖\n", name, match)
+				}
+				if cfg.FcgiPrograms == nil {
+					cfg.FcgiPrograms = make(map[string]*ProgramConfig)
+				}
+				cfg.FcgiPrograms[name] = prog
+			}
 			// Merge server config from included file (first one wins if not already set)
 			if incCfg.Server != nil && cfg.Server == nil {
 				cfg.Server = incCfg.Server
@@ -739,6 +749,59 @@ func loadYAMLConfig(configPath string) (*Config, error) {
 		if prog.SocketBacklog == 0 {
 			prog.SocketBacklog = -1 // SOMAXCONN sentinel
 		}
+		prog.AutoStart = true
+		prog.AutoRestart = true
+		if prog.StopSignal == "" {
+			prog.StopSignal = "SIGTERM"
+		}
+		if prog.StdoutLogMaxBytes == 0 {
+			prog.StdoutLogMaxBytes = 50 * 1024 * 1024
+		}
+		if prog.StdoutLogBackupCount == 0 {
+			prog.StdoutLogBackupCount = 10
+		}
+		if prog.StderrLogMaxBytes == 0 {
+			prog.StderrLogMaxBytes = 50 * 1024 * 1024
+		}
+		if prog.StderrLogBackupCount == 0 {
+			prog.StderrLogBackupCount = 10
+		}
+		if prog.Priority == 0 {
+			prog.Priority = 999
+		}
+		if prog.Umask == 0 {
+			prog.Umask = 022
+		}
+		if prog.DependsOn == nil {
+			prog.DependsOn = []string{}
+		}
+		if prog.RestartCodes == nil {
+			prog.RestartCodes = []int{}
+		}
+		if prog.NoRestartCodes == nil {
+			prog.NoRestartCodes = []int{}
+		}
+		if prog.ExitCodes == nil {
+			prog.ExitCodes = []int{}
+		}
+		if prog.HealthCheckInterval == 0 {
+			prog.HealthCheckInterval = 30
+		}
+		if prog.HealthCheckTimeout == 0 {
+			prog.HealthCheckTimeout = 5
+		}
+		if prog.HealthCheckUnhealthyThreshold == 0 {
+			prog.HealthCheckUnhealthyThreshold = 3
+		}
+		if prog.CPUThresholdPercent == 0 {
+			prog.CPUThresholdPercent = 90.0
+		}
+		if prog.MemoryThresholdBytes == 0 {
+			prog.MemoryThresholdBytes = 2 * 1024 * 1024 * 1024
+		}
+		if prog.RestartWindowSecs == 0 {
+			prog.RestartWindowSecs = 60
+		}
 		prog.RedirectStdout = true
 		prog.RedirectStderr = true
 		cfg.FcgiPrograms[name] = prog
@@ -915,6 +978,59 @@ func loadJSONConfig(configPath string) (*Config, error) {
 		}
 		if prog.SocketBacklog == 0 {
 			prog.SocketBacklog = -1 // SOMAXCONN sentinel
+		}
+		prog.AutoStart = true
+		prog.AutoRestart = true
+		if prog.StopSignal == "" {
+			prog.StopSignal = "SIGTERM"
+		}
+		if prog.StdoutLogMaxBytes == 0 {
+			prog.StdoutLogMaxBytes = 50 * 1024 * 1024
+		}
+		if prog.StdoutLogBackupCount == 0 {
+			prog.StdoutLogBackupCount = 10
+		}
+		if prog.StderrLogMaxBytes == 0 {
+			prog.StderrLogMaxBytes = 50 * 1024 * 1024
+		}
+		if prog.StderrLogBackupCount == 0 {
+			prog.StderrLogBackupCount = 10
+		}
+		if prog.Priority == 0 {
+			prog.Priority = 999
+		}
+		if prog.Umask == 0 {
+			prog.Umask = 022
+		}
+		if prog.DependsOn == nil {
+			prog.DependsOn = []string{}
+		}
+		if prog.RestartCodes == nil {
+			prog.RestartCodes = []int{}
+		}
+		if prog.NoRestartCodes == nil {
+			prog.NoRestartCodes = []int{}
+		}
+		if prog.ExitCodes == nil {
+			prog.ExitCodes = []int{}
+		}
+		if prog.HealthCheckInterval == 0 {
+			prog.HealthCheckInterval = 30
+		}
+		if prog.HealthCheckTimeout == 0 {
+			prog.HealthCheckTimeout = 5
+		}
+		if prog.HealthCheckUnhealthyThreshold == 0 {
+			prog.HealthCheckUnhealthyThreshold = 3
+		}
+		if prog.CPUThresholdPercent == 0 {
+			prog.CPUThresholdPercent = 90.0
+		}
+		if prog.MemoryThresholdBytes == 0 {
+			prog.MemoryThresholdBytes = 2 * 1024 * 1024 * 1024
+		}
+		if prog.RestartWindowSecs == 0 {
+			prog.RestartWindowSecs = 60
 		}
 		prog.RedirectStdout = true
 		prog.RedirectStderr = true
