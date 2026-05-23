@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -4307,12 +4308,8 @@ func TestStopAll_StopsAllProcesses(t *testing.T) {
 	pm.StartAll()
 	time.Sleep(200 * time.Millisecond)
 
-	// Verify processes are running
 	for _, name := range []string{"x", "y"} {
 		p := pm.GetProcess(name)
-		if p == nil {
-			t.Fatalf("process %s not found", name)
-		}
 		if p.GetState() != StateRunning {
 			t.Errorf("process %s should be RUNNING after StartAll(), got %s", name, p.GetState())
 		}
@@ -4320,15 +4317,67 @@ func TestStopAll_StopsAllProcesses(t *testing.T) {
 
 	pm.StopAll()
 
-	// Verify all stopped
 	for _, name := range []string{"x", "y"} {
 		p := pm.GetProcess(name)
-		if p == nil {
-			t.Fatalf("process %s not found", name)
-		}
 		if p.GetState() == StateRunning {
 			t.Errorf("process %s should be stopped after StopAll()", name)
 		}
+	}
+}
+
+func TestStopAll_ReverseDependencyOrder(t *testing.T) {
+	dir := t.TempDir()
+	logManager, _ := logger.NewDefaultLogger(dir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+
+	// a depends on b. StopAll should stop "a" (dependent) before "b" (dependency).
+	// We verify this via StopTime on each process's Snapshot.
+	pm.AddProcess(&config.ProgramConfig{
+		Name:        "a",
+		Command:     "sleep 60",
+		DependsOn:   []string{"b"},
+		AutoStart:   true,
+		AutoRestart: false,
+		StartSecs:   0,
+		StopSecs:    1,
+	})
+	pm.AddProcess(&config.ProgramConfig{
+		Name:        "b",
+		Command:     "sleep 60",
+		DependsOn:   []string{},
+		AutoStart:   true,
+		AutoRestart: false,
+		StartSecs:   0,
+		StopSecs:    1,
+	})
+
+	pm.StartAll()
+	time.Sleep(200 * time.Millisecond)
+	pm.StopAll()
+
+	a := pm.GetProcess("a")
+	b := pm.GetProcess("b")
+	if a == nil || b == nil {
+		t.Fatal("processes not found")
+	}
+
+	aSnap := a.Snapshot()
+	bSnap := b.Snapshot()
+
+	// Both should be stopped
+	if aSnap.State == StateRunning {
+		t.Error("a should not be RUNNING after StopAll()")
+	}
+	if bSnap.State == StateRunning {
+		t.Error("b should not be RUNNING after StopAll()")
+	}
+
+	// a (dependent) must have stopped before b (dependency)
+	// StopTime is set by Stop(), and Stop() is called in reverse dependency order.
+	if aSnap.StopTime.After(bSnap.StopTime) {
+		t.Errorf("a must stop before b (a.StopTime=%v, b.StopTime=%v)", aSnap.StopTime, bSnap.StopTime)
 	}
 }
 
@@ -4522,5 +4571,102 @@ func TestSignal_InvalidSignal(t *testing.T) {
 	err := p.Signal(syscall.Signal(999))
 	if err == nil {
 		t.Error("expected error for invalid signal number")
+	}
+}
+
+func TestCgroupIntegration(t *testing.T) {
+	// Create a fake cgroup directory. applyCgroup writes PID to
+	// <cgroupPath>/cgroup.procs regardless of whether it's a real cgroup.
+	cgroupDir := t.TempDir()
+	procsFile := filepath.Join(cgroupDir, "cgroup.procs")
+
+	dir := "./test_logs_cgroup"
+	os.MkdirAll(dir, 0755)
+	defer os.RemoveAll(dir)
+
+	logManager, _ := logger.NewDefaultLogger(dir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:        "cgroup_test",
+		Command:     "sleep 1",
+		AutoStart:   false,
+		AutoRestart: false,
+		CgroupPath:  cgroupDir,
+		StopSecs:    1,
+		Environment: make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("cgroup_test")
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer p.Stop()
+
+	// Wait for the process to be fully started (applyCgroup runs after fork)
+	time.Sleep(200 * time.Millisecond)
+
+	data, err := os.ReadFile(procsFile)
+	if err != nil {
+		t.Fatalf("read cgroup.procs: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatal("cgroup.procs is empty — PID was not written")
+	}
+	pidStr := strings.TrimSpace(string(data))
+	if pidStr == "" {
+		t.Fatal("cgroup.procs contains no PID")
+	}
+	pid, err := strconv.Atoi(pidStr)
+	if err != nil || pid <= 0 {
+		t.Errorf("cgroup.procs should contain positive PID, got: %q", pidStr)
+	}
+}
+
+func TestStdinFileIntegration(t *testing.T) {
+	stdinContent := "hello-from-stdin-test\n"
+	stdinFile := filepath.Join(t.TempDir(), "stdin.txt")
+	if err := os.WriteFile(stdinFile, []byte(stdinContent), 0644); err != nil {
+		t.Fatalf("write stdin file: %v", err)
+	}
+
+	// Write stdin content to a known output file so we can verify.
+	outputFile := filepath.Join(t.TempDir(), "output.txt")
+
+	dir := "./test_logs_stdin"
+	os.MkdirAll(dir, 0755)
+	defer os.RemoveAll(dir)
+
+	logManager, _ := logger.NewDefaultLogger(dir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:         "stdin_test",
+		Command:      fmt.Sprintf("cat > %s", outputFile),
+		AutoStart:    false,
+		AutoRestart:  false,
+		StdinFile:    stdinFile,
+		StopSecs:     1,
+		Environment:  make(map[string]string),
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("stdin_test")
+
+	if err := p.Start(); err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+
+	// cat exits immediately after reading stdin, wait for it.
+	time.Sleep(500 * time.Millisecond)
+
+	data, err := os.ReadFile(outputFile)
+	if err != nil {
+		t.Fatalf("read output file: %v", err)
+	}
+	if !strings.Contains(string(data), "hello-from-stdin-test") {
+		t.Errorf("output should contain stdin content, got: %s", string(data))
 	}
 }
