@@ -1,6 +1,7 @@
 package process
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -242,4 +243,57 @@ func TestRecordEventSignal(t *testing.T) {
 	if e.Message != "signal SIGTERM" {
 		t.Errorf("expected message 'signal SIGTERM', got %s", e.Message)
 	}
+}
+
+func TestSetOnEvent_CalledByRecordEvent(t *testing.T) {
+	var calledName string
+	var calledType EventType
+	var mu sync.Mutex
+
+	SetOnEvent(func(name string, typ EventType, pid int, exitCode int, message string) {
+		mu.Lock()
+		calledName = name
+		calledType = typ
+		mu.Unlock()
+	})
+
+	RecordEvent("hook_test", EventStart, 42, 0, "test message")
+
+	mu.Lock()
+	if calledName != "hook_test" {
+		t.Errorf("expected calledName='hook_test', got %q", calledName)
+	}
+	if calledType != EventStart {
+		t.Errorf("expected calledType=EventStart, got %q", calledType)
+	}
+	mu.Unlock()
+
+	// Clean up
+	SetOnEvent(nil)
+}
+
+func TestSwapOnEvent_ReturnsPrevious(t *testing.T) {
+	SetOnEvent(nil)
+
+	fn1 := func(name string, typ EventType, pid int, exitCode int, message string) {}
+	fn2 := func(name string, typ EventType, pid int, exitCode int, message string) {}
+
+	prev1 := SwapOnEvent(fn1)
+	if prev1 != nil {
+		t.Error("SwapOnEvent on nil should return nil")
+	}
+
+	prev2 := SwapOnEvent(fn2)
+	if prev2 == nil {
+		t.Error("SwapOnEvent should return previous function")
+	}
+
+	// Clean up
+	SwapOnEvent(nil)
+}
+
+func TestRecordEvent_OnEventNotCalledWhenNil(t *testing.T) {
+	SetOnEvent(nil)
+	// Must not panic
+	RecordEvent("safe_test", EventStop, 1, 0, "no handler")
 }
