@@ -356,6 +356,84 @@ func TestHandleSignals_SIGHUP(t *testing.T) {
 	<-done
 }
 
+func TestReload_ChangedProcessRestarts(t *testing.T) {
+	dir := t.TempDir()
+	pm := makeProcessManager(t)
+	l := makeLogger(t)
+
+	cfgPath := writeConfig(t, dir, "test.ini", "[program:app]\ncommand=echo newcmd\n")
+
+	pm.AddProcess(&config.ProgramConfig{
+		Name:    "app",
+		Command: "echo oldcmd",
+	})
+
+	err := reloadConfiguration(pm, cfgPath, l)
+	if err != nil {
+		t.Fatalf("reloadConfiguration failed: %v", err)
+	}
+
+	p := pm.GetProcess("app")
+	if p == nil {
+		t.Fatal("process 'app' should exist after reload")
+	}
+	s := p.Snapshot()
+	if s.Config.Command != "echo newcmd" {
+		t.Errorf("expected command 'echo newcmd', got %q", s.Config.Command)
+	}
+}
+
+func TestReload_NewProcessStarts(t *testing.T) {
+	dir := t.TempDir()
+	pm := makeProcessManager(t)
+	l := makeLogger(t)
+
+	cfgPath := writeConfig(t, dir, "test.ini",
+		"[program:app]\ncommand=echo app\nautostart=true\n"+
+			"[program:worker]\ncommand=echo worker\nautostart=true\n")
+
+	pm.AddProcess(&config.ProgramConfig{
+		Name:      "app",
+		Command:   "echo app",
+		AutoStart: true,
+	})
+
+	err := reloadConfiguration(pm, cfgPath, l)
+	if err != nil {
+		t.Fatalf("reloadConfiguration failed: %v", err)
+	}
+
+	if pm.GetProcess("worker") == nil {
+		t.Error("new process 'worker' should be added")
+	}
+}
+
+func TestReload_RemovedProcessStops(t *testing.T) {
+	dir := t.TempDir()
+	pm := makeProcessManager(t)
+	l := makeLogger(t)
+
+	cfgPath := writeConfig(t, dir, "test.ini", "[program:app]\ncommand=echo app\n")
+
+	pm.AddProcess(&config.ProgramConfig{
+		Name:    "app",
+		Command: "echo app",
+	})
+	pm.AddProcess(&config.ProgramConfig{
+		Name:    "removed",
+		Command: "echo removed",
+	})
+
+	err := reloadConfiguration(pm, cfgPath, l)
+	if err != nil {
+		t.Fatalf("reloadConfiguration failed: %v", err)
+	}
+
+	if pm.GetProcess("removed") != nil {
+		t.Error("process 'removed' should be gone after reload")
+	}
+}
+
 func TestHandleSignals_SIGTERMWithStateFile(t *testing.T) {
 	dir := t.TempDir()
 	pm := makeProcessManager(t)
