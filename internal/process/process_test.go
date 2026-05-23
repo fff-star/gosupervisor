@@ -4331,3 +4331,72 @@ func TestStopAll_ReverseDependencyOrder(t *testing.T) {
 
 	pm.StopAll()
 }
+
+func TestSendWebhook_RetryOnNetworkError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	logDir := "./test_logs_webhook_retry"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:           "wh_retry",
+		Command:        "echo test",
+		AutoStart:      false,
+		AutoRestart:    false,
+		WebhookURL:     srv.URL,
+		WebhookRetries: 2,
+		WebhookTimeout: 1,
+		StopSecs:       1,
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("wh_retry")
+
+	// sendWebhook should succeed (server is up)
+	p.sendWebhook("STARTING", 123, 0)
+
+	// Close server to simulate network error
+	srv.Close()
+
+	// sendWebhook should retry and eventually fail (no panic)
+	p.sendWebhook("RUNNING", 123, 0)
+}
+
+func TestSendWebhook_BackoffCap(t *testing.T) {
+	logDir := "./test_logs_webhook_backoff"
+	os.MkdirAll(logDir, 0755)
+	defer os.RemoveAll(logDir)
+
+	logManager, _ := logger.NewDefaultLogger(logDir)
+	defer logManager.Close()
+
+	pm := NewProcessManager(logManager)
+	cfg := &config.ProgramConfig{
+		Name:           "wh_backoff",
+		Command:        "echo test",
+		AutoStart:      false,
+		AutoRestart:    false,
+		WebhookURL:     "http://127.0.0.1:19999/nonexistent",
+		WebhookRetries: 3,
+		WebhookTimeout: 1,
+		StopSecs:       1,
+	}
+	pm.AddProcess(cfg)
+	p := pm.GetProcess("wh_backoff")
+
+	start := time.Now()
+	p.sendWebhook("STARTING", 456, 0)
+	elapsed := time.Since(start)
+
+	// With 3 retries and 1s timeout each, should take some time but not block forever
+	if elapsed > 60*time.Second {
+		t.Errorf("sendWebhook took too long: %v", elapsed)
+	}
+}
