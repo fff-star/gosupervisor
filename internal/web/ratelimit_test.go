@@ -134,7 +134,7 @@ func TestRateLimiterXForwardedFor(t *testing.T) {
 }
 
 func TestRateLimiterConcurrent(t *testing.T) {
-	rl := NewRateLimiter(100, 100)
+	rl := NewRateLimiter(100000, 100000)
 	defer rl.Stop()
 
 	var wg sync.WaitGroup
@@ -149,8 +149,11 @@ func TestRateLimiterConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Should not panic under concurrent access
-	rl.Allow("10.0.0.1")
+	// After concurrent access, a request should still be allowed
+	// (with high burst/rate, tokens should not be exhausted).
+	if !rl.Allow("10.0.0.1") {
+		t.Error("request after concurrent access should be allowed")
+	}
 }
 
 func TestRateLimiterMiddlewareReturns429(t *testing.T) {
@@ -191,6 +194,14 @@ func TestRateLimiterStop(t *testing.T) {
 	rl := NewRateLimiter(10, 20)
 	rl.Stop()
 
-	// Second Stop should not panic (sync.Once)
+	// Verify stop channel is closed after Stop.
+	select {
+	case <-rl.stop:
+		// Expected: channel is closed.
+	default:
+		t.Error("stop channel should be closed after Stop()")
+	}
+
+	// Second Stop should not panic (sync.Once).
 	rl.Stop()
 }

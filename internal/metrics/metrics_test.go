@@ -137,10 +137,26 @@ func TestStartMetricsCollector(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	metricsManager.Stop()
 
+	// Verify stop channel is closed after Stop.
+	select {
+	case <-metricsManager.stop:
+		// Expected: channel is closed.
+	default:
+		t.Error("stop channel should be closed after Stop()")
+	}
+
 	// Verify we can start again (no double-start issues)
 	metricsManager.StartMetricsCollector(100 * time.Millisecond)
 	time.Sleep(200 * time.Millisecond)
 	metricsManager.Stop()
+
+	// After second Stop, stop channel should again be closed.
+	select {
+	case <-metricsManager.stop:
+		// Expected.
+	default:
+		t.Error("stop channel should be closed after second Stop()")
+	}
 }
 
 // TestGetRegistry 测试获取注册表
@@ -223,6 +239,14 @@ func TestMetricsStopDoubleClose(t *testing.T) {
 	mm.Stop()
 	mm.Stop()
 	mm.Stop()
+
+	// Verify stop channel is closed after Stop.
+	select {
+	case <-mm.stop:
+		// Expected.
+	default:
+		t.Error("stop channel should be closed after Stop()")
+	}
 }
 
 func TestRecordConfigReload(t *testing.T) {

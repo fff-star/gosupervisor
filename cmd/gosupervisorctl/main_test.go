@@ -2,13 +2,27 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func captureStderr(fn func()) string {
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+	fn()
+	w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	return buf.String()
+}
 
 // mockServer writes a response then closes the pipe so the client scanner exits.
 // net.Pipe doesn't support CloseWrite, so we close the whole server side.
@@ -21,16 +35,6 @@ func mockServer(t *testing.T, server net.Conn, expectCmd string, response ...str
 			t.Errorf("expected command %q, got %q", expectCmd, cmd)
 		}
 	}
-	for _, line := range response {
-		fmt.Fprintln(server, line)
-	}
-	server.Close()
-}
-
-func mockServerAny(t *testing.T, server net.Conn, response ...string) {
-	t.Helper()
-	scanner := bufio.NewScanner(server)
-	scanner.Scan() // consume the command, we don't verify exact content
 	for _, line := range response {
 		fmt.Fprintln(server, line)
 	}
@@ -122,66 +126,102 @@ func TestHandleCommand_Help(t *testing.T) {
 }
 
 func TestHandleCommand_Unknown(t *testing.T) {
-	client, server := net.Pipe()
+	_, server := net.Pipe()
+	defer server.Close()
+	client, _ := net.Pipe()
 	defer client.Close()
-	go mockServerAny(t, server) // no response, just consume
-	handleCommand(client, []string{"nonexistent"})
+	stderr := captureStderr(func() { handleCommand(client, []string{"nonexistent"}) })
+	if !strings.Contains(stderr, "未知命令") {
+		t.Errorf("expected stderr to contain '未知命令', got %q", stderr)
+	}
 }
 
 func TestHandleCommand_StartNoArgs(t *testing.T) {
-	client, server := net.Pipe()
+	_, server := net.Pipe()
+	defer server.Close()
+	client, _ := net.Pipe()
 	defer client.Close()
-	go mockServerAny(t, server) // no command sent, just close
-	handleCommand(client, []string{"start"})
+	stderr := captureStderr(func() { handleCommand(client, []string{"start"}) })
+	if !strings.Contains(stderr, "需要进程名") {
+		t.Errorf("expected stderr to contain '需要进程名', got %q", stderr)
+	}
 }
 
 func TestHandleCommand_StopNoArgs(t *testing.T) {
-	client, server := net.Pipe()
+	_, server := net.Pipe()
+	defer server.Close()
+	client, _ := net.Pipe()
 	defer client.Close()
-	go mockServerAny(t, server)
-	handleCommand(client, []string{"stop"})
+	stderr := captureStderr(func() { handleCommand(client, []string{"stop"}) })
+	if !strings.Contains(stderr, "需要进程名") {
+		t.Errorf("expected stderr to contain '需要进程名', got %q", stderr)
+	}
 }
 
 func TestHandleCommand_RestartNoArgs(t *testing.T) {
-	client, server := net.Pipe()
+	_, server := net.Pipe()
+	defer server.Close()
+	client, _ := net.Pipe()
 	defer client.Close()
-	go mockServerAny(t, server)
-	handleCommand(client, []string{"restart"})
+	stderr := captureStderr(func() { handleCommand(client, []string{"restart"}) })
+	if !strings.Contains(stderr, "需要进程名") {
+		t.Errorf("expected stderr to contain '需要进程名', got %q", stderr)
+	}
 }
 
 func TestHandleCommand_SignalNoArgs(t *testing.T) {
-	client, server := net.Pipe()
+	_, server := net.Pipe()
+	defer server.Close()
+	client, _ := net.Pipe()
 	defer client.Close()
-	go mockServerAny(t, server)
-	handleCommand(client, []string{"signal"})
+	stderr := captureStderr(func() { handleCommand(client, []string{"signal"}) })
+	if !strings.Contains(stderr, "需要进程名和信号名") {
+		t.Errorf("expected stderr to contain '需要进程名和信号名', got %q", stderr)
+	}
 }
 
 func TestHandleCommand_ReloadNoArgs(t *testing.T) {
-	client, server := net.Pipe()
+	_, server := net.Pipe()
+	defer server.Close()
+	client, _ := net.Pipe()
 	defer client.Close()
-	go mockServerAny(t, server)
-	handleCommand(client, []string{"reload"})
+	stderr := captureStderr(func() { handleCommand(client, []string{"reload"}) })
+	if !strings.Contains(stderr, "需要进程名") {
+		t.Errorf("expected stderr to contain '需要进程名', got %q", stderr)
+	}
 }
 
 func TestHandleCommand_GroupStartNoArgs(t *testing.T) {
-	client, server := net.Pipe()
+	_, server := net.Pipe()
+	defer server.Close()
+	client, _ := net.Pipe()
 	defer client.Close()
-	go mockServerAny(t, server)
-	handleCommand(client, []string{"group-start"})
+	stderr := captureStderr(func() { handleCommand(client, []string{"group-start"}) })
+	if !strings.Contains(stderr, "需要组名") {
+		t.Errorf("expected stderr to contain '需要组名', got %q", stderr)
+	}
 }
 
 func TestHandleCommand_GroupStopNoArgs(t *testing.T) {
-	client, server := net.Pipe()
+	_, server := net.Pipe()
+	defer server.Close()
+	client, _ := net.Pipe()
 	defer client.Close()
-	go mockServerAny(t, server)
-	handleCommand(client, []string{"group-stop"})
+	stderr := captureStderr(func() { handleCommand(client, []string{"group-stop"}) })
+	if !strings.Contains(stderr, "需要组名") {
+		t.Errorf("expected stderr to contain '需要组名', got %q", stderr)
+	}
 }
 
 func TestHandleCommand_GroupRestartNoArgs(t *testing.T) {
-	client, server := net.Pipe()
+	_, server := net.Pipe()
+	defer server.Close()
+	client, _ := net.Pipe()
 	defer client.Close()
-	go mockServerAny(t, server)
-	handleCommand(client, []string{"group-restart"})
+	stderr := captureStderr(func() { handleCommand(client, []string{"group-restart"}) })
+	if !strings.Contains(stderr, "需要组名") {
+		t.Errorf("expected stderr to contain '需要组名', got %q", stderr)
+	}
 }
 
 func TestBuildCompleterStatic_Commands(t *testing.T) {

@@ -312,6 +312,19 @@ func TestSwapOnEvent_ReturnsPrevious(t *testing.T) {
 
 func TestRecordEvent_OnEventNotCalledWhenNil(t *testing.T) {
 	SetOnEvent(nil)
-	// Must not panic
+	// Must not panic and must record the event anyway.
 	RecordEvent("safe_test", EventStop, 1, 0, "no handler")
+
+	// Event should still be in the global buffer even without OnEvent handler.
+	snapshot := GlobalEventBuffer.Snapshot(0)
+	found := false
+	for _, e := range snapshot {
+		if e.Name == "safe_test" && e.Type == EventStop {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("event should be recorded in GlobalEventBuffer even when OnEvent is nil")
+	}
 }

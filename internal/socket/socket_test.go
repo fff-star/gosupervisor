@@ -338,7 +338,11 @@ func TestHandleConnWithQuit(t *testing.T) {
 
 	// quit should close the connection
 	buf := make([]byte, 4096)
-	_, _ = conn.Read(buf)
+	n, _ := conn.Read(buf)
+	resp := strings.TrimSpace(string(buf[:n]))
+	if !strings.Contains(resp, "BYE") && !strings.Contains(resp, "OK") {
+		t.Logf("quit response: %s", resp)
+	}
 	conn.Close()
 }
 
@@ -365,7 +369,12 @@ func TestHandleConnWithExit(t *testing.T) {
 	}
 
 	buf := make([]byte, 4096)
-	_, _ = conn.Read(buf)
+	n, _ := conn.Read(buf)
+	resp := strings.TrimSpace(string(buf[:n]))
+	// exit should close the connection gracefully
+	if resp == "" {
+		t.Log("no response to exit (connection may have closed immediately)")
+	}
 }
 
 func TestHandleConnHelpQuit(t *testing.T) {

@@ -405,10 +405,6 @@ func (p *Process) Start() error {
 	p.PID = cmd.Process.Pid
 	p.StartTime = time.Now()
 	p.State = StateRunning
-	// Process successfully reached RUNNING state — reset retry counter.
-	// The monitor's checkRunningProcess also resets after StartSecs as a
-	// belt-and-suspenders check for long-running processes.
-	p.StartRetries = 0
 	// Record restart timestamp for rate limiting (only after successful start).
 	p.addRestartTimestamp(p.Config.RestartWindowSecs)
 	pid := p.PID

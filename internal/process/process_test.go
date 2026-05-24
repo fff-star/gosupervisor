@@ -1155,6 +1155,15 @@ func TestProcessSnapshotThreadSafe(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		<-done
 	}
+
+	// Verify Snapshot returns valid data after concurrent access.
+	s := p.Snapshot()
+	if s.Name != "snap_test" {
+		t.Errorf("expected Name 'snap_test', got %q", s.Name)
+	}
+	if s.State == "" {
+		t.Error("expected non-empty State in Snapshot after concurrent access")
+	}
 }
 
 // TestStopThenMonitorRestartRace 测试：Stop/Monitor 并发竞争
@@ -1291,8 +1300,17 @@ func TestRedirectStdoutStderrFlags(t *testing.T) {
 		pm := NewProcessManager(logManager)
 		pm.AddProcess(cfg)
 		p := pm.GetProcess("test_stdout_only")
-		_ = p.Start()
+		if err := p.Start(); err != nil {
+			t.Fatalf("Start() failed: %v", err)
+		}
 		time.Sleep(200 * time.Millisecond)
+		s := p.Snapshot()
+		if s.State == "" {
+			t.Error("Snapshot State should not be empty")
+		}
+		if s.PID <= 0 {
+			t.Error("PID should be > 0 after Start")
+		}
 		p.Stop()
 	})
 
@@ -1315,8 +1333,17 @@ func TestRedirectStdoutStderrFlags(t *testing.T) {
 		pm := NewProcessManager(logManager)
 		pm.AddProcess(cfg)
 		p := pm.GetProcess("test_stderr_only")
-		_ = p.Start()
+		if err := p.Start(); err != nil {
+			t.Fatalf("Start() failed: %v", err)
+		}
 		time.Sleep(200 * time.Millisecond)
+		s := p.Snapshot()
+		if s.State == "" {
+			t.Error("Snapshot State should not be empty")
+		}
+		if s.PID <= 0 {
+			t.Error("PID should be > 0 after Start")
+		}
 		p.Stop()
 	})
 
@@ -1339,8 +1366,17 @@ func TestRedirectStdoutStderrFlags(t *testing.T) {
 		pm := NewProcessManager(logManager)
 		pm.AddProcess(cfg)
 		p := pm.GetProcess("test_neither")
-		_ = p.Start()
+		if err := p.Start(); err != nil {
+			t.Fatalf("Start() failed: %v", err)
+		}
 		time.Sleep(200 * time.Millisecond)
+		s := p.Snapshot()
+		if s.State == "" {
+			t.Error("Snapshot State should not be empty")
+		}
+		if s.PID <= 0 {
+			t.Error("PID should be > 0 after Start")
+		}
 		p.Stop()
 	})
 }
@@ -1446,6 +1482,15 @@ func TestProcessManagerMutex(t *testing.T) {
 	for i := 0; i < 11; i++ {
 		<-done
 	}
+
+	if pm.Len() != 10 {
+		t.Errorf("expected 10 processes after concurrent access, got %d", pm.Len())
+	}
+	for i := 0; i < 10; i++ {
+		if pm.GetProcess(fmt.Sprintf("p%d", i)) == nil {
+			t.Errorf("process p%d should still exist", i)
+		}
+	}
 }
 
 // TestMonitorResourcesExitsOnRestart tests that calling Start() a second time
@@ -1521,13 +1566,26 @@ func TestStartWaitChRace(t *testing.T) {
 	pm.AddProcess(cfg)
 	p := pm.GetProcess("wc_test")
 
-	// Start multiple times rapidly — should not panic
-	for i := 0; i < 5; i++ {
+	// First start should succeed.
+	if err := p.Start(); err != nil {
+		t.Fatalf("initial Start() failed: %v", err)
+	}
+	s := p.Snapshot()
+	if s.PID <= 0 {
+		t.Error("PID should be > 0 after Start")
+	}
+
+	// Subsequent rapid starts should not panic.
+	for i := 0; i < 4; i++ {
 		_ = p.Start()
 		time.Sleep(100 * time.Millisecond)
 	}
 
 	// Final cleanup
+	s = p.Snapshot()
+	if s.State == "" {
+		t.Error("Snapshot State should not be empty after concurrent starts")
+	}
 	p.Stop()
 }
 
@@ -1810,9 +1868,11 @@ func TestMemoryUsagePreservedOnStatFailure(t *testing.T) {
 	time.Sleep(6 * time.Second)
 
 	s := p.Snapshot()
-	t.Logf("MemoryUsage: %d bytes, State: %s", s.MemoryUsage, s.State)
-	if s.State == "RUNNING" && s.MemoryUsage == 0 {
-		t.Log("MemoryUsage 为 0, 可能监控尚未触发或进程内存极低")
+	if s.State != "RUNNING" {
+		t.Errorf("expected RUNNING state, got %s", s.State)
+	}
+	if s.PID <= 0 {
+		t.Error("PID should be > 0 while running")
 	}
 
 	p.Stop()
@@ -2336,8 +2396,14 @@ func TestApplyCgroupNoPID(t *testing.T) {
 		Environment:  make(map[string]string),
 	}
 	p := pm.AddProcess(cfg)
-	// Don't start — PID should be 0, applyCgroup returns immediately
-	p.applyCgroup(0) // should not panic
+	p.mu.Lock()
+	pid := p.PID
+	p.mu.Unlock()
+	if pid != 0 {
+		t.Errorf("PID should be 0 before Start, got %d", pid)
+	}
+	// applyCgroup with PID=0 should return immediately without panic.
+	p.applyCgroup(0)
 }
 
 func TestSendWebhookEmptyURL(t *testing.T) {
@@ -2360,9 +2426,12 @@ func TestSendWebhookEmptyURL(t *testing.T) {
 		Environment:  make(map[string]string),
 	}
 	p := pm.AddProcess(cfg)
-	// Should be no-op when WebhookURL is empty (must not panic)
+	// Should be no-op when WebhookURL is empty (must not panic).
 	p.sendWebhook(StateExited, 0, 0)
-	// If we get here without panicking, the test passes
+	// Also verify WebhookURL is actually empty — the no-op guard depends on it.
+	if p.Config.WebhookURL != "" {
+		t.Error("WebhookURL should be empty for no-op test")
+	}
 }
 
 func TestSendWebhookDeliversPayload(t *testing.T) {
@@ -2762,6 +2831,20 @@ func TestConcurrentSnapshotAndMonitor(t *testing.T) {
 	}()
 
 	wg.Wait()
+
+	// Verify processes are still in a consistent state after concurrent access.
+	if pm.Len() != 5 {
+		t.Errorf("expected 5 processes, got %d", pm.Len())
+	}
+	pm.RangeProcesses(func(name string, p *Process) {
+		s := p.Snapshot()
+		if s.Name == "" {
+			t.Error("Snapshot Name should not be empty after concurrent access")
+		}
+		if s.State == "" {
+			t.Error("Snapshot State should not be empty after concurrent access")
+		}
+	})
 }
 
 // TestStartFailureDoesNotDeadlockNextStart verifies that when Start() fails
@@ -3271,6 +3354,14 @@ func TestMonitorStopDoubleClose(t *testing.T) {
 	monitor.Stop()
 	monitor.Stop()
 	monitor.Stop()
+
+	// Verify monitor's Done channel is closed after Stop.
+	select {
+	case <-monitor.Done:
+		// Expected: channel is closed.
+	default:
+		t.Error("monitor.Done channel should be closed after Stop()")
+	}
 }
 
 func TestCompareConfigsNoChange(t *testing.T) {
@@ -3578,6 +3669,10 @@ func TestSendWebhookNoURL(t *testing.T) {
 		},
 	}
 	p.sendWebhook(StateRunning, 0, 0)
+	// Verify the no-op guard: WebhookURL must be empty.
+	if p.Config.WebhookURL != "" {
+		t.Error("WebhookURL should be empty for no-op test")
+	}
 }
 
 // TestSignalToRunningProcess sends SIGTERM to a running process.

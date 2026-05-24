@@ -108,6 +108,11 @@ func TestHandleLogsStream_ClientDisconnect(t *testing.T) {
 
 	// Must return without hanging or panicking.
 	ws.handleProcessLogsStream(w, r, "test")
+
+	// SSE headers should still be set even with cancelled context.
+	if got := w.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Errorf("Content-Type: expected text/event-stream, got %q", got)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -504,12 +509,31 @@ func TestSSEBroker_NonBlockingBroadcast(t *testing.T) {
 	ch := make(chan []byte, 1)
 	broker.clients[ch] = true
 
-	// Fill the buffer
+	// Fill the buffer.
 	broker.broadcast(process.Event{Name: "e1"})
 
-	// This should not block, even though buffer is full
+	// These should not block, even though buffer is full (non-blocking send).
+	// They will be dropped because the buffer is full.
 	broker.broadcast(process.Event{Name: "e2"})
 	broker.broadcast(process.Event{Name: "e3"})
+
+	// Only e1 should be in the buffer (e2 and e3 were dropped).
+	select {
+	case data := <-ch:
+		if !strings.Contains(string(data), "e1") {
+			t.Errorf("expected e1 in broadcast, got: %s", string(data))
+		}
+	case <-time.After(time.Second):
+		t.Error("timeout waiting for broadcast")
+	}
+
+	// Channel should now be empty (e2/e3 were dropped, not queued).
+	select {
+	case data := <-ch:
+		t.Errorf("expected no more data, got: %s", string(data))
+	default:
+		// Expected.
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -519,8 +543,22 @@ func TestSSEBroker_NonBlockingBroadcast(t *testing.T) {
 func TestInitSSEBroker_SetsOnEvent(t *testing.T) {
 	process.SwapOnEvent(nil)
 	InitSSEBroker()
-	// Record an event — must not panic
+
+	// Subscribe a client to receive the event.
+	ch := globalSSEBroker.subscribe()
+
+	// Record an event — must not panic and must be broadcast.
 	process.RecordEvent("broker_test", process.EventStart, 99, 0, "init test")
+
+	select {
+	case data := <-ch:
+		if !strings.Contains(string(data), "broker_test") {
+			t.Errorf("expected broker_test in event data, got: %s", string(data))
+		}
+	case <-time.After(time.Second):
+		t.Error("timeout waiting for event broadcast")
+	}
+	globalSSEBroker.unsubscribe(ch)
 }
 
 func TestResetSSEBroker_ReplacesHandler(t *testing.T) {

@@ -345,15 +345,25 @@ func TestHandleSignals_SIGHUP(t *testing.T) {
 
 	go handleSignals(sigChan, done, pm, &cfgPath, l, &stateFile)
 
-	// SIGHUP should not close done (it triggers reload, not shutdown)
+	// SIGHUP should not close done (it triggers reload, not shutdown).
 	sigChan <- syscall.SIGHUP
 
-	// Give it time to attempt reload
-	time.Sleep(100 * time.Millisecond)
+	// Verify done is NOT closed by SIGHUP alone.
+	select {
+	case <-done:
+		t.Error("SIGHUP should not close done channel")
+	case <-time.After(200 * time.Millisecond):
+		// Expected: SIGHUP does not trigger shutdown.
+	}
 
 	// Send SIGTERM to clean up
 	sigChan <- syscall.SIGTERM
-	<-done
+	select {
+	case <-done:
+		// Expected.
+	case <-time.After(2 * time.Second):
+		t.Error("SIGTERM should close done channel")
+	}
 }
 
 func TestReload_ChangedProcessRestarts(t *testing.T) {
