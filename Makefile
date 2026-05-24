@@ -3,6 +3,7 @@
 BINARY := gosupervisor
 FUZZ_TIME ?= 30s
 BURNIN_TIME ?= 2h
+BURNIN_TIMEOUT ?= 2h2m
 
 ## Build
 
@@ -43,7 +44,7 @@ test-fuzz:
 
 test-burnin:
 	@echo "=== Burn-in test $(BURNIN_TIME) ==="
-	go test -tags burnin -run TestBurnIn -timeout $(BURNIN_TIME) -v ./internal/process/
+	BURNIN_TIME=$(BURNIN_TIME) go test -tags burnin -run TestBurnIn -timeout $(BURNIN_TIMEOUT) -v ./internal/process/
 
 ## Full test suite (standard + fuzz + burn-in)
 

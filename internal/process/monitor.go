@@ -196,8 +196,9 @@ func (m *Monitor) checkRunningProcess(process *Process) {
 		return
 	}
 
-	// 启动时间超过 StartSecs，重置重试次数
-	if process.Config.StartSecs > 0 && time.Since(process.StartTime) > time.Duration(process.Config.StartSecs)*time.Second {
+	// 启动时间超过 StartSecs（且进程健康或无健康检查），重置重试次数。
+	// StartSecs <= 0 在 Start() 中立即重置（见 process.go）。
+	if process.Config.StartSecs > 0 && time.Since(process.StartTime) > time.Duration(process.Config.StartSecs)*time.Second && (process.Healthy || process.Config.HealthCheckURL == "") {
 		process.StartRetries = 0
 	}
 
