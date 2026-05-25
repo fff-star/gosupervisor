@@ -48,6 +48,10 @@ docs/
 cover.out
 cover.html
 
+# 基准测试
+/benchmark
+/benchmarks/
+
 # 临时文件
 *.tmp
 *.temp
