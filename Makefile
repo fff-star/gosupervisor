@@ -70,6 +70,17 @@ coverage-html: coverage
 	go tool cover -html=cover.out -o cover.html
 	@echo "Wrote cover.html"
 
+## Benchmarks
+
+bench: build
+	$(MAKE) -f benchmarks/Makefile bench
+
+bench-build:
+	$(MAKE) -f benchmarks/Makefile bench-build
+
+bench-clean:
+	$(MAKE) -f benchmarks/Makefile bench-clean
+
 ## Clean
 
 clean:

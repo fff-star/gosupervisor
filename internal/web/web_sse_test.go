@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -542,6 +543,7 @@ func TestSSEBroker_NonBlockingBroadcast(t *testing.T) {
 
 func TestInitSSEBroker_SetsOnEvent(t *testing.T) {
 	process.SwapOnEvent(nil)
+	initSSEBrokerOnce = sync.Once{} // reset: prior tests may have already called InitSSEBroker
 	InitSSEBroker()
 
 	// Subscribe a client to receive the event.

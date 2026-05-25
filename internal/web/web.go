@@ -40,7 +40,7 @@ type WebServer struct {
 }
 
 func NewWebServer(processManager *process.ProcessManager, logDir string) (*WebServer, error) {
-	return NewWebServerWithAuth(processManager, logDir, "", "", false)
+	return NewWebServerWithAuth(processManager, logDir, "", "", true)
 }
 
 // NewWebServerWithAuth creates a WebServer with optional HTTP Basic Auth.
@@ -197,7 +197,13 @@ func (ws *WebServer) Start(addr string) error {
 		handler = ws.rateLimiter.Middleware(handler)
 		fmt.Println("Web界面已启用 API 速率限制")
 	}
-	ws.srv = &http.Server{Addr: addr, Handler: handler}
+	ws.srv = &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	if ws.certFile != "" && ws.keyFile != "" {
 		fmt.Printf("Web服务器已启用 TLS (cert=%s, key=%s)\n", ws.certFile, ws.keyFile)
 		return ws.srv.ListenAndServeTLS(ws.certFile, ws.keyFile)
@@ -231,9 +237,10 @@ func (ws *WebServer) corsMiddleware(next http.Handler) http.Handler {
 		}
 		origin := ws.corsOrigin
 		if origin == "*" {
-			origin = requestOrigin
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
 		}
-		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		w.Header().Set("Access-Control-Max-Age", "86400")
@@ -253,7 +260,8 @@ func (ws *WebServer) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// Allow /api/v1/ without auth unless apiAuth is enabled
+		// Allow /api/v1/ without auth only when apiAuth is explicitly disabled.
+		// Default is apiAuth=true (API auth enabled when web auth is configured).
 		if !ws.apiAuth && strings.HasPrefix(r.URL.Path, "/api/v1/") {
 			next.ServeHTTP(w, r)
 			return
@@ -290,7 +298,7 @@ func (ws *WebServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := ws.indexTmpl.Execute(w, data); err != nil {
-		http.Error(w, fmt.Sprintf("渲染模板失败: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 	}
 }
 
@@ -305,7 +313,7 @@ func (ws *WebServer) handleAPIProcesses(w http.ResponseWriter, r *http.Request) 
 	})
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(snapshots); err != nil {
-		http.Error(w, fmt.Sprintf("编码JSON失败: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 	}
 }
 
@@ -332,10 +340,10 @@ func (ws *WebServer) handleAPIV1Processes(w http.ResponseWriter, r *http.Request
 
 	// Pagination via ?offset= and ?limit=
 	var offset, limit int
-	if v, err := fmt.Sscanf(r.URL.Query().Get("offset"), "%d", &offset); v != 1 || err != nil {
+	if v, err := fmt.Sscanf(r.URL.Query().Get("offset"), "%d", &offset); v != 1 || err != nil || offset < 0 {
 		offset = 0
 	}
-	if v, err := fmt.Sscanf(r.URL.Query().Get("limit"), "%d", &limit); v != 1 || err != nil {
+	if v, err := fmt.Sscanf(r.URL.Query().Get("limit"), "%d", &limit); v != 1 || err != nil || limit < 0 {
 		limit = 0
 	}
 	total := len(snapshots)
@@ -577,7 +585,7 @@ func (ws *WebServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 	logContent, err := readTailLines(logPath, tailMaxLines, tailMaxBytes)
 	if err != nil {
-		logContent = []byte(fmt.Sprintf("无法读取日志文件: %v", err))
+		logContent = []byte("Unable to read log file")
 	}
 
 	data := struct {
@@ -591,7 +599,7 @@ func (ws *WebServer) handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := ws.logsTmpl.Execute(w, data); err != nil {
-		http.Error(w, fmt.Sprintf("渲染模板失败: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 	}
 }
 
@@ -608,6 +616,14 @@ func (ws *WebServer) handleProcessLogsStream(w http.ResponseWriter, r *http.Requ
 	w.Header().Set("Connection", "keep-alive")
 
 	logFile := filepath.Join(ws.logDir, name+".log")
+	if ws.processManager != nil {
+		if p := ws.processManager.GetProcess(name); p != nil {
+			s := p.Snapshot()
+			if s.Config.StdoutLogFile != "" {
+				logFile = s.Config.StdoutLogFile
+			}
+		}
+	}
 	f, err := os.Open(logFile)
 	if err != nil {
 		fmt.Fprintf(w, "data: {\"error\": \"无法打开日志文件\"}\n\n")
@@ -650,7 +666,7 @@ func (ws *WebServer) handleProcessLogsStream(w http.ResponseWriter, r *http.Requ
 func (ws *WebServer) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 	systemInfo := getSystemInfo(ws.processManager)
 	if err := ws.systemInfoTmpl.Execute(w, systemInfo); err != nil {
-		http.Error(w, fmt.Sprintf("渲染模板失败: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 	}
 }
 
@@ -689,7 +705,7 @@ func (ws *WebServer) handleProcessDetail(w http.ResponseWriter, r *http.Request)
 		data.Uptime = "-"
 	}
 	if err := ws.processDetailTmpl.Execute(w, data); err != nil {
-		http.Error(w, fmt.Sprintf("渲染模板失败: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 	}
 }
 
@@ -795,10 +811,14 @@ func (ws *WebServer) handleProcessLogsTail(w http.ResponseWriter, r *http.Reques
 	maxLines = int64(tailMaxLines)
 	maxBytes = int64(tailMaxBytes)
 	if v := r.URL.Query().Get("lines"); v != "" {
-		fmt.Sscanf(v, "%d", &maxLines)
+		if n, _ := fmt.Sscanf(v, "%d", &maxLines); n != 1 || maxLines < 0 {
+			maxLines = int64(tailMaxLines)
+		}
 	}
 	if v := r.URL.Query().Get("maxBytes"); v != "" {
-		fmt.Sscanf(v, "%d", &maxBytes)
+		if n, _ := fmt.Sscanf(v, "%d", &maxBytes); n != 1 || maxBytes <= 0 {
+			maxBytes = int64(tailMaxBytes)
+		}
 	}
 
 	p := ws.processManager.GetProcess(name)
@@ -832,6 +852,7 @@ func (ws *WebServer) handleProcessLogsTail(w http.ResponseWriter, r *http.Reques
 }
 
 func (ws *WebServer) handleProcessSignal(w http.ResponseWriter, r *http.Request, p *process.Process) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1024)
 	var body struct {
 		Signal string `json:"signal"`
 	}
@@ -858,10 +879,14 @@ func (ws *WebServer) handleProcessLogsTailStream(w http.ResponseWriter, r *http.
 	maxLines = int64(tailMaxLines)
 	maxBytes = int64(tailMaxBytes)
 	if v := r.URL.Query().Get("lines"); v != "" {
-		fmt.Sscanf(v, "%d", &maxLines)
+		if n, _ := fmt.Sscanf(v, "%d", &maxLines); n != 1 || maxLines < 0 {
+			maxLines = int64(tailMaxLines)
+		}
 	}
 	if v := r.URL.Query().Get("maxBytes"); v != "" {
-		fmt.Sscanf(v, "%d", &maxBytes)
+		if n, _ := fmt.Sscanf(v, "%d", &maxBytes); n != 1 || maxBytes <= 0 {
+			maxBytes = int64(tailMaxBytes)
+		}
 	}
 
 	p := ws.processManager.GetProcess(name)

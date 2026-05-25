@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"strconv"
 	"strings"
 	"sync"
@@ -356,7 +357,28 @@ func readResult(reader *bufio.Reader) (string, error) {
 }
 
 func setupUser(cmd *exec.Cmd, username string) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{}
-	// User switching is platform-specific; handled in *_linux.go if needed.
-	_ = username
+	if username == "" {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+		return
+	}
+	u, err := user.Lookup(username)
+	if err != nil {
+		return
+	}
+	uid, _ := strconv.ParseUint(u.Uid, 10, 32)
+	gid, _ := strconv.ParseUint(u.Gid, 10, 32)
+	gidStrs, _ := u.GroupIds()
+	var groups []uint32
+	for _, gs := range gidStrs {
+		g, _ := strconv.ParseUint(gs, 10, 32)
+		groups = append(groups, uint32(g))
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{
+			Uid:         uint32(uid),
+			Gid:         uint32(gid),
+			Groups:      groups,
+			NoSetGroups: false,
+		},
+	}
 }

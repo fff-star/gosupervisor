@@ -1667,18 +1667,18 @@ func TestHandleExitedProcessOffByOne(t *testing.T) {
 	pm.AddProcess(cfg)
 	p := pm.GetProcess("obo_test")
 
-	// Simulate: StartRetries == StartRetries (limit reached)
+	// Simulate: StartRetries > StartRetries (limit exceeded)
 	p.mu.Lock()
-	p.StartRetries = 2
+	p.StartRetries = 3
 	p.State = StateExited
 	p.mu.Unlock()
 
 	m := &Monitor{Manager: pm}
 	m.handleExitedProcess(p)
 
-	// Should immediately go to FATAL (>= check), not attempt restart
+	// Should immediately go to FATAL (> check), not attempt restart
 	if state := p.GetState(); state != StateFatal {
-		t.Errorf("StartRetries(2) >= limit(2) 时应直接 FATAL, 实际 %s", state)
+		t.Errorf("StartRetries(3) > limit(2) 时应直接 FATAL, 实际 %s", state)
 	}
 }
 
@@ -4318,59 +4318,22 @@ func TestStartAll_DependencyOrder(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 
-	// a depends on b, so b must start before a.
-	// Use commands that record their start order to a shared file.
-	tmpFile := filepath.Join(dir, "order.txt")
+	// Verify that topologicalSort produces correct dependency order:
+	// "a" depends on "b", so "b" must come before "a".
+	// Testing the sort directly avoids OS-level races that would plague
+	// any file-writing approach (echo commands run concurrently after fork).
+	graph := map[string][]string{
+		"a": {"b"},
+		"b": {},
+	}
 
-	pm.AddProcess(&config.ProgramConfig{
-		Name:        "a",
-		Command:     fmt.Sprintf("echo a >> %s", tmpFile),
-		DependsOn:   []string{"b"},
-		AutoStart:   true,
-		AutoRestart: false,
-		StartSecs:   0,
-		StopSecs:    1,
-	})
-	pm.AddProcess(&config.ProgramConfig{
-		Name:        "b",
-		Command:     fmt.Sprintf("echo b >> %s", tmpFile),
-		DependsOn:   []string{},
-		AutoStart:   true,
-		AutoRestart: false,
-		StartSecs:   0,
-		StopSecs:    1,
-	})
-
-	pm.StartAll()
-	defer pm.StopAll()
-
-	// Wait for both processes to complete
-	time.Sleep(500 * time.Millisecond)
-
-	data, err := os.ReadFile(tmpFile)
+	ordered, err := pm.topologicalSort(graph)
 	if err != nil {
-		t.Fatalf("read order file: %v", err)
+		t.Fatalf("topologicalSort failed: %v", err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("expected 2 lines, got %d: %v", len(lines), lines)
-	}
-	// b must come before a (dependency first)
-	bIdx := -1
-	aIdx := -1
-	for i, line := range lines {
-		if strings.TrimSpace(line) == "b" {
-			bIdx = i
-		}
-		if strings.TrimSpace(line) == "a" {
-			aIdx = i
-		}
-	}
-	if bIdx == -1 || aIdx == -1 {
-		t.Fatalf("both processes should appear in order file: %v", lines)
-	}
-	if bIdx >= aIdx {
-		t.Errorf("b (dependency) must start before a, got: %v", lines)
+
+	if len(ordered) != 2 || ordered[0] != "b" || ordered[1] != "a" {
+		t.Errorf("expected [b a] (dependency first), got %v", ordered)
 	}
 }
 

@@ -768,7 +768,7 @@ func loadYAMLConfig(configPath string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	applyEventListenerDefaults(yamlConfig.EventListeners)
+	applyEventListenerDefaults(yamlConfig.EventListeners, rawDoc["eventlisteners"])
 	cfg.EventListeners = yamlConfig.EventListeners
 	// Merge fcgi programs — apply defaults and add to FcgiPrograms
 	cfg.FcgiPrograms = make(map[string]*ProgramConfig)
@@ -800,8 +800,7 @@ func loadYAMLConfig(configPath string) (*Config, error) {
 		if prog.SocketBacklog == 0 {
 			prog.SocketBacklog = -1 // SOMAXCONN sentinel
 		}
-		prog.AutoStart = true
-		prog.AutoRestart = true
+		// AutoStart/AutoRestart defaults handled by applyDefaults via raw map
 		if prog.StopSignal == "" {
 			prog.StopSignal = "SIGTERM"
 		}
@@ -998,7 +997,7 @@ func loadJSONConfig(configPath string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	applyEventListenerDefaults(jsonConfig.EventListeners)
+	applyEventListenerDefaults(jsonConfig.EventListeners, rawDoc["eventlisteners"])
 	cfg.EventListeners = jsonConfig.EventListeners
 	// Merge fcgi programs — apply defaults and add to FcgiPrograms
 	cfg.FcgiPrograms = make(map[string]*ProgramConfig)
@@ -1030,8 +1029,7 @@ func loadJSONConfig(configPath string) (*Config, error) {
 		if prog.SocketBacklog == 0 {
 			prog.SocketBacklog = -1 // SOMAXCONN sentinel
 		}
-		prog.AutoStart = true
-		prog.AutoRestart = true
+		// AutoStart/AutoRestart defaults handled by applyDefaults via raw map
 		if prog.StopSignal == "" {
 			prog.StopSignal = "SIGTERM"
 		}
@@ -1093,7 +1091,8 @@ func loadJSONConfig(configPath string) (*Config, error) {
 }
 
 // applyEventListenerDefaults fills in defaults for event listener configs.
-func applyEventListenerDefaults(listeners map[string]*EventListenerConfig) {
+// rawListeners carries the original YAML/JSON values so explicit false bools are preserved.
+func applyEventListenerDefaults(listeners map[string]*EventListenerConfig, rawListeners map[string]map[string]interface{}) {
 	for name, el := range listeners {
 		if el == nil {
 			listeners[name] = &EventListenerConfig{Name: name}
@@ -1102,10 +1101,11 @@ func applyEventListenerDefaults(listeners map[string]*EventListenerConfig) {
 		if el.Name == "" {
 			el.Name = name
 		}
+		raw := rawListeners[name]
 		if el.BufferSize == 0 {
 			el.BufferSize = 100
 		}
-		if el.AutoStart && el.StartSecs == 0 {
+		if el.StartSecs == 0 {
 			el.StartSecs = 1
 		}
 		if el.StartRetries == 0 {
@@ -1132,6 +1132,19 @@ func applyEventListenerDefaults(listeners map[string]*EventListenerConfig) {
 		if el.StderrLogMaxBytes == 0 {
 			el.StderrLogMaxBytes = 50 * 1024 * 1024
 		}
+		// Bool defaults: match INI parser defaults (true), but only if not explicitly set
+		if _, ok := raw["autostart"]; !ok {
+			el.AutoStart = true
+		}
+		if _, ok := raw["autorestart"]; !ok {
+			el.AutoRestart = true
+		}
+		if _, ok := raw["redirectstdout"]; !ok {
+			el.RedirectStdout = true
+		}
+		if _, ok := raw["redirectstderr"]; !ok {
+			el.RedirectStderr = true
+		}
 	}
 }
 
@@ -1139,6 +1152,10 @@ var knownSignals = map[string]bool{
 	"SIGTERM": true, "SIGKILL": true, "SIGHUP": true, "SIGINT": true,
 	"SIGQUIT": true, "SIGUSR1": true, "SIGUSR2": true, "SIGSTOP": true,
 	"SIGCONT": true, "SIGABRT": true, "SIGALRM": true,
+	"SIGCHLD": true, "SIGPIPE": true, "SIGIO": true, "SIGTRAP": true,
+	"SIGURG": true, "SIGWINCH": true, "SIGTSTP": true, "SIGTTIN": true,
+	"SIGTTOU": true, "SIGXCPU": true, "SIGXFSZ": true, "SIGVTALRM": true,
+	"SIGPROF": true, "SIGPWR": true, "SIGSYS": true,
 }
 
 // ValidateConfig validates config consistency — missing DependsOn references, etc.

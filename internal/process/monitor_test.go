@@ -187,7 +187,7 @@ func TestHandleExitedProcess_MaxRetries(t *testing.T) {
 	})
 	p.mu.Lock()
 	p.State = StateExited
-	p.StartRetries = 3
+	p.StartRetries = 4 // > Config.StartRetries(3)
 	p.mu.Unlock()
 
 	m := NewMonitor(pm)

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -52,6 +53,7 @@ func ParseLevel(s string) Level {
 
 // countingWriter 包装 io.Writer 以追踪写入字节数
 type countingWriter struct {
+	writerMu     sync.Mutex
 	writer       io.Writer
 	bytesWritten int64
 	onExceed     func()
@@ -59,13 +61,24 @@ type countingWriter struct {
 }
 
 func (cw *countingWriter) Write(p []byte) (n int, err error) {
+	cw.writerMu.Lock()
 	n, err = cw.writer.Write(p)
+	cw.writerMu.Unlock()
 	total := atomic.AddInt64(&cw.bytesWritten, int64(n))
-	if cw.maxSize > 0 && total >= cw.maxSize && cw.onExceed != nil {
-		cw.onExceed()
-		atomic.AddInt64(&cw.bytesWritten, -cw.maxSize)
+	maxSize := atomic.LoadInt64(&cw.maxSize)
+	if maxSize > 0 && total >= maxSize && cw.onExceed != nil {
+		if atomic.AddInt64(&cw.bytesWritten, -maxSize) >= 0 {
+			cw.onExceed()
+		}
 	}
 	return
+}
+
+// replaceWriter atomically replaces the underlying io.Writer (used during rotation).
+func (cw *countingWriter) replaceWriter(w io.Writer) {
+	cw.writerMu.Lock()
+	cw.writer = w
+	cw.writerMu.Unlock()
 }
 
 // logStream holds per-stream metadata (stdout or stderr for a process).
@@ -269,14 +282,19 @@ func (l *Logger) rotateFileOutsideLock(filePath string, backupCount int) error {
 }
 
 // rotateLogByKey rotates a single log file identified by its stream key.
+// Updates the existing countingWriter in-place to preserve callers' io.Writer references.
 func (l *Logger) rotateLogByKey(key, filePath string, maxSize int64, backupCount int) error {
-	if stream, exists := l.processLogs[key]; exists {
+	stream, exists := l.processLogs[key]
+
+	// Close the old file through the countingWriter so the write lock serializes.
+	if exists {
 		if cw, ok := stream.writer.(*countingWriter); ok {
+			cw.writerMu.Lock()
 			if f, ok := cw.writer.(*os.File); ok {
 				f.Close()
 			}
+			cw.writerMu.Unlock()
 		}
-		delete(l.processLogs, key)
 	}
 
 	newPath := filePath + fmt.Sprintf(".%d", time.Now().UnixNano())
@@ -297,6 +315,18 @@ func (l *Logger) rotateLogByKey(key, filePath string, maxSize int64, backupCount
 		return fmt.Errorf("创建新日志文件失败: %v", err)
 	}
 
+	if stream != nil {
+		if cw, ok := stream.writer.(*countingWriter); ok {
+			cw.writerMu.Lock()
+			cw.writer = f
+			atomic.StoreInt64(&cw.maxSize, maxSize)
+			cw.writerMu.Unlock()
+			stream.path = filePath
+			return nil
+		}
+	}
+
+	// No existing stream — create a new one.
 	cw := &countingWriter{
 		writer:  f,
 		maxSize: maxSize,
@@ -325,8 +355,13 @@ func (l *Logger) rotateLog(processName string) error {
 	stdoutKey := processName + "/stdout"
 	stderrKey := processName + "/stderr"
 
+	rotated := make(map[*logStream]bool)
 	for _, key := range []string{stdoutKey, stderrKey} {
 		if stream, exists := l.processLogs[key]; exists {
+			if rotated[stream] {
+				continue
+			}
+			rotated[stream] = true
 			if err := l.rotateLogByKey(key, stream.path, stream.maxSize, stream.backupCount); err != nil {
 				return err
 			}
@@ -399,24 +434,45 @@ func (l *Logger) cleanupBackups(basePath string, backupCount int) {
 
 	type fileWithTime struct {
 		path    string
-		modTime time.Time
+		sortKey int64 // parsed from filename timestamp, fallback to modtime
 	}
 	var fileInfos []fileWithTime
 	for _, f := range files {
-		info, err := os.Stat(f)
-		if err != nil {
-			continue
+		key := parseBackupTimestamp(f, basePath)
+		if key == 0 {
+			// Fall back to modtime if timestamp parsing fails
+			if info, err := os.Stat(f); err == nil {
+				key = info.ModTime().UnixNano()
+			}
 		}
-		fileInfos = append(fileInfos, fileWithTime{f, info.ModTime()})
+		if key > 0 {
+			fileInfos = append(fileInfos, fileWithTime{f, key})
+		}
 	}
 
 	sort.Slice(fileInfos, func(i, j int) bool {
-		return fileInfos[i].modTime.Before(fileInfos[j].modTime)
+		return fileInfos[i].sortKey < fileInfos[j].sortKey
 	})
 
 	for i := 0; i < len(fileInfos)-backupCount; i++ {
 		os.Remove(fileInfos[i].path)
 	}
+}
+
+// parseBackupTimestamp extracts the UnixNano timestamp from a backup filename
+// like "path.log.1716551234567890123" or "path.log.1716551234567890123.gz".
+func parseBackupTimestamp(filename, basePath string) int64 {
+	suffix := strings.TrimPrefix(filename, basePath+".")
+	if suffix == filename {
+		return 0
+	}
+	// Strip optional .gz suffix
+	suffix = strings.TrimSuffix(suffix, ".gz")
+	ts, err := strconv.ParseInt(suffix, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return ts
 }
 
 func (l *Logger) cleanupOldLogs(processName string) error {
@@ -473,7 +529,10 @@ func (l *Logger) writeSystemLog(message string, level Level) {
 	defer file.Close()
 
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	if l.format == FormatJSON {
+	l.mutex.Lock()
+	isJSON := l.format == FormatJSON
+	l.mutex.Unlock()
+	if isJSON {
 		levelStr := levelString(level)
 		entry := struct {
 			Time    string `json:"time"`
@@ -501,18 +560,25 @@ func levelString(level Level) string {
 	}
 }
 
-// SetLevel sets the minimum log level.
+// SetLevel sets the minimum log level. Safe for concurrent use.
 func (l *Logger) SetLevel(level Level) {
+	l.mutex.Lock()
 	l.level = level
+	l.mutex.Unlock()
 }
 
-// SetFormat sets the system log output format.
+// SetFormat sets the system log output format. Safe for concurrent use.
 func (l *Logger) SetFormat(format Format) {
+	l.mutex.Lock()
 	l.format = format
+	l.mutex.Unlock()
 }
 
 func (l *Logger) log(level Level, format string, args ...interface{}) {
-	if level < l.level {
+	l.mutex.Lock()
+	minLevel := l.level
+	l.mutex.Unlock()
+	if level < minLevel {
 		return
 	}
 	l.writeSystemLog(fmt.Sprintf(format, args...), level)
@@ -538,15 +604,19 @@ func (l *Logger) Close() error {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
 
+	closed := make(map[*os.File]bool)
 	for key, stream := range l.processLogs {
 		if cw, ok := stream.writer.(*countingWriter); ok {
 			if f, ok := cw.writer.(*os.File); ok {
-				f.Close()
+				if !closed[f] {
+					closed[f] = true
+					f.Close()
+				}
 			}
 		}
 		delete(l.processLogs, key)
 	}
-	l.processLogs = make(map[string]*logStream)
+	l.processLogs = nil
 	return nil
 }
 
@@ -558,15 +628,18 @@ func (l *Logger) RotateLogs() error {
 	rotated := make(map[*logStream]bool)
 
 	for key, stream := range l.processLogs {
+		key := key // capture loop variable
 		if rotated[stream] {
 			continue
 		}
 		rotated[stream] = true
 
 		if cw, ok := stream.writer.(*countingWriter); ok {
+			cw.writerMu.Lock()
 			if f, ok := cw.writer.(*os.File); ok {
 				f.Close()
 			}
+			cw.writerMu.Unlock()
 		}
 
 		oldPath := stream.path
@@ -585,14 +658,22 @@ func (l *Logger) RotateLogs() error {
 			return fmt.Errorf("创建新日志文件失败: %v", err)
 		}
 
-		cw := &countingWriter{
-			writer:  f,
-			maxSize: stream.maxSize,
-			onExceed: func() {
-				go l.rotateIfNeeded(key)
-			},
+		// Update countingWriter in-place to preserve callers' io.Writer refs.
+		if cw, ok := stream.writer.(*countingWriter); ok {
+			cw.replaceWriter(f)
+			atomic.StoreInt64(&cw.maxSize, stream.maxSize)
+		} else {
+			stream.writer = &countingWriter{
+				writer:  f,
+				maxSize: stream.maxSize,
+				onExceed: func() {
+					go func() {
+						defer func() { _ = recover() }()
+						l.rotateIfNeeded(key)
+					}()
+				},
+			}
 		}
-		stream.writer = cw
 		stream.path = oldPath
 	}
 

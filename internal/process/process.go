@@ -206,7 +206,7 @@ func (p *Process) Start() error {
 
 	p.mu.Lock()
 	// Re-check: another goroutine may have started the process while we waited
-	if p.State == StateRunning || p.State == StateStarting {
+	if p.State == StateRunning || p.State == StateStarting || p.State == StateStopping {
 		p.mu.Unlock()
 		return fmt.Errorf("进程 %s 已经在运行或启动中", p.Name)
 	}
@@ -223,7 +223,6 @@ func (p *Process) Start() error {
 	p.Healthy = false
 	p.ResourceHealthy = false
 	p.healthCheckFailures = 0
-	p.healthCheckRestartFired = false
 
 	ctx, cancel := context.WithCancel(p.Context)
 	p.startCtx = ctx
@@ -290,24 +289,29 @@ func (p *Process) Start() error {
 
 	var fcgiCleanup func()
 
-	// Attach fcgi socket if configured
+	// Attach fcgi socket if configured.
+	// Release p.mu before acquiring p.manager.mu to avoid lock-ordering
+	// deadlock with RangeProcesses→Snapshot (pm.mu.RLock → p.mu.Lock).
 	if p.Config.Socket != "" && p.manager != nil {
 		baseName := fcgiBaseName(p.Config.Name)
+		mgr := p.manager
+		p.mu.Unlock()
 
-		p.manager.mu.Lock()
-		sm, ok := p.manager.fcgiSockets[baseName]
+		mgr.mu.Lock()
+		sm, ok := mgr.fcgiSockets[baseName]
 		if !ok {
 			sm = fcgi.NewSocketManager(p.Config.Socket, p.Config.SocketMode, p.Config.SocketOwner)
 			// Store first so failed-listen cleanup can find it
-			p.manager.fcgiSockets[baseName] = sm
+			mgr.fcgiSockets[baseName] = sm
 		}
-		p.manager.mu.Unlock()
+		mgr.mu.Unlock()
 
 		if !ok {
 			if err := sm.Listen(); err != nil {
-				p.manager.mu.Lock()
-				delete(p.manager.fcgiSockets, baseName)
-				p.manager.mu.Unlock()
+				mgr.mu.Lock()
+				delete(mgr.fcgiSockets, baseName)
+				mgr.mu.Unlock()
+				p.mu.Lock()
 				p.State = StateExited
 				p.mu.Unlock()
 				return fmt.Errorf("fcgi socket listen: %v", err)
@@ -317,9 +321,21 @@ func (p *Process) Start() error {
 		var err error
 		fcgiCleanup, err = sm.Attach(cmd)
 		if err != nil {
+			p.mu.Lock()
 			p.State = StateExited
 			p.mu.Unlock()
 			return fmt.Errorf("fcgi socket attach: %v", err)
+		}
+
+		p.mu.Lock()
+		// Re-check: a concurrent Stop() may have changed state while p.mu was released.
+		if p.State != StateStarting {
+			p.mu.Unlock()
+			sm.Detach()
+			if fcgiCleanup != nil {
+				fcgiCleanup()
+			}
+			return fmt.Errorf("进程 %s 在启动期间被停止", p.Name)
 		}
 	}
 
@@ -396,6 +412,19 @@ func (p *Process) Start() error {
 	}
 
 	p.mu.Lock()
+	// Re-check: Stop() may have been called while p.mu was released
+	// (PreStartScript, umask, rlimits, cmd.Start).
+	if p.State != StateStarting {
+		p.mu.Unlock()
+		cmd.Process.Kill()
+		if fcgiCleanup != nil {
+			fcgiCleanup()
+		}
+		if stdinFile != nil {
+			stdinFile.Close()
+		}
+		return fmt.Errorf("进程 %s 在启动期间被停止", p.Name)
+	}
 	// Create channels only after cmd.Start() succeeds so that
 	// a failed Start() does not leak unclosed channels that would
 	// block the next Start() on <-monDone.
@@ -608,6 +637,14 @@ func (p *Process) GetState() ProcessState {
 	return p.State
 }
 
+// SetOnHealthCheckFailure sets the health check failure callback under p.mu
+// to prevent data races with the health check goroutine.
+func (p *Process) SetOnHealthCheckFailure(fn func(name string)) {
+	p.mu.Lock()
+	p.OnHealthCheckFailure = fn
+	p.mu.Unlock()
+}
+
 type Snapshot struct {
 	Name         string
 	State        ProcessState
@@ -690,19 +727,7 @@ func (p *Process) monitor() {
 		p.startCancel()
 	}
 
-	p.mu.Lock()
-	if p.waitCh != nil {
-		close(p.waitCh)
-		p.waitCh = nil
-	}
-
-	p.StopTime = time.Now()
-	if p.State != StateStopping {
-		p.State = StateExited
-	}
-
-	p.mu.Unlock()
-
+	// Compute exit code before closing waitCh so Stop() sees the correct value.
 	var exitCode int
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -711,16 +736,28 @@ func (p *Process) monitor() {
 			exitCode = -1
 		}
 	}
+
 	p.mu.Lock()
+	if p.waitCh != nil {
+		close(p.waitCh)
+		p.waitCh = nil
+	}
+
+	p.StopTime = time.Now()
 	p.ExitCode = exitCode
-	if p.State == StateExited {
-		pid := p.PID
-		p.mu.Unlock()
+	if p.State != StateStopping {
+		p.State = StateExited
+	}
+
+	// Capture webhook data before releasing lock.
+	isExited := p.State == StateExited
+	pid := p.PID
+	p.mu.Unlock()
+
+	if isExited {
 		p.sendWebhook(StateExited, pid, exitCode)
 		RecordEvent(p.Name, EventExit, pid, exitCode, "exited")
-		p.mu.Lock()
 	}
-	p.mu.Unlock()
 
 	// Run post-stop hook
 	if p.Config.PostStopScript != "" {
@@ -942,34 +979,42 @@ func (p *Process) runHealthCheck(ctx context.Context) {
 
 			p.mu.Lock()
 			wasHealthy := p.Healthy
+			var healthRestore, healthFail bool
+			var eventPID int
+			var hcFailCb func(string)
+
 			if ok {
 				p.healthCheckFailures = 0
 				p.Healthy = true
 				p.healthCheckRestartFired = false
 				if !wasHealthy {
-					pid := p.PID
-					RecordEvent(p.Name, EventHealthRestore, pid, 0, "health restored")
-					p.mu.Unlock()
-					p.sendWebhook(StateRunning, pid, 0)
-					p.mu.Lock()
+					healthRestore = true
+					eventPID = p.PID
 				}
 			} else {
 				p.healthCheckFailures++
-				if p.OnHealthCheckFailure != nil {
-					p.OnHealthCheckFailure(p.Name)
-				}
+				hcFailCb = p.OnHealthCheckFailure
 				if p.healthCheckFailures >= threshold {
 					p.Healthy = false
 					if wasHealthy {
-						pid := p.PID
-						RecordEvent(p.Name, EventHealthFail, pid, 0, "health check failed")
-						p.mu.Unlock()
-						p.sendWebhook(StateRunning, pid, 0)
-						p.mu.Lock()
+						healthFail = true
+						eventPID = p.PID
 					}
 				}
 			}
 			p.mu.Unlock()
+
+			if healthRestore {
+				RecordEvent(p.Name, EventHealthRestore, eventPID, 0, "health restored")
+				p.sendWebhook(StateRunning, eventPID, 0)
+			}
+			if healthFail {
+				RecordEvent(p.Name, EventHealthFail, eventPID, 0, "health check failed")
+				p.sendWebhook(StateRunning, eventPID, 0)
+			}
+			if hcFailCb != nil {
+				hcFailCb(p.Name)
+			}
 		}
 	}
 }
@@ -1373,16 +1418,19 @@ func (pm *ProcessManager) StartAll() {
 		pm.mu.RUnlock()
 	}
 
-	pm.mu.RLock()
 	for _, name := range orderedProcesses {
+		pm.mu.RLock()
 		process := pm.Processes[name]
+		pm.mu.RUnlock()
+		if process == nil {
+			continue
+		}
 		if process.Config.AutoStart {
 			if err := process.Start(); err != nil {
 				fmt.Printf("启动进程 %s 失败: %v\n", name, err)
 			}
 		}
 	}
-	pm.mu.RUnlock()
 }
 
 func (pm *ProcessManager) StopAll() {

@@ -60,14 +60,22 @@ func (m *Monitor) checkProcess(process *Process) {
 		// handleExitedProcess sets StateStarting when it schedules a restart,
 		// and StateFatal when it won't restart.
 		if process.Config.Socket != "" && process.manager != nil {
-			state := process.GetState()
+			process.mu.Lock()
+			state := process.State
+			process.mu.Unlock()
 			if state == StateFatal || state == StateExited || state == StateStopped {
 				baseName := fcgiBaseName(process.Config.Name)
 				process.manager.mu.Lock()
 				if sm, ok := process.manager.fcgiSockets[baseName]; ok {
-					if sm.Detach() {
-						sm.Close()
-						delete(process.manager.fcgiSockets, baseName)
+					// Re-check state under manager lock to avoid race with Start()
+					process.mu.Lock()
+					recheck := process.State
+					process.mu.Unlock()
+					if recheck == StateFatal || recheck == StateExited || recheck == StateStopped {
+						if sm.Detach() {
+							sm.Close()
+							delete(process.manager.fcgiSockets, baseName)
+						}
 					}
 				}
 				process.manager.mu.Unlock()
@@ -124,7 +132,7 @@ func (m *Monitor) handleExitedProcess(process *Process) {
 		return
 	}
 
-	if process.StartRetries >= process.Config.StartRetries {
+	if process.StartRetries > process.Config.StartRetries {
 		process.State = StateFatal
 		name := process.Name
 		pid := process.PID
@@ -151,19 +159,29 @@ func (m *Monitor) handleExitedProcess(process *Process) {
 			process.mu.Unlock()
 			return
 		}
-		// Health check restart already took over — bail.
+		// Health check restart already took over — bail. Reset flag so
+		// the monitor can re-dispatch on the next tick.
 		if process.State == StateStarting && process.healthCheckRestartFired {
+			process.healthCheckRestartFired = false
+			process.State = StateExited
 			process.mu.Unlock()
 			return
 		}
-		// Reset state so Start() can proceed (we set it to Starting on line 114
-		// to prevent the monitor from re-scheduling this process).
+		// Reset state so Start() can proceed.
 		if process.State == StateStarting {
 			process.State = StateExited
 		}
 		process.mu.Unlock()
 
 		fmt.Printf("进程 %s 已退出，尝试重启...\n", name)
+
+		// Re-check: Stop() may have been called while p.mu was released.
+		process.mu.Lock()
+		if process.State != StateExited {
+			process.mu.Unlock()
+			return
+		}
+		process.mu.Unlock()
 
 		if err := process.Start(); err != nil {
 			fmt.Printf("重启进程 %s 失败: %v\n", name, err)

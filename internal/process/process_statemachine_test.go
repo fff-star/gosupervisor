@@ -377,7 +377,7 @@ func TestStateTransitions(t *testing.T) {
 			wantErr:   true,
 		},
 		{
-			name: "STOPPING_Start_RUNNING",
+			name: "STOPPING_Start_Rejected",
 			setup: func(t *testing.T, pm *ProcessManager) *Process {
 				p := pm.AddProcess(&config.ProgramConfig{
 					Name: "start_from_stopping", Command: "sleep 1", AutoStart: false,
@@ -388,8 +388,8 @@ func TestStateTransitions(t *testing.T) {
 				return p
 			},
 			action:    (*Process).Start,
-			wantState: StateRunning,
-			wantErr:   false,
+			wantState: StateStopping,
+			wantErr:   true,
 		},
 	}
 
@@ -536,7 +536,7 @@ func TestHandleExitedProcessTransitions(t *testing.T) {
 				})
 				p.mu.Lock()
 				p.State = StateExited
-				p.StartRetries = 2
+				p.StartRetries = 3
 				p.mu.Unlock()
 				return p
 			},

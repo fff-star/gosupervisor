@@ -42,19 +42,25 @@ func (sm *SocketManager) Listen() error {
 	if err != nil {
 		return err
 	}
-	sm.network = network
-	sm.address = address
 
 	listener, err := net.Listen(network, address)
 	if err != nil {
 		return fmt.Errorf("fcgi socket listen %s: %v", sm.socketAddr, err)
 	}
+
+	sm.mu.Lock()
+	sm.network = network
+	sm.address = address
 	sm.listener = listener
+	sm.mu.Unlock()
 
 	// Apply socket mode (Unix only)
 	if network == "unix" && sm.socketMode > 0 {
 		if err := os.Chmod(address, os.FileMode(sm.socketMode)); err != nil {
 			listener.Close()
+			sm.mu.Lock()
+			sm.listener = nil
+			sm.mu.Unlock()
 			return fmt.Errorf("fcgi socket chmod %o: %v", sm.socketMode, err)
 		}
 	}
@@ -80,6 +86,9 @@ func (sm *SocketManager) Listen() error {
 		if uid != 0 || gid != 0 {
 			if err := os.Chown(address, uid, gid); err != nil {
 				listener.Close()
+				sm.mu.Lock()
+				sm.listener = nil
+				sm.mu.Unlock()
 				return fmt.Errorf("fcgi socket chown %s: %v", sm.socketOwner, err)
 			}
 		}
@@ -122,12 +131,14 @@ func (sm *SocketManager) Attach(cmd *exec.Cmd) (func(), error) {
 }
 
 // Detach decrements the reference count. Returns true if this was the last reference.
+// Returns false when called on an already-zero refcount to prevent premature socket close.
 func (sm *SocketManager) Detach() bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	if sm.refCount > 0 {
-		sm.refCount--
+	if sm.refCount == 0 {
+		return false
 	}
+	sm.refCount--
 	return sm.refCount == 0
 }
 

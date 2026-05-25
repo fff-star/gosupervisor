@@ -1,6 +1,7 @@
 package web
 
 import (
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -93,7 +94,10 @@ func (rl *RateLimiter) Stop() {
 // Middleware returns an HTTP middleware that rate limits by client IP.
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := r.RemoteAddr
+		ip, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			ip = r.RemoteAddr
+		}
 		if !rl.Allow(ip) {
 			w.Header().Set("Retry-After", "1")
 			w.Header().Set("Content-Type", "application/json")

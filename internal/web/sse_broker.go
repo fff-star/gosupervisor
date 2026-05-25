@@ -61,11 +61,7 @@ func (b *sseBroker) broadcast(event process.Event) {
 // Safe to call multiple times; subsequent calls are no-ops.
 func InitSSEBroker() {
 	initSSEBrokerOnce.Do(func() {
-		oldFn := process.SwapOnEvent(nil)
-		process.SetOnEvent(func(name string, typ process.EventType, pid int, exitCode int, message string) {
-			if oldFn != nil {
-				oldFn(name, typ, pid, exitCode, message)
-			}
+		oldFn := process.SwapOnEvent(func(name string, typ process.EventType, pid int, exitCode int, message string) {
 			globalSSEBroker.broadcast(process.Event{
 				Timestamp: time.Now(),
 				Name:      name,
@@ -75,17 +71,14 @@ func InitSSEBroker() {
 				Message:   message,
 			})
 		})
+		_ = oldFn
 	})
 }
 
-// ResetSSEBroker unbinds and re-binds the SSE broker. Used on config reload
+// ResetSSEBroker re-binds the SSE broker. Used on config reload
 // to re-establish the handler chain after the event listener manager is replaced.
 func ResetSSEBroker() {
-	oldFn := process.SwapOnEvent(nil)
-	process.SetOnEvent(func(name string, typ process.EventType, pid int, exitCode int, message string) {
-		if oldFn != nil {
-			oldFn(name, typ, pid, exitCode, message)
-		}
+	sseFn := func(name string, typ process.EventType, pid int, exitCode int, message string) {
 		globalSSEBroker.broadcast(process.Event{
 			Timestamp: time.Now(),
 			Name:      name,
@@ -94,5 +87,13 @@ func ResetSSEBroker() {
 			ExitCode:  exitCode,
 			Message:   message,
 		})
-	})
+	}
+	oldFn := process.SwapOnEvent(sseFn)
+	if oldFn != nil {
+		// Chain the old callback after SSE broadcast
+		process.SetOnEvent(func(name string, typ process.EventType, pid int, exitCode int, message string) {
+			sseFn(name, typ, pid, exitCode, message)
+			oldFn(name, typ, pid, exitCode, message)
+		})
+	}
 }

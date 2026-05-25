@@ -127,6 +127,9 @@ func sendLine(conn net.Conn, cmd string) {
 	for scanner.Scan() {
 		fmt.Println(scanner.Text())
 	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "读取响应失败: %v\n", err)
+	}
 }
 
 // runREPL runs the interactive REPL loop.

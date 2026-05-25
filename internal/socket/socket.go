@@ -265,7 +265,9 @@ func (s *SocketServer) handleCommand(line string) string {
 	case "events":
 		limit := 50
 		if len(parts) > 1 {
-			fmt.Sscanf(parts[1], "%d", &limit)
+			if n, _ := fmt.Sscanf(parts[1], "%d", &limit); n != 1 || limit < 0 {
+				limit = 50
+			}
 		}
 		events := process.GlobalEventBuffer.Snapshot(limit)
 		var b strings.Builder

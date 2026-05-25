@@ -40,7 +40,7 @@ func TestFCGI_Lifecycle_StartStop(t *testing.T) {
 	if err := cmd.Process.Kill(); err != nil {
 		t.Logf("Kill error (may already be dead): %v", err)
 	}
-	cmd.Wait()
+	_ = cmd.Wait()
 
 	last := sm.Detach()
 	if !last {
@@ -76,7 +76,7 @@ func TestFCGI_SocketSurvivesRestart(t *testing.T) {
 		t.Errorf("expected RefCount=1, got %d", sm.RefCount())
 	}
 	cmd1.Process.Kill()
-	cmd1.Wait()
+	_ = cmd1.Wait()
 	cleanup1()
 	sm.Detach()
 
@@ -93,7 +93,7 @@ func TestFCGI_SocketSurvivesRestart(t *testing.T) {
 		t.Errorf("expected RefCount=1 after second attach, got %d", sm.RefCount())
 	}
 	cmd2.Process.Kill()
-	cmd2.Wait()
+	_ = cmd2.Wait()
 	cleanup2()
 	sm.Detach()
 }
@@ -114,7 +114,7 @@ func TestFCGI_SocketClosesOnLastExit(t *testing.T) {
 	}
 	cmd.Start()
 	cmd.Process.Kill()
-	cmd.Wait()
+	_ = cmd.Wait()
 	cleanup()
 	sm.Detach()
 

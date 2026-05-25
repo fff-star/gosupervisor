@@ -25,11 +25,37 @@ const (
 	ProgramName = "gosupervisor"
 )
 
-// metricsManagerRef holds the current metrics manager for use by reloadConfiguration.
-var metricsManagerRef *metrics.MetricsManager
+// Metrics and event listener refs are protected by refsMu to prevent
+// data races between the main goroutine and the signal handler goroutine.
+var (
+	refsMu                 sync.Mutex
+	metricsManagerRef      *metrics.MetricsManager
+	eventListenerManagerRef *eventlistener.EventListenerManager
+)
 
-// eventListenerManagerRef holds the current event listener manager for use by reloadConfiguration.
-var eventListenerManagerRef *eventlistener.EventListenerManager
+func setMetricsRef(m *metrics.MetricsManager) {
+	refsMu.Lock()
+	metricsManagerRef = m
+	refsMu.Unlock()
+}
+
+func getMetricsRef() *metrics.MetricsManager {
+	refsMu.Lock()
+	defer refsMu.Unlock()
+	return metricsManagerRef
+}
+
+func setEventListenerRef(e *eventlistener.EventListenerManager) {
+	refsMu.Lock()
+	eventListenerManagerRef = e
+	refsMu.Unlock()
+}
+
+func getEventListenerRef() *eventlistener.EventListenerManager {
+	refsMu.Lock()
+	defer refsMu.Unlock()
+	return eventListenerManagerRef
+}
 
 func main() {
 	var exitCode int
@@ -162,7 +188,7 @@ func main() {
 	processManager := process.NewProcessManager(logManager)
 
 	// 初始化信号处理
-	sigChan := make(chan os.Signal, 1)
+	sigChan := make(chan os.Signal, 4)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
 	// done channel for clean shutdown (avoids os.Exit bypassing defers)
@@ -205,10 +231,10 @@ func main() {
 		eventListenerManager = eventlistener.NewManager(cfg, logManager.Info)
 		eventListenerManager.Start()
 		process.SetOnEvent(eventListenerManager.EmitEvent)
-		eventListenerManagerRef = eventListenerManager
+		setEventListenerRef(eventListenerManager)
 		// Re-wire SSE after event listener manager to maintain chain
 		if *webEnable {
-			web.InitSSEBroker()
+			web.ResetSSEBroker()
 		}
 	}
 
@@ -222,8 +248,8 @@ func main() {
 			eventListenerManager.Stop()
 			process.SetOnEvent(nil)
 		}
-		if metricsManagerRef != nil {
-			metricsManagerRef.Stop()
+		if m := getMetricsRef(); m != nil {
+			m.Stop()
 		}
 	}()
 
@@ -302,19 +328,20 @@ func main() {
 			// 如果启用了Prometheus指标导出
 			if *metricsEnable {
 				// 创建指标管理器
-				metricsManagerRef = metrics.NewMetricsManager(processManager)
+				mm := metrics.NewMetricsManager(processManager)
+				setMetricsRef(mm)
 
-				// Wire health check failure callback
+				// Wire health check failure callback (under p.mu for safety)
 				processManager.RangeProcesses(func(name string, p *process.Process) {
-					p.OnHealthCheckFailure = metricsManagerRef.RecordHealthCheckFailure
+					p.SetOnHealthCheckFailure(mm.RecordHealthCheckFailure)
 				})
 
 				// 启动指标收集器
-				metricsManagerRef.StartMetricsCollector(5 * time.Second)
+				mm.StartMetricsCollector(5 * time.Second)
 
 				// 在goroutine中启动指标服务器
 				go func() {
-					if err := metricsManagerRef.StartMetricsServer(*metricsAddr); err != nil {
+					if err := mm.StartMetricsServer(*metricsAddr); err != nil {
 						fmt.Printf("启动指标服务器失败: %v\n", err)
 					}
 				}()
@@ -497,7 +524,9 @@ func handleSignals(sigChan chan os.Signal, done chan struct{}, processManager *p
 			logManager.Info("收到终止信号，正在停止所有进程...")
 			processManager.StopAll()
 			if *stateFile != "" {
-				processManager.SaveState(*stateFile)
+				if err := processManager.SaveState(*stateFile); err != nil {
+					fmt.Printf("保存状态失败: %v\n", err)
+				}
 			}
 			logManager.Info("所有进程已停止，正在退出...")
 			doneOnce.Do(func() { close(done) })
@@ -583,19 +612,19 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 		logManager.Info("配置重载完成: 无变更")
 	}
 
-	// Re-wire metrics callback
-	if metricsManagerRef != nil {
+	// Re-wire metrics callback (under p.mu for safety)
+	if m := getMetricsRef(); m != nil {
 		processManager.RangeProcesses(func(name string, p *process.Process) {
-			p.OnHealthCheckFailure = metricsManagerRef.RecordHealthCheckFailure
+			p.SetOnHealthCheckFailure(m.RecordHealthCheckFailure)
 		})
-		metricsManagerRef.ResetTracking()
-		metricsManagerRef.RecordConfigReload()
+		m.ResetTracking()
+		m.RecordConfigReload()
 	}
 
 	// Reload event listeners
-	if eventListenerManagerRef != nil {
-		eventListenerManagerRef.Reload(cfg)
-		process.SetOnEvent(eventListenerManagerRef.EmitEvent)
+	if e := getEventListenerRef(); e != nil {
+		e.Reload(cfg)
+		process.SetOnEvent(e.EmitEvent)
 	}
 	// Re-wire SSE broker after reload to preserve handler chain
 	web.ResetSSEBroker()
