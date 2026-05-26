@@ -245,12 +245,12 @@ func TestRecordEventSignal(t *testing.T) {
 	}
 }
 
-func TestSetOnEvent_CalledByRecordEvent(t *testing.T) {
+func TestSetOnEventEL_CalledByRecordEvent(t *testing.T) {
 	var calledName string
 	var calledType EventType
 	var mu sync.Mutex
 
-	SetOnEvent(func(name string, typ EventType, pid int, exitCode int, message string) {
+	SetOnEventEL(func(name string, typ EventType, pid int, exitCode int, message string) {
 		mu.Lock()
 		calledName = name
 		calledType = typ
@@ -269,53 +269,76 @@ func TestSetOnEvent_CalledByRecordEvent(t *testing.T) {
 	mu.Unlock()
 
 	// Clean up
-	SetOnEvent(nil)
+	SetOnEventEL(nil)
 }
 
-func TestSwapOnEvent_ReturnsPrevious(t *testing.T) {
-	SetOnEvent(nil)
+func TestSetOnEventSSE_CalledByRecordEvent(t *testing.T) {
+	var calledName string
+	var calledType EventType
+	var mu sync.Mutex
 
-	var fn1Called, fn2Called bool
-	fn1 := func(name string, typ EventType, pid int, exitCode int, message string) {
-		fn1Called = true
-	}
-	fn2 := func(name string, typ EventType, pid int, exitCode int, message string) {
-		fn2Called = true
-	}
+	SetOnEventSSE(func(name string, typ EventType, pid int, exitCode int, message string) {
+		mu.Lock()
+		calledName = name
+		calledType = typ
+		mu.Unlock()
+	})
 
-	prev1 := SwapOnEvent(fn1)
-	if prev1 != nil {
-		t.Error("SwapOnEvent on nil should return nil")
-	}
-	RecordEvent("test", EventStart, 1, 0, "")
-	if !fn1Called {
-		t.Error("fn1 should be called after SwapOnEvent(fn1)")
-	}
+	RecordEvent("sse_test", EventStop, 7, 0, "")
 
-	prev2 := SwapOnEvent(fn2)
-	if prev2 == nil {
-		t.Error("SwapOnEvent should return previous function")
+	mu.Lock()
+	if calledName != "sse_test" {
+		t.Errorf("expected calledName='sse_test', got %q", calledName)
 	}
-	RecordEvent("test", EventExit, 2, 0, "")
-	if !fn2Called {
-		t.Error("fn2 should be called after SwapOnEvent(fn2)")
+	if calledType != EventStop {
+		t.Errorf("expected calledType=EventStop, got %q", calledType)
 	}
-	// fn1 should NOT be called again — it was swapped out
-	fn1CalledAfter := fn1Called
-	RecordEvent("test", EventStop, 3, 0, "")
-	// fn1Called won't change since fn1 was swapped out; fn2Called should stay true
-	_ = fn1CalledAfter
+	mu.Unlock()
 
 	// Clean up
-	SwapOnEvent(nil)
+	SetOnEventSSE(nil)
+}
+
+func TestSetOnEvent_BothSlotsIndependent(t *testing.T) {
+	var elCalled, sseCalled bool
+	SetOnEventEL(func(name string, typ EventType, pid int, exitCode int, message string) {
+		elCalled = true
+	})
+	SetOnEventSSE(func(name string, typ EventType, pid int, exitCode int, message string) {
+		sseCalled = true
+	})
+
+	RecordEvent("both", EventStart, 1, 0, "")
+
+	if !elCalled {
+		t.Error("EL slot should be called")
+	}
+	if !sseCalled {
+		t.Error("SSE slot should be called")
+	}
+
+	// Setting one to nil should not affect the other
+	SetOnEventEL(nil)
+	elCalled = false
+	sseCalled = false
+	RecordEvent("sse_only", EventStop, 2, 0, "")
+	if elCalled {
+		t.Error("EL slot should not be called after SetOnEventEL(nil)")
+	}
+	if !sseCalled {
+		t.Error("SSE slot should still be called after EL cleared")
+	}
+
+	SetOnEventSSE(nil)
 }
 
 func TestRecordEvent_OnEventNotCalledWhenNil(t *testing.T) {
-	SetOnEvent(nil)
+	SetOnEventEL(nil)
+	SetOnEventSSE(nil)
 	// Must not panic and must record the event anyway.
 	RecordEvent("safe_test", EventStop, 1, 0, "no handler")
 
-	// Event should still be in the global buffer even without OnEvent handler.
+	// Event should still be in the global buffer even without OnEvent handlers.
 	snapshot := GlobalEventBuffer.Snapshot(0)
 	found := false
 	for _, e := range snapshot {

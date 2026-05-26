@@ -541,7 +541,15 @@ func (p *Process) Stop() error {
 		}
 	}
 
-	// Force kill if still alive
+	// Re-check waitCh before force-kill: the process may have exited
+	// naturally during the StopSecs wait, avoiding a reused PID.
+	if waitCh != nil {
+		select {
+		case <-waitCh:
+			goto done
+		default:
+		}
+	}
 	if p.Config.StopAsGroup || p.Config.KillsAsGroup {
 		_ = signalProcessGroup(pidBefore, syscall.SIGKILL)
 	} else {
@@ -1140,12 +1148,13 @@ func (pm *ProcessManager) StopGroup(group string) []string {
 
 // PersistentState holds the state that can be saved/restored across restarts.
 type PersistentState struct {
-	ProcessName string        `json:"name"`
-	State       ProcessState  `json:"state"`
-	PID         int           `json:"pid"`
-	ExitCode    int           `json:"exitCode"`
+	ProcessName  string       `json:"name"`
+	State        ProcessState `json:"state"`
+	PID          int          `json:"pid"`
+	ExitCode     int          `json:"exitCode"`
 	RestartCount int          `json:"restartCount"`
-	LastRestart time.Time     `json:"lastRestart"`
+	StartRetries int          `json:"startRetries"`
+	LastRestart  time.Time    `json:"lastRestart"`
 }
 
 // SaveState saves the current state of all processes to a JSON file.
@@ -1159,6 +1168,7 @@ func (pm *ProcessManager) SaveState(path string) error {
 			PID:          s.PID,
 			ExitCode:     s.ExitCode,
 			RestartCount: s.RestartCount,
+			StartRetries: s.StartRetries,
 			LastRestart:  s.LastRestart,
 		})
 	})
@@ -1191,6 +1201,7 @@ func (pm *ProcessManager) RestoreState(path string) error {
 		if p := pm.GetProcess(s.ProcessName); p != nil {
 			p.mu.Lock()
 			p.RestartCount = s.RestartCount
+			p.StartRetries = s.StartRetries
 			if !s.LastRestart.IsZero() {
 				p.LastRestart = s.LastRestart
 			}
@@ -1340,15 +1351,20 @@ func (pm *ProcessManager) topologicalSortForGroup(group string) []string {
 
 // readSystemCPUTicks reads total CPU ticks from /proc/stat.
 func readSystemCPUTicks() int64 {
-	data, err := os.ReadFile("/proc/stat")
+	f, err := os.Open("/proc/stat")
 	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	if !scanner.Scan() {
 		return 0
 	}
 	// First line: "cpu  user nice system idle iowait irq softirq steal ..."
 	var (
 		user, nice, system, idle, iowait, irq, softirq, steal int64
 	)
-	n, _ := fmt.Sscanf(string(data), "cpu %d %d %d %d %d %d %d %d",
+	n, _ := fmt.Sscanf(scanner.Text(), "cpu %d %d %d %d %d %d %d %d",
 		&user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal)
 	if n < 4 {
 		return 0

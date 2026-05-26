@@ -538,18 +538,16 @@ func TestSSEBroker_NonBlockingBroadcast(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// InitSSEBroker / ResetSSEBroker
+// InitSSEBroker (independent SSE slot; no ResetSSEBroker needed)
 // ---------------------------------------------------------------------------
 
-func TestInitSSEBroker_SetsOnEvent(t *testing.T) {
-	process.SwapOnEvent(nil)
+func TestInitSSEBroker_SetsSSESlot(t *testing.T) {
+	process.SetOnEventSSE(nil)
 	initSSEBrokerOnce = sync.Once{} // reset: prior tests may have already called InitSSEBroker
 	InitSSEBroker()
 
-	// Subscribe a client to receive the event.
 	ch := globalSSEBroker.subscribe()
 
-	// Record an event — must not panic and must be broadcast.
 	process.RecordEvent("broker_test", process.EventStart, 99, 0, "init test")
 
 	select {
@@ -561,38 +559,43 @@ func TestInitSSEBroker_SetsOnEvent(t *testing.T) {
 		t.Error("timeout waiting for event broadcast")
 	}
 	globalSSEBroker.unsubscribe(ch)
+	process.SetOnEventSSE(nil)
 }
 
-func TestResetSSEBroker_ReplacesHandler(t *testing.T) {
-	called := false
-	process.SetOnEvent(func(name string, typ process.EventType, pid int, exitCode int, message string) {
-		called = true
+func TestSSEAndEL_IndependentSlots(t *testing.T) {
+	var elCalled, sseCalled bool
+	process.SetOnEventEL(func(name string, typ process.EventType, pid int, exitCode int, message string) {
+		elCalled = true
+	})
+	process.SetOnEventSSE(func(name string, typ process.EventType, pid int, exitCode int, message string) {
+		sseCalled = true
 	})
 
-	ResetSSEBroker()
+	process.RecordEvent("both_test", process.EventExit, 100, 0, "both test")
 
-	process.RecordEvent("reset_test", process.EventExit, 100, 0, "reset test")
-
-	if !called {
-		t.Error("previous OnEvent handler should still be called after ResetSSEBroker")
+	if !elCalled {
+		t.Error("EL slot should be called")
 	}
+	if !sseCalled {
+		t.Error("SSE slot should be called")
+	}
+
+	// Clear both for subsequent tests
+	process.SetOnEventEL(nil)
+	process.SetOnEventSSE(nil)
 }
 
 func TestInitSSEBroker_OnlyOnce(t *testing.T) {
-	// Reset to a clean state — ResetSSEBroker always re-wires the handler
-	// regardless of sync.Once.
-	ResetSSEBroker()
+	process.SetOnEventSSE(nil)
+	initSSEBrokerOnce = sync.Once{} // reset
 
-	// Calling InitSSEBroker again should be a no-op (sync.Once already
-	// consumed by a previous test or by ResetSSEBroker).
 	InitSSEBroker()
+	InitSSEBroker() // should be no-op
 
-	// Subscribe a client and record an event.
 	ch := globalSSEBroker.subscribe()
 	process.RecordEvent("once_test", process.EventStart, 1, 0, "once")
 	globalSSEBroker.unsubscribe(ch)
 
-	// Event should have been broadcast to the client.
 	select {
 	case data := <-ch:
 		if !strings.Contains(string(data), "once_test") {
@@ -601,4 +604,5 @@ func TestInitSSEBroker_OnlyOnce(t *testing.T) {
 	default:
 		t.Error("expected event to be broadcast, but channel was empty")
 	}
+	process.SetOnEventSSE(nil)
 }

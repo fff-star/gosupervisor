@@ -421,8 +421,7 @@ func TestWebServerRealHTTP_SSEEventStream(t *testing.T) {
 	defer cleanup()
 
 	// Wire the SSE broker so process events are broadcast to SSE clients.
-	// ResetSSEBroker always re-wires the handler regardless of sync.Once.
-	ResetSSEBroker()
+	InitSSEBroker()
 
 	logDir := t.TempDir()
 	ws, err := NewWebServer(pm, logDir)

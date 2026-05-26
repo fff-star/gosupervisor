@@ -230,12 +230,8 @@ func main() {
 	if len(cfg.EventListeners) > 0 {
 		eventListenerManager = eventlistener.NewManager(cfg, logManager.Info)
 		eventListenerManager.Start()
-		process.SetOnEvent(eventListenerManager.EmitEvent)
+		process.SetOnEventEL(eventListenerManager.EmitEvent)
 		setEventListenerRef(eventListenerManager)
-		// Re-wire SSE after event listener manager to maintain chain
-		if *webEnable {
-			web.ResetSSEBroker()
-		}
 	}
 
 	// Deferred cleanup for web server, event listeners, and metrics manager
@@ -246,7 +242,7 @@ func main() {
 		}
 		if eventListenerManager != nil {
 			eventListenerManager.Stop()
-			process.SetOnEvent(nil)
+			process.SetOnEventEL(nil)
 		}
 		if m := getMetricsRef(); m != nil {
 			m.Stop()
@@ -624,12 +620,7 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 	// Reload event listeners
 	if e := getEventListenerRef(); e != nil {
 		e.Reload(cfg)
-		process.SetOnEvent(e.EmitEvent)
-		// Re-wire SSE broker after reload to preserve handler chain.
-		// Only needed when event listeners are active; without them, the
-		// SSE handler is already in place from InitSSEBroker and wrapping
-		// it again would create a duplicate chain.
-		web.ResetSSEBroker()
+		process.SetOnEventEL(e.EmitEvent)
 	}
 
 	return nil

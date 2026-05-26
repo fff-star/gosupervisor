@@ -52,31 +52,31 @@ func (eb *EventBuffer) Snapshot(limit int) []Event {
 // GlobalEventBuffer is the singleton event buffer for the supervisor.
 var GlobalEventBuffer = NewEventBuffer(500)
 
-// OnEvent is an optional callback invoked by RecordEvent for each event.
-// External subsystems (e.g., event listeners) can hook into this to observe
-// events in real time. The callback is called synchronously from RecordEvent.
-//
-// Use SetOnEvent / SwapOnEvent to write and RecordEvent reads under onEventMu.
-var onEvent func(name string, typ EventType, pid int, exitCode int, message string)
-var onEventMu sync.Mutex
+// Two independent callback slots avoid the nesting problem that arises from
+// chaining callbacks inside a single slot. SSE broadcast and event listeners
+// each get their own slot; RecordEvent fans out to both.
+var (
+	onEventSSE func(name string, typ EventType, pid int, exitCode int, message string)
+	onEventEL  func(name string, typ EventType, pid int, exitCode int, message string)
+	onEventMu  sync.Mutex
+)
 
-// SetOnEvent atomically sets the global event callback.
-func SetOnEvent(fn func(name string, typ EventType, pid int, exitCode int, message string)) {
+// SetOnEventSSE sets the SSE broadcast callback (called from web package).
+func SetOnEventSSE(fn func(name string, typ EventType, pid int, exitCode int, message string)) {
 	onEventMu.Lock()
-	onEvent = fn
+	onEventSSE = fn
 	onEventMu.Unlock()
 }
 
-// SwapOnEvent atomically replaces the global event callback and returns the previous one.
-func SwapOnEvent(fn func(name string, typ EventType, pid int, exitCode int, message string)) func(name string, typ EventType, pid int, exitCode int, message string) {
+// SetOnEventEL sets the event listener callback (called from main wiring and reload).
+func SetOnEventEL(fn func(name string, typ EventType, pid int, exitCode int, message string)) {
 	onEventMu.Lock()
-	prev := onEvent
-	onEvent = fn
+	onEventEL = fn
 	onEventMu.Unlock()
-	return prev
 }
 
-// RecordEvent pushes an event to the global buffer.
+// RecordEvent pushes an event to the global buffer and fans out to both
+// SSE and event listener callbacks independently.
 func RecordEvent(name string, typ EventType, pid int, exitCode int, message string) {
 	GlobalEventBuffer.Push(Event{
 		Timestamp: time.Now(),
@@ -87,9 +87,13 @@ func RecordEvent(name string, typ EventType, pid int, exitCode int, message stri
 		Message:   message,
 	})
 	onEventMu.Lock()
-	fn := onEvent
+	sseFn := onEventSSE
+	elFn := onEventEL
 	onEventMu.Unlock()
-	if fn != nil {
-		fn(name, typ, pid, exitCode, message)
+	if sseFn != nil {
+		sseFn(name, typ, pid, exitCode, message)
+	}
+	if elFn != nil {
+		elFn(name, typ, pid, exitCode, message)
 	}
 }
