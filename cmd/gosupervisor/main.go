@@ -625,9 +625,12 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 	if e := getEventListenerRef(); e != nil {
 		e.Reload(cfg)
 		process.SetOnEvent(e.EmitEvent)
+		// Re-wire SSE broker after reload to preserve handler chain.
+		// Only needed when event listeners are active; without them, the
+		// SSE handler is already in place from InitSSEBroker and wrapping
+		// it again would create a duplicate chain.
+		web.ResetSSEBroker()
 	}
-	// Re-wire SSE broker after reload to preserve handler chain
-	web.ResetSSEBroker()
 
 	return nil
 }
@@ -679,10 +682,10 @@ func updateProcessConfig(processManager *process.ProcessManager, configPath stri
 	}
 
 	// Re-wire metrics callback for updated processes
-	if metricsManagerRef != nil {
+	if m := getMetricsRef(); m != nil {
 		for _, expandedCfg := range config.ExpandProgramConfig(programCfg) {
 			if p := processManager.GetProcess(expandedCfg.Name); p != nil {
-				p.OnHealthCheckFailure = metricsManagerRef.RecordHealthCheckFailure
+				p.SetOnHealthCheckFailure(m.RecordHealthCheckFailure)
 			}
 		}
 	}

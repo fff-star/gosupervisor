@@ -13,6 +13,7 @@ import (
 	"os/user"
 	"runtime"
 	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,7 +37,7 @@ const (
 )
 
 // Logf is the package-level log function. Set to t.Logf in tests to silence output.
-var Logf = func(format string, args ...interface{}) {
+var Logf = func(format string, args ...any) {
 	fmt.Printf(format, args...)
 }
 
@@ -404,11 +405,13 @@ func (p *Process) Start() error {
 	// Close stdin file in parent — child has its own fd copy
 	if stdinFile != nil {
 		_ = stdinFile.Close()
+		stdinFile = nil
 	}
 
 	// Close fcgi dup'd fd in parent — child has its own copy via ExtraFiles
 	if fcgiCleanup != nil {
 		fcgiCleanup()
+		fcgiCleanup = nil
 	}
 
 	p.mu.Lock()
@@ -1020,8 +1023,7 @@ func (p *Process) runHealthCheck(ctx context.Context) {
 }
 
 func checkHealth(url string, timeout time.Duration) bool {
-	if strings.HasPrefix(url, "tcp://") {
-		addr := strings.TrimPrefix(url, "tcp://")
+	if addr, ok := strings.CutPrefix(url, "tcp://"); ok {
 		conn, err := net.DialTimeout("tcp", addr, timeout)
 		if err != nil {
 			return false
@@ -1045,13 +1047,16 @@ func (p *Process) applyCgroup(pid int) {
 		return
 	}
 	cgroupProcs := p.Config.CgroupPath + "/cgroup.procs"
-	if err := os.WriteFile(cgroupProcs, []byte(fmt.Sprintf("%d", pid)), 0644); err != nil {
+	if err := os.WriteFile(cgroupProcs, []byte(strconv.Itoa(pid)), 0644); err != nil {
 		fmt.Printf("进程 %s 加入 cgroup 失败: %v\n", p.Name, err)
 	}
 }
 
 // addRestartTimestamp records a restart and prunes old entries outside the window.
 func (p *Process) addRestartTimestamp(windowSecs int) {
+	if windowSecs <= 0 {
+		windowSecs = 60
+	}
 	now := time.Now()
 	p.restartTimestamps = append(p.restartTimestamps, now)
 	cutoff := now.Add(-time.Duration(windowSecs) * time.Second)
@@ -1088,19 +1093,10 @@ func (p *Process) restartRateExceeded() bool {
 // shouldRestartOnExitCode checks if the process should restart based on exit code policy.
 func (p *Process) shouldRestartOnExitCode() bool {
 	if len(p.Config.RestartCodes) > 0 {
-		for _, c := range p.Config.RestartCodes {
-			if c == p.ExitCode {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(p.Config.RestartCodes, p.ExitCode)
 	}
 	if len(p.Config.NoRestartCodes) > 0 {
-		for _, c := range p.Config.NoRestartCodes {
-			if c == p.ExitCode {
-				return false
-			}
-		}
+		return !slices.Contains(p.Config.NoRestartCodes, p.ExitCode)
 	}
 	return true
 }
@@ -1215,10 +1211,7 @@ func (p *Process) sendWebhook(state ProcessState, pid int, exitCode int) {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	retries := p.Config.WebhookRetries
-	if retries < 0 {
-		retries = 0
-	}
+	retries := max(p.Config.WebhookRetries, 0)
 
 	payload := struct {
 		Name      string `json:"name"`
@@ -1244,10 +1237,7 @@ func (p *Process) sendWebhook(state ProcessState, pid int, exitCode int) {
 	var lastErr error
 	for attempt := 0; attempt <= retries; attempt++ {
 		if attempt > 0 {
-			backoff := time.Duration(1<<(attempt-1)) * time.Second
-			if backoff > 30*time.Second {
-				backoff = 30 * time.Second
-			}
+			backoff := min(time.Duration(1<<(attempt-1))*time.Second, 30*time.Second)
 			time.Sleep(backoff)
 		}
 		client := &http.Client{Timeout: timeout}
@@ -1340,14 +1330,7 @@ func (pm *ProcessManager) topologicalSortForGroup(group string) []string {
 
 	// Append any remaining group members not reached (cycles or missing deps)
 	for name := range inGroup {
-		found := false
-		for _, r := range result {
-			if r == name {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !slices.Contains(result, name) {
 			result = append(result, name)
 		}
 	}

@@ -707,6 +707,7 @@ func TestProcessRestartCountLogic(t *testing.T) {
 	if p.RestartCount != 2 {
 		t.Errorf("第三次启动后 RestartCount 应为 2，实际为 %d", p.RestartCount)
 	}
+	_ = p.Stop()
 }
 
 // TestHandleExitedProcessNoAutoRestart 测试：AutoRestart=false 时不重启
@@ -752,6 +753,7 @@ func TestHandleExitedProcessNoAutoRestart(t *testing.T) {
 	if afterState != StateExited && afterState != StateFatal {
 		t.Errorf("handleExitedProcess 后状态应为 EXITED 或 FATAL，实际为 %s", afterState)
 	}
+	_ = p.Stop()
 }
 
 // TestHandleExitedProcessRetryLimit 测试：重试耗尽后进入 FATAL
@@ -944,6 +946,7 @@ func TestRestartCountNotOnInitialStart(t *testing.T) {
 	if p.RestartCount != 1 {
 		t.Errorf("重启后 RestartCount 应为 1，实际为 %d", p.RestartCount)
 	}
+	_ = p.Stop()
 }
 
 // TestStopDoesNotTriggerRestart 测试：Stop 后 Monitor 不重启
@@ -1641,6 +1644,8 @@ func TestMonitorResetsExitCodeOnSuccess(t *testing.T) {
 	if s2.ExitCode != 0 {
 		t.Errorf("期望 ExitCode=0 (exit 0), 实际 %d", s2.ExitCode)
 	}
+	_ = p.Stop()
+	_ = p2.Stop()
 }
 
 // TestHandleExitedProcessOffByOne tests that the retry limit is respected
@@ -1831,6 +1836,7 @@ func TestMonitorExitCodeOnNormalExit(t *testing.T) {
 	if s.ExitCode != 42 {
 		t.Errorf("期望 ExitCode=42, 实际 %d", s.ExitCode)
 	}
+	_ = p.Stop()
 }
 
 // TestMemoryUsagePreservedOnStatFailure tests that MemoryUsage from VmRSS
@@ -4727,4 +4733,5 @@ func TestStdinFileIntegration(t *testing.T) {
 	if !strings.Contains(string(data), "hello-from-stdin-test") {
 		t.Errorf("output should contain stdin content, got: %s", string(data))
 	}
+	_ = p.Stop()
 }

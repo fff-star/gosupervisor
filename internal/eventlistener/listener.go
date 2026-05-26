@@ -227,12 +227,22 @@ func (l *EventListener) stop() {
 		// Send graceful stop signal first
 		sig := parseStopSignal(l.Config.StopSignal)
 		_ = cmd.Process.Signal(sig)
-		// Wait with timeout then force kill
-		timer := time.AfterFunc(time.Duration(l.Config.StopSecs)*time.Second, func() {
+		// Wait with timeout then force kill.
+		// Use a channel to avoid calling Kill() after Wait() has already
+		// reaped the child, which could target a reused PID.
+		waitDone := make(chan struct{})
+		go func() {
+			_ = cmd.Wait()
+			close(waitDone)
+		}()
+		timer := time.NewTimer(time.Duration(l.Config.StopSecs) * time.Second)
+		select {
+		case <-waitDone:
+			timer.Stop()
+		case <-timer.C:
 			_ = cmd.Process.Kill()
-		})
-		_ = cmd.Wait()
-		timer.Stop()
+			<-waitDone
+		}
 	}
 
 	// Cancel context (sends SIGKILL via CommandContext if process still alive),
