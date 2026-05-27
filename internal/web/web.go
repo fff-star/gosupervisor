@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -31,6 +32,7 @@ type WebServer struct {
 	rateLimiter    *RateLimiter
 	certFile       string
 	keyFile        string
+	backlog        int
 	srv            *http.Server
 
 	indexTmpl         *template.Template
@@ -96,6 +98,7 @@ func NewWebServerFullTLS(processManager *process.ProcessManager, logDir, user, p
 		rateLimiter:       rl,
 		certFile:          certFile,
 		keyFile:           keyFile,
+		backlog:           -1,
 		indexTmpl:         indexTmpl,
 		logsTmpl:          logsTmpl,
 		systemInfoTmpl:    systemInfoTmpl,
@@ -119,6 +122,11 @@ func NewWebServerFullTLS(processManager *process.ProcessManager, logDir, user, p
 	mux.HandleFunc("/process", ws.handleProcessDetail)
 
 	return ws, nil
+}
+
+// SetBacklog sets the listen backlog for the web server's TCP listener.
+func (ws *WebServer) SetBacklog(n int) {
+	ws.backlog = n
 }
 
 // basicAuth wraps a handler with HTTP Basic Auth if credentials are configured.
@@ -183,7 +191,6 @@ func isSameOrigin(r *http.Request) bool {
 }
 
 func (ws *WebServer) Start(addr string) error {
-	fmt.Printf("Web服务器启动在 %s\n", addr)
 	handler := http.Handler(ws.mux)
 	if ws.authUser != "" || ws.authPass != "" {
 		handler = ws.authMiddleware(ws.mux)
@@ -204,11 +211,18 @@ func (ws *WebServer) Start(addr string) error {
 		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+
+	ln, err := listenTCP(addr, ws.backlog)
+	if err != nil {
+		return fmt.Errorf("Web服务器监听失败: %v", err)
+	}
+	ws.srv.Addr = ln.Addr().String()
+	fmt.Printf("Web服务器启动在 %s\n", ws.srv.Addr)
 	if ws.certFile != "" && ws.keyFile != "" {
 		fmt.Printf("Web服务器已启用 TLS (cert=%s, key=%s)\n", ws.certFile, ws.keyFile)
-		return ws.srv.ListenAndServeTLS(ws.certFile, ws.keyFile)
+		return ws.srv.ServeTLS(ln, ws.certFile, ws.keyFile)
 	}
-	return ws.srv.ListenAndServe()
+	return ws.srv.Serve(ln)
 }
 
 // Stop cleans up resources held by the WebServer.
@@ -1186,6 +1200,56 @@ func countProcesses() int {
 		}
 	}
 	return 0
+}
+
+// listenTCP creates a TCP listener with the specified backlog.
+// A backlog <= 0 uses the system default via net.Listen.
+func listenTCP(addr string, backlog int) (net.Listener, error) {
+	if backlog <= 0 {
+		return net.Listen("tcp", addr)
+	}
+
+	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+
+	family := syscall.AF_INET
+	var sa syscall.Sockaddr
+	if ip4 := tcpAddr.IP.To4(); ip4 != nil {
+		s := &syscall.SockaddrInet4{Port: tcpAddr.Port}
+		copy(s.Addr[:], ip4)
+		sa = s
+	} else {
+		s := &syscall.SockaddrInet6{Port: tcpAddr.Port}
+		copy(s.Addr[:], tcpAddr.IP.To16())
+		sa = s
+		family = syscall.AF_INET6
+	}
+
+	fd, err := syscall.Socket(family, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, syscall.IPPROTO_TCP)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
+		syscall.Close(fd)
+		return nil, err
+	}
+
+	if err := syscall.Bind(fd, sa); err != nil {
+		syscall.Close(fd)
+		return nil, err
+	}
+
+	if err := syscall.Listen(fd, backlog); err != nil {
+		syscall.Close(fd)
+		return nil, err
+	}
+
+	f := os.NewFile(uintptr(fd), "tcp:"+tcpAddr.String())
+	defer f.Close()
+	return net.FileListener(f)
 }
 
 const indexTemplate = `<!DOCTYPE html>

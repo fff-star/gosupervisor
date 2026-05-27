@@ -9,19 +9,21 @@ import (
 	"os/user"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"gosupervisor/internal/process"
 )
 
 type SocketServer struct {
-	pm          *process.ProcessManager
-	socket      net.Listener
-	socketMode  os.FileMode
-	socketOwner string
+	pm             *process.ProcessManager
+	socket         net.Listener
+	socketMode     os.FileMode
+	socketOwner    string
+	socketBacklog  int
 }
 
 func NewSocketServer(pm *process.ProcessManager) *SocketServer {
-	return &SocketServer{pm: pm}
+	return &SocketServer{pm: pm, socketBacklog: -1}
 }
 
 func (s *SocketServer) SetSocketMode(mode os.FileMode) {
@@ -32,9 +34,13 @@ func (s *SocketServer) SetSocketOwner(owner string) {
 	s.socketOwner = owner
 }
 
+func (s *SocketServer) SetSocketBacklog(n int) {
+	s.socketBacklog = n
+}
+
 func (s *SocketServer) Start(socketPath string) error {
 	os.Remove(socketPath)
-	l, err := net.Listen("unix", socketPath)
+	l, err := listenUnix(socketPath, s.socketBacklog)
 	if err != nil {
 		return fmt.Errorf("创建 Unix socket 失败: %v", err)
 	}
@@ -315,4 +321,32 @@ func isValidName(name string) bool {
 		return false
 	}
 	return !strings.Contains(name, "/") && !strings.Contains(name, "..") && !strings.Contains(name, "\\") && !strings.Contains(name, " ")
+}
+
+// listenUnix creates a Unix domain listener with the specified backlog.
+// A backlog <= 0 uses the system default via net.Listen.
+func listenUnix(path string, backlog int) (net.Listener, error) {
+	if backlog <= 0 {
+		return net.Listen("unix", path)
+	}
+
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	sa := &syscall.SockaddrUnix{Name: path}
+	if err := syscall.Bind(fd, sa); err != nil {
+		syscall.Close(fd)
+		return nil, err
+	}
+
+	if err := syscall.Listen(fd, backlog); err != nil {
+		syscall.Close(fd)
+		return nil, err
+	}
+
+	f := os.NewFile(uintptr(fd), path)
+	defer f.Close()
+	return net.FileListener(f)
 }

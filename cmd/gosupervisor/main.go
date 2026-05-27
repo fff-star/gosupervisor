@@ -250,6 +250,23 @@ func main() {
 	processManager.StartAll()
 	fmt.Println("所有进程启动成功")
 
+	// Find socket_backlog from any program config (first non-default wins)
+	backlog := -1
+	for _, progCfg := range cfg.Programs {
+		if progCfg.SocketBacklog > 0 {
+			backlog = progCfg.SocketBacklog
+			break
+		}
+	}
+	if backlog < 0 {
+		for _, fcgiCfg := range cfg.FcgiPrograms {
+			if fcgiCfg.SocketBacklog > 0 {
+				backlog = fcgiCfg.SocketBacklog
+				break
+			}
+		}
+	}
+
 	// 如果启用了Unix socket CLI
 	if *socketPath != "" {
 		socketServer := socket.NewSocketServer(processManager)
@@ -260,6 +277,9 @@ func main() {
 			if cfg.Server.SocketOwner != "" {
 				socketServer.SetSocketOwner(cfg.Server.SocketOwner)
 			}
+		}
+		if backlog > 0 {
+			socketServer.SetSocketBacklog(backlog)
 		}
 		if err := socketServer.Start(*socketPath); err != nil {
 			fmt.Printf("启动Unix socket CLI失败: %v\n", err)
@@ -287,6 +307,9 @@ func main() {
 			fmt.Printf("初始化Web服务器失败: %v\n", err)
 			exitCode = 1
 			return
+		}
+		if backlog > 0 {
+			webServer.SetBacklog(backlog)
 		}
 
 		// 在goroutine中启动Web服务器，立即检测端口绑定失败
