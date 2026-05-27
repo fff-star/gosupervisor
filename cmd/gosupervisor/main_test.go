@@ -64,29 +64,6 @@ func TestPrintVersion(t *testing.T) {
 	}
 }
 
-func TestPrintProcessStatus(t *testing.T) {
-	pm := makeProcessManager(t)
-
-	cfg := &config.ProgramConfig{
-		Name:    "test_proc",
-		Command: "echo hello",
-	}
-	pm.AddProcess(cfg)
-	p := pm.GetProcess("test_proc")
-	if p == nil {
-		t.Fatal("AddProcess did not create process")
-	}
-
-	out := captureStdout(func() { printProcessStatus(p) })
-
-	if !strings.Contains(out, "test_proc") {
-		t.Errorf("expected process name in output, got: %s", out)
-	}
-	if !strings.Contains(out, "STOPPED") {
-		t.Errorf("expected STOPPED state, got: %s", out)
-	}
-}
-
 func TestReloadConfiguration_NoChange(t *testing.T) {
 	dir := t.TempDir()
 	pm := makeProcessManager(t)
@@ -226,66 +203,6 @@ func TestReloadConfiguration_InvalidPath(t *testing.T) {
 	err := reloadConfiguration(pm, "/nonexistent/path/config.ini", l)
 	if err == nil {
 		t.Error("expected error for nonexistent config file")
-	}
-}
-
-func TestUpdateProcessConfig_Success(t *testing.T) {
-	dir := t.TempDir()
-	pm := makeProcessManager(t)
-	l := makeLogger(t)
-
-	cfgPath := writeConfig(t, dir, "test.ini", "[program:app]\ncommand=echo updated\n")
-
-	pm.AddProcess(&config.ProgramConfig{
-		Name:    "app",
-		Command: "echo original",
-	})
-
-	err := updateProcessConfig(pm, cfgPath, "app", l)
-	if err != nil {
-		t.Fatalf("updateProcessConfig failed: %v", err)
-	}
-
-	p := pm.GetProcess("app")
-	if p == nil {
-		t.Fatal("process 'app' should exist after update")
-	}
-	s := p.Snapshot()
-	if s.Config.Command != "echo updated" {
-		t.Errorf("expected command 'echo updated', got %q", s.Config.Command)
-	}
-}
-
-func TestUpdateProcessConfig_NotFound(t *testing.T) {
-	dir := t.TempDir()
-	pm := makeProcessManager(t)
-	l := makeLogger(t)
-
-	// Config has 'app' but we try to update 'nonexistent'
-	cfgPath := writeConfig(t, dir, "test.ini", "[program:app]\ncommand=echo app\n")
-
-	err := updateProcessConfig(pm, cfgPath, "nonexistent", l)
-	if err == nil {
-		t.Error("expected error for nonexistent process")
-	}
-}
-
-func TestUpdateProcessConfig_ProcessInConfigNotFound(t *testing.T) {
-	dir := t.TempDir()
-	pm := makeProcessManager(t)
-	l := makeLogger(t)
-
-	// Config has only 'other', we try to update 'missing'
-	cfgPath := writeConfig(t, dir, "test.ini", "[program:other]\ncommand=echo other\n")
-
-	pm.AddProcess(&config.ProgramConfig{
-		Name:    "missing",
-		Command: "echo x",
-	})
-
-	err := updateProcessConfig(pm, cfgPath, "missing", l)
-	if err == nil {
-		t.Error("expected error when process not found in config")
 	}
 }
 

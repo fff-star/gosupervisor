@@ -206,6 +206,26 @@ func (s *SocketServer) handleCommand(line string) string {
 		}
 		return "OK restarted"
 
+	case "start-all":
+		s.pm.StartAll()
+		return "OK all started"
+
+	case "stop-all":
+		s.pm.StopAll()
+		return "OK all stopped"
+
+	case "restart-all":
+		var errs []string
+		s.pm.RangeProcesses(func(n string, p *process.Process) {
+			if err := p.Restart(); err != nil {
+				errs = append(errs, fmt.Sprintf("%s: %v", n, err))
+			}
+		})
+		if len(errs) > 0 {
+			return fmt.Sprintf("OK restarted with errors: %s", strings.Join(errs, "; "))
+		}
+		return "OK all restarted"
+
 	case "group-start":
 		if name == "" {
 			return "ERR missing group name"
@@ -282,7 +302,7 @@ func (s *SocketServer) handleCommand(line string) string {
 		return fmt.Sprintf("OK %d events\n%s", len(events), b.String())
 
 	case "help":
-		return "OK commands: status [name], start <name>, stop <name>, restart <name>, signal <name> <sig>, group-start <group>, group-stop <group>, group-restart <group>, events [N], help, quit"
+		return "OK commands: status [name], start <name>, stop <name>, restart <name>, signal <name> <sig>, start-all, stop-all, restart-all, group-start <group>, group-stop <group>, group-restart <group>, events [N], help, quit"
 
 	default:
 		return fmt.Sprintf("ERR unknown command: %s", cmd)

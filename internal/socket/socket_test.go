@@ -475,6 +475,10 @@ func FuzzHandleCommand(f *testing.F) {
 	f.Add("restart test1")
 	f.Add("group-start web")
 	f.Add("group-stop web")
+	f.Add("group-restart web")
+	f.Add("start-all")
+	f.Add("stop-all")
+	f.Add("restart-all")
 	f.Add("help")
 	f.Add("quit")
 	f.Add("  status  test1  ")
@@ -504,7 +508,7 @@ func FuzzHandleCommand(f *testing.F) {
 		parts := strings.Fields(data)
 		if len(parts) > 0 {
 			switch parts[0] {
-			case "status", "start", "stop", "restart", "group-start", "group-stop", "group-restart", "help":
+			case "status", "start", "stop", "restart", "group-start", "group-stop", "group-restart", "start-all", "stop-all", "restart-all", "help":
 			default:
 				if !strings.HasPrefix(resp, "ERR") {
 					t.Errorf("未知命令应返回 ERR, 实际: %q", resp)
@@ -678,6 +682,32 @@ func TestIsValidName(t *testing.T) {
 		if got != tt.expected {
 			t.Errorf("isValidName(%q) = %v, want %v", tt.name, got, tt.expected)
 		}
+	}
+}
+
+func TestHandleCommandStartAll(t *testing.T) {
+	s := newTestSocketServer(t)
+	resp := s.handleCommand("start-all")
+	if !strings.HasPrefix(resp, "OK") {
+		t.Errorf("start-all: %s", resp)
+	}
+}
+
+func TestHandleCommandStopAll(t *testing.T) {
+	s := newTestSocketServer(t)
+	s.handleCommand("start-all")
+	resp := s.handleCommand("stop-all")
+	if !strings.HasPrefix(resp, "OK") {
+		t.Errorf("stop-all: %s", resp)
+	}
+}
+
+func TestHandleCommandRestartAll(t *testing.T) {
+	s := newTestSocketServer(t)
+	s.handleCommand("start-all")
+	resp := s.handleCommand("restart-all")
+	if !strings.HasPrefix(resp, "OK") {
+		t.Errorf("restart-all: %s", resp)
 	}
 }
 

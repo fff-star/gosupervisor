@@ -17,6 +17,7 @@ const ProgramName = "gosupervisorctl"
 var commands = []string{
 	"status", "start", "stop", "restart", "signal",
 	"reload", "events", "group-start", "group-stop", "group-restart",
+	"start-all", "stop-all", "restart-all",
 	"help", "quit", "exit",
 }
 
@@ -108,6 +109,12 @@ func handleCommand(conn net.Conn, args []string) {
 			return
 		}
 		sendLine(conn, fmt.Sprintf("group-restart %s", args[1]))
+	case "start-all":
+		sendLine(conn, "start-all")
+	case "stop-all":
+		sendLine(conn, "stop-all")
+	case "restart-all":
+		sendLine(conn, "restart-all")
 	case "help":
 		sendLine(conn, "help")
 	default:
@@ -298,6 +305,9 @@ func printREPLHelp() {
 	fmt.Println("  signal <name> <sig> 发送信号")
 	fmt.Println("  reload <name>      重载进程 (SIGHUP)")
 	fmt.Println("  events [N]         显示事件")
+	fmt.Println("  start-all          启动所有进程")
+	fmt.Println("  stop-all           停止所有进程")
+	fmt.Println("  restart-all        重启所有进程")
 	fmt.Println("  group-start <g>    启动进程组")
 	fmt.Println("  group-stop <g>     停止进程组")
 	fmt.Println("  group-restart <g>  重启进程组")
@@ -321,6 +331,11 @@ func printUsage() {
   signal <name> <sig> 向进程发送信号
   reload <name>     向进程发送 SIGHUP 重载信号
   events [N]        显示最近 N 条事件 (默认 50)
+  group-start <g>   启动进程组
+  group-stop <g>    停止进程组
+  start-all         启动所有进程
+  stop-all          停止所有进程
+  restart-all       重启所有进程
   group-start <g>   启动进程组
   group-stop <g>    停止进程组
   group-restart <g> 重启进程组

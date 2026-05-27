@@ -118,6 +118,27 @@ func TestHandleCommand_GroupRestart(t *testing.T) {
 	handleCommand(client, []string{"group-restart", "mygroup"})
 }
 
+func TestHandleCommand_StartAll(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	go mockServer(t, server, "start-all", "OK all started")
+	handleCommand(client, []string{"start-all"})
+}
+
+func TestHandleCommand_StopAll(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	go mockServer(t, server, "stop-all", "OK all stopped")
+	handleCommand(client, []string{"stop-all"})
+}
+
+func TestHandleCommand_RestartAll(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	go mockServer(t, server, "restart-all", "OK all restarted")
+	handleCommand(client, []string{"restart-all"})
+}
+
 func TestHandleCommand_Help(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
@@ -393,7 +414,8 @@ func TestPrintREPLHelp(t *testing.T) {
 	out := buf.String()
 
 	expectedCommands := []string{"status", "start", "stop", "restart", "signal",
-		"reload", "events", "group-start", "group-stop", "group-restart", "help", "quit"}
+		"reload", "events", "start-all", "stop-all", "restart-all",
+		"group-start", "group-stop", "group-restart", "help", "quit"}
 	for _, cmd := range expectedCommands {
 		if !strings.Contains(out, cmd) {
 			t.Errorf("REPL help missing command %q", cmd)
