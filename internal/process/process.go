@@ -211,9 +211,9 @@ func (p *Process) Start() error {
 		p.mu.Unlock()
 		return fmt.Errorf("进程 %s 已经在运行或启动中", p.Name)
 	}
-	if p.Cmd != nil && p.Cmd.Process != nil {
-		p.Cmd.Process.Kill()
-	}
+	// Old process has already exited (we waited for monDone above).
+	// Avoid calling Kill on the stale PID to prevent PID reuse attacks.
+	p.Cmd = nil
 
 	p.State = StateStarting
 	p.StartRetries++
@@ -484,7 +484,7 @@ func (p *Process) Stop() error {
 	}
 
 	if p.State != StateRunning && p.State != StateStopping {
-		cmd.Process.Kill()
+		// Process not running; skip Kill to avoid PID reuse.
 		p.State = StateStopped
 		p.mu.Unlock()
 		// Clean up fcgi socket even if process has already exited.

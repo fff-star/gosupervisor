@@ -56,13 +56,13 @@ var GlobalEventBuffer = NewEventBuffer(500)
 // chaining callbacks inside a single slot. SSE broadcast and event listeners
 // each get their own slot; RecordEvent fans out to both.
 var (
-	onEventSSE func(name string, typ EventType, pid int, exitCode int, message string)
+	onEventSSE func(name string, typ EventType, pid int, exitCode int, message string, ts time.Time)
 	onEventEL  func(name string, typ EventType, pid int, exitCode int, message string)
 	onEventMu  sync.Mutex
 )
 
 // SetOnEventSSE sets the SSE broadcast callback (called from web package).
-func SetOnEventSSE(fn func(name string, typ EventType, pid int, exitCode int, message string)) {
+func SetOnEventSSE(fn func(name string, typ EventType, pid int, exitCode int, message string, ts time.Time)) {
 	onEventMu.Lock()
 	onEventSSE = fn
 	onEventMu.Unlock()
@@ -78,8 +78,9 @@ func SetOnEventEL(fn func(name string, typ EventType, pid int, exitCode int, mes
 // RecordEvent pushes an event to the global buffer and fans out to both
 // SSE and event listener callbacks independently.
 func RecordEvent(name string, typ EventType, pid int, exitCode int, message string) {
+	now := time.Now()
 	GlobalEventBuffer.Push(Event{
-		Timestamp: time.Now(),
+		Timestamp: now,
 		Name:      name,
 		Type:      typ,
 		PID:       pid,
@@ -91,7 +92,7 @@ func RecordEvent(name string, typ EventType, pid int, exitCode int, message stri
 	elFn := onEventEL
 	onEventMu.Unlock()
 	if sseFn != nil {
-		sseFn(name, typ, pid, exitCode, message)
+		sseFn(name, typ, pid, exitCode, message, now)
 	}
 	if elFn != nil {
 		elFn(name, typ, pid, exitCode, message)

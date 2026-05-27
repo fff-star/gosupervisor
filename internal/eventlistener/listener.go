@@ -158,7 +158,11 @@ func (l *EventListener) start() error {
 		cmd.Dir = l.Config.Directory
 	}
 	if l.Config.User != "" {
-		setupUser(cmd, l.Config.User)
+		if err := setupUser(cmd, l.Config.User); err != nil {
+			l.state = "STOPPED"
+			close(l.startDone)
+			return fmt.Errorf("setup user: %w", err)
+		}
 	}
 	cmd.Env = os.Environ()
 	for k, v := range l.Config.Environment {
@@ -366,14 +370,14 @@ func readResult(reader *bufio.Reader) (string, error) {
 	return string(payload), nil
 }
 
-func setupUser(cmd *exec.Cmd, username string) {
+func setupUser(cmd *exec.Cmd, username string) error {
 	if username == "" {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
-		return
+		return nil
 	}
 	u, err := user.Lookup(username)
 	if err != nil {
-		return
+		return fmt.Errorf("lookup user %s: %w", username, err)
 	}
 	uid, _ := strconv.ParseUint(u.Uid, 10, 32)
 	gid, _ := strconv.ParseUint(u.Gid, 10, 32)
@@ -391,4 +395,5 @@ func setupUser(cmd *exec.Cmd, username string) {
 			NoSetGroups: false,
 		},
 	}
+	return nil
 }

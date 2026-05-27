@@ -567,7 +567,7 @@ func TestSSEAndEL_IndependentSlots(t *testing.T) {
 	process.SetOnEventEL(func(name string, typ process.EventType, pid int, exitCode int, message string) {
 		elCalled = true
 	})
-	process.SetOnEventSSE(func(name string, typ process.EventType, pid int, exitCode int, message string) {
+	process.SetOnEventSSE(func(name string, typ process.EventType, pid int, exitCode int, message string, ts time.Time) {
 		sseCalled = true
 	})
 

@@ -277,7 +277,7 @@ func TestSetOnEventSSE_CalledByRecordEvent(t *testing.T) {
 	var calledType EventType
 	var mu sync.Mutex
 
-	SetOnEventSSE(func(name string, typ EventType, pid int, exitCode int, message string) {
+	SetOnEventSSE(func(name string, typ EventType, pid int, exitCode int, message string, ts time.Time) {
 		mu.Lock()
 		calledName = name
 		calledType = typ
@@ -304,7 +304,7 @@ func TestSetOnEvent_BothSlotsIndependent(t *testing.T) {
 	SetOnEventEL(func(name string, typ EventType, pid int, exitCode int, message string) {
 		elCalled = true
 	})
-	SetOnEventSSE(func(name string, typ EventType, pid int, exitCode int, message string) {
+	SetOnEventSSE(func(name string, typ EventType, pid int, exitCode int, message string, ts time.Time) {
 		sseCalled = true
 	})
 

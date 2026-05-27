@@ -57,10 +57,10 @@ func (b *sseBroker) broadcast(event process.Event) {
 
 // sseCallback returns the SSE broadcast callback. Factored as a method so the
 // broker reference is captured once rather than reading the global on each call.
-func sseCallback() func(name string, typ process.EventType, pid int, exitCode int, message string) {
-	return func(name string, typ process.EventType, pid int, exitCode int, message string) {
+func sseCallback() func(name string, typ process.EventType, pid int, exitCode int, message string, ts time.Time) {
+	return func(name string, typ process.EventType, pid int, exitCode int, message string, ts time.Time) {
 		globalSSEBroker.broadcast(process.Event{
-			Timestamp: time.Now(),
+			Timestamp: ts,
 			Name:      name,
 			Type:      typ,
 			PID:       pid,
