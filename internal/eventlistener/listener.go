@@ -184,7 +184,19 @@ func (l *EventListener) start() error {
 		close(l.startDone)
 		return fmt.Errorf("stdin pipe: %w", err)
 	}
-	cmd.Stderr = os.Stderr
+	if l.Config.RedirectStderr && l.Config.StderrLogFile != "" {
+		f, err := os.OpenFile(l.Config.StderrLogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			stdoutR.Close()
+			stdinW.Close()
+			l.state = "STOPPED"
+			close(l.startDone)
+			return fmt.Errorf("open stderr log: %w", err)
+		}
+		cmd.Stderr = f
+	} else {
+		cmd.Stderr = os.Stderr
+	}
 
 	if err := cmd.Start(); err != nil {
 		stdoutR.Close()
@@ -244,8 +256,14 @@ func (l *EventListener) stop() {
 		case <-waitDone:
 			timer.Stop()
 		case <-timer.C:
-			_ = cmd.Process.Kill()
-			<-waitDone
+			// Re-check: the process may have exited naturally between the
+			// timer firing and Kill(), avoiding a reused PID.
+			select {
+			case <-waitDone:
+			default:
+				_ = cmd.Process.Kill()
+				<-waitDone
+			}
 		}
 	}
 
@@ -290,22 +308,20 @@ func parseStopSignal(name string) syscall.Signal {
 	}
 }
 
-// protocolLoop implements the supervisord READY/RESULT protocol.
+// protocolLoop implements the standard supervisord READY/RESULT protocol.
 // It reads from child's stdout (stdoutR) and writes events to child's stdin (stdinW).
 //
-// Protocol flow:
+// Protocol flow (per supervisord spec):
 //  1. Read READY from child
 //  2. Dequeue event, encode and write to child's stdin
-//  3. Read READY (ack from child that it received the event)
-//  4. Read RESULT N\n<payload> from child
-//  5. If payload == "OK": remove event from queue. If "FAIL": retry next iteration.
-//  6. Go to 2
+//  3. Read RESULT N\n<payload> from child
+//  4. If payload == "OK": remove event from queue. If "FAIL": retry next iteration.
+//  5. Go to 1
 func (l *EventListener) protocolLoop(stdoutR io.Reader, stdinW io.WriteCloser) {
 	defer close(l.done)
 	defer stdinW.Close()
 
 	reader := bufio.NewReader(stdoutR)
-	var eventSent bool
 
 	for {
 		// Step 1: Wait for READY
@@ -315,20 +331,6 @@ func (l *EventListener) protocolLoop(stdoutR io.Reader, stdinW io.WriteCloser) {
 		}
 		line = strings.TrimSpace(line)
 		if line != "READY" {
-			continue
-		}
-
-		// If we previously sent an event, read the result now
-		if eventSent {
-			eventSent = false
-			payload, err := readResult(reader)
-			if err != nil {
-				return
-			}
-			if payload == "OK" {
-				l.queue.RemoveFirst()
-			}
-			// FAIL: leave event in queue, will be retried
 			continue
 		}
 
@@ -343,7 +345,16 @@ func (l *EventListener) protocolLoop(stdoutR io.Reader, stdinW io.WriteCloser) {
 		if _, err := stdinW.Write(encoded); err != nil {
 			return
 		}
-		eventSent = true
+
+		// Step 3: Read RESULT
+		payload, err := readResult(reader)
+		if err != nil {
+			return
+		}
+		if payload == "OK" {
+			l.queue.RemoveFirst()
+		}
+		// FAIL: leave event in queue, will be retried on next READY
 	}
 }
 

@@ -302,12 +302,13 @@ func (p *Process) Start() error {
 		sm, ok := mgr.fcgiSockets[baseName]
 		if !ok {
 			sm = fcgi.NewSocketManager(p.Config.Socket, p.Config.SocketMode, p.Config.SocketOwner)
-			// Store first so failed-listen cleanup can find it
 			mgr.fcgiSockets[baseName] = sm
 		}
-		mgr.mu.Unlock()
-
 		if !ok {
+			// Release mgr.mu for the slow Listen() call, then re-acquire
+			// before Attach() to prevent a concurrent Stop() from closing
+			// the socket between lookup and the refCount increment.
+			mgr.mu.Unlock()
 			if err := sm.Listen(); err != nil {
 				mgr.mu.Lock()
 				delete(mgr.fcgiSockets, baseName)
@@ -317,10 +318,13 @@ func (p *Process) Start() error {
 				p.mu.Unlock()
 				return fmt.Errorf("fcgi socket listen: %v", err)
 			}
+			mgr.mu.Lock()
 		}
 
 		var err error
 		fcgiCleanup, err = sm.Attach(cmd)
+		mgr.mu.Unlock()
+
 		if err != nil {
 			p.mu.Lock()
 			p.State = StateExited
@@ -502,13 +506,6 @@ func (p *Process) Stop() error {
 	}
 
 	p.State = StateStopping
-	// Cancel health check and resource monitor contexts for clean shutdown.
-	if p.healthCheckCancel != nil {
-		p.healthCheckCancel()
-	}
-	if p.startCancel != nil {
-		p.startCancel()
-	}
 	waitCh := p.waitCh
 	pidBefore := p.PID
 	p.mu.Unlock()
@@ -563,13 +560,27 @@ func (p *Process) Stop() error {
 	}
 
 done:
+	// Now that the process is confirmed dead, cancel contexts to clean up
+	// health check and resource monitor goroutines. Doing this after the
+	// process exits (rather than before SIGTERM) avoids CommandContext's
+	// internal SIGKILL racing with our graceful shutdown.
 	p.mu.Lock()
+	if p.healthCheckCancel != nil {
+		p.healthCheckCancel()
+	}
+	if p.startCancel != nil {
+		p.startCancel()
+	}
 	p.StopTime = time.Now()
 	if p.State == StateStopping {
 		p.State = StateStopped
 	}
 	pid := p.PID
 	exitCode := p.ExitCode
+	// Clear Cmd and PID after the process is confirmed dead so that no
+	// future operation can accidentally use a stale (potentially reused) PID.
+	p.Cmd = nil
+	p.PID = 0
 	p.mu.Unlock()
 
 	// Detach fcgi socket
@@ -730,12 +741,21 @@ func fcgiBaseName(name string) string {
 
 func (p *Process) monitor() {
 	defer close(p.monitorDone)
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("panic in monitor goroutine for %s: %v\n", p.Name, r)
+		}
+	}()
 
 	err := p.Cmd.Wait()
 
-	// Signal monitorResources to exit immediately now that the process is done.
-	if p.startCancel != nil {
-		p.startCancel()
+	// Capture startCancel under the lock to avoid a data race with the next
+	// Start() call, which writes p.startCancel concurrently.
+	p.mu.Lock()
+	cancel := p.startCancel
+	p.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 
 	// Compute exit code before closing waitCh so Stop() sees the correct value.
@@ -779,6 +799,11 @@ func (p *Process) monitor() {
 }
 
 func (p *Process) monitorResources() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("panic in monitorResources goroutine for %s: %v\n", p.Name, r)
+		}
+	}()
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -829,12 +854,9 @@ func (p *Process) readProcStats(pid int) {
 		f.Close()
 	}
 
-	// Update MemoryUsage even if stat read fails later (VmRSS already read)
-	p.mu.Lock()
-	p.MemoryUsage = rss
-	p.mu.Unlock()
-
-	// Read process CPU ticks from /proc/pid/stat
+	// Read process CPU ticks from /proc/pid/stat before acquiring the lock,
+	// then update MemoryUsage, CPUUsage, ResourceHealthy, and ResourceHistory
+	// under a single lock so Snapshot() sees a consistent view.
 	statFile := fmt.Sprintf("/proc/%d/stat", pid)
 	data, err := os.ReadFile(statFile)
 	if err != nil {
@@ -857,8 +879,8 @@ func (p *Process) readProcStats(pid int) {
 	// Read system-wide CPU ticks from /proc/stat
 	sysTicks := readSystemCPUTicks()
 
-	// Hold lock once for all updates
 	p.mu.Lock()
+	p.MemoryUsage = rss
 
 	now := time.Now()
 
@@ -877,8 +899,10 @@ func (p *Process) readProcStats(pid int) {
 	p.prevCPUTime = now
 	p.prevSysTicks = sysTicks
 
-	cpuOK := p.Config.CPUThresholdPercent <= 0 || p.CPUUsage < p.Config.CPUThresholdPercent
-	memOK := p.Config.MemoryThresholdBytes <= 0 || p.MemoryUsage < uint64(p.Config.MemoryThresholdBytes)
+	// Negative threshold means disabled (set to -1 in config). Zero means
+	// unset (config defaults fill in the production values).
+	cpuOK := p.Config.CPUThresholdPercent < 0 || p.CPUUsage < p.Config.CPUThresholdPercent
+	memOK := p.Config.MemoryThresholdBytes < 0 || p.MemoryUsage < uint64(p.Config.MemoryThresholdBytes)
 	p.ResourceHealthy = cpuOK && memOK
 
 	// Skip first sample since CPU delta is not yet meaningful
@@ -907,7 +931,7 @@ func (p *Process) applyRlimits() (restore []func()) {
 		{syscall.RLIMIT_DATA, p.Config.RlimitData},
 		{syscall.RLIMIT_FSIZE, p.Config.RlimitFsize},
 		{syscall.RLIMIT_NOFILE, p.Config.RlimitNofile},
-		{6 /* RLIMIT_NPROC */, p.Config.RlimitNproc},
+		{6 /* RLIMIT_NPROC - not exported by Go syscall on Linux */, p.Config.RlimitNproc},
 		{syscall.RLIMIT_STACK, p.Config.RlimitStack},
 	}
 	for _, e := range entries {
@@ -959,6 +983,11 @@ func (p *Process) startHealthCheck() {
 }
 
 func (p *Process) runHealthCheck(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("panic in health check goroutine for %s: %v\n", p.Name, r)
+		}
+	}()
 	interval := time.Duration(p.Config.HealthCheckInterval) * time.Second
 	timeout := time.Duration(p.Config.HealthCheckTimeout) * time.Second
 	threshold := p.Config.HealthCheckUnhealthyThreshold
@@ -981,14 +1010,16 @@ func (p *Process) runHealthCheck(ctx context.Context) {
 
 			ok := checkHealth(url, timeout)
 
-			// Bail out if the process was stopped/restarted while checkHealth was in flight
+			p.mu.Lock()
+			// Bail out if the process was stopped/restarted while checkHealth was in flight.
+			// Must check under the lock to avoid TOCTOU: if ctx is cancelled between the
+			// check and Lock(), a stale goroutine would mutate p.Healthy on a dead process.
 			select {
 			case <-ctx.Done():
+				p.mu.Unlock()
 				return
 			default:
 			}
-
-			p.mu.Lock()
 			wasHealthy := p.Healthy
 			var healthRestore, healthFail bool
 			var eventPID int
@@ -1109,22 +1140,22 @@ func (p *Process) shouldRestartOnExitCode() bool {
 	return true
 }
 
-// StartGroup starts all processes in a group.
-func (pm *ProcessManager) StartGroup(group string) []string {
+// StartGroup starts all processes in a group (including autostart=false).
+func (pm *ProcessManager) StartGroup(group string) (started, failed []string) {
 	ordered := pm.topologicalSortForGroup(group)
-	var started []string
 	for _, name := range ordered {
 		p := pm.GetProcess(name)
-		if p == nil || !p.Config.AutoStart {
+		if p == nil {
 			continue
 		}
 		if err := p.Start(); err != nil {
 			fmt.Printf("启动进程 %s 失败: %v\n", p.Name, err)
+			failed = append(failed, name)
 		} else {
 			started = append(started, p.Name)
 		}
 	}
-	return started
+	return
 }
 
 // StopGroup stops all processes in a group (reverse dependency order within group).
@@ -1179,6 +1210,11 @@ func (pm *ProcessManager) SaveState(path string) error {
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
 		return err
+	}
+	// fsync the temp file before rename to ensure crash safety.
+	if f, err := os.Open(tmpPath); err == nil {
+		_ = f.Sync()
+		f.Close()
 	}
 	return os.Rename(tmpPath, path)
 }
@@ -1399,7 +1435,7 @@ func (pm *ProcessManager) CompareConfigs(newConfigs map[string]*config.ProgramCo
 	return
 }
 
-func (pm *ProcessManager) StartAll() {
+func (pm *ProcessManager) StartAll() []string {
 	pm.mu.RLock()
 	dependencyGraph := make(map[string][]string, len(pm.Processes))
 	for _, process := range pm.Processes {
@@ -1417,6 +1453,7 @@ func (pm *ProcessManager) StartAll() {
 		pm.mu.RUnlock()
 	}
 
+	var failed []string
 	for _, name := range orderedProcesses {
 		pm.mu.RLock()
 		process := pm.Processes[name]
@@ -1424,12 +1461,12 @@ func (pm *ProcessManager) StartAll() {
 		if process == nil {
 			continue
 		}
-		if process.Config.AutoStart {
-			if err := process.Start(); err != nil {
-				fmt.Printf("启动进程 %s 失败: %v\n", name, err)
-			}
+		if err := process.Start(); err != nil {
+			fmt.Printf("启动进程 %s 失败: %v\n", name, err)
+			failed = append(failed, name)
 		}
 	}
+	return failed
 }
 
 func (pm *ProcessManager) StopAll() {
@@ -1463,6 +1500,11 @@ func (pm *ProcessManager) StopAll() {
 			process.Stop()
 		}
 	}
+}
+
+// SortByDeps returns names in dependency order (dependencies before dependents).
+func (pm *ProcessManager) SortByDeps(graph map[string][]string) ([]string, error) {
+	return pm.topologicalSort(graph)
 }
 
 func (pm *ProcessManager) topologicalSort(graph map[string][]string) ([]string, error) {

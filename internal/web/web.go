@@ -469,7 +469,12 @@ func (ws *WebServer) handleAPIV1GroupAction(w http.ResponseWriter, r *http.Reque
 	var result []string
 	switch {
 	case action == "start" && r.Method == http.MethodPost:
-		result = ws.processManager.StartGroup(group)
+		started, failed := ws.processManager.StartGroup(group)
+		result = started
+		if len(failed) > 0 {
+			jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "processes": started, "failed": failed})
+			return
+		}
 	case action == "stop" && r.Method == http.MethodPost:
 		result = ws.processManager.StopGroup(group)
 	case action == "restart" && r.Method == http.MethodPost:
@@ -638,7 +643,30 @@ func (ws *WebServer) handleProcessLogsStream(w http.ResponseWriter, r *http.Requ
 			}
 		}
 	}
-	f, err := os.Open(logFile)
+
+	// getInode returns the inode of a file, or 0 on error.
+	getInode := func(path string) uint64 {
+		fi, err := os.Stat(path)
+		if err != nil {
+			return 0
+		}
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		if !ok {
+			return 0
+		}
+		return st.Ino
+	}
+
+	openLog := func(path string) (*os.File, error) {
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		f.Seek(0, io.SeekEnd)
+		return f, nil
+	}
+
+	f, err := openLog(logFile)
 	if err != nil {
 		fmt.Fprintf(w, "data: {\"error\": \"无法打开日志文件\"}\n\n")
 		flusher.Flush()
@@ -646,8 +674,7 @@ func (ws *WebServer) handleProcessLogsStream(w http.ResponseWriter, r *http.Requ
 	}
 	defer f.Close()
 
-	// Seek to end for tail -f behavior
-	f.Seek(0, io.SeekEnd)
+	lastIno := getInode(logFile)
 
 	ctx := r.Context()
 	ticker := time.NewTicker(500 * time.Millisecond)
@@ -658,6 +685,17 @@ func (ws *WebServer) handleProcessLogsStream(w http.ResponseWriter, r *http.Requ
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// Detect log rotation: if the inode changed, the file was rotated.
+			// Reopen to follow the new file.
+			if ino := getInode(logFile); ino != 0 && ino != lastIno {
+				f.Close()
+				newF, err := openLog(logFile)
+				if err != nil {
+					return
+				}
+				f = newF
+				lastIno = ino
+			}
 			buf := make([]byte, 65536)
 			n, err := f.Read(buf)
 			if err != nil && err != io.EOF {

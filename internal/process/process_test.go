@@ -324,10 +324,8 @@ func TestTopologicalSortWithCycle(t *testing.T) {
 
 // TestProcessAutoRestart 测试进程自动重启功能
 func TestProcessAutoRestart(t *testing.T) {
-	// 初始化日志管理器
-	logDir := "./test_logs"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
-	defer os.RemoveAll(logDir)
 
 	logManager, err := logger.NewDefaultLogger(logDir)
 	if err != nil {
@@ -335,58 +333,66 @@ func TestProcessAutoRestart(t *testing.T) {
 	}
 	defer logManager.Close()
 
-	// 创建进程管理器
 	processManager := NewProcessManager(logManager)
 
-	// 创建测试进程配置（设置较短的启动时间，便于测试）
+	// Use a command that exits quickly so auto-restart is triggered.
 	programCfg := &config.ProgramConfig{
 		Name:         "test_restart",
-		Command:      "ping localhost",
+		Command:      "echo exited",
 		Directory:    ".",
 		AutoStart:    true,
 		AutoRestart:  true,
-		StartSecs:    1,
+		StartSecs:    0,
 		StartRetries: 3,
+		StopSecs:     1,
 		User:         "",
 		Environment:  make(map[string]string),
 	}
 
-	// 添加进程
 	processManager.AddProcess(programCfg)
-
-	// 获取进程
 	p := processManager.GetProcess("test_restart")
 	if p == nil {
 		t.Fatalf("获取进程失败")
 	}
 
-	// 启动进程
-	err = p.Start()
-	if err != nil {
-		t.Errorf("启动进程失败: %v", err)
+	if err := p.Start(); err != nil {
+		t.Fatalf("启动进程失败: %v", err)
 	}
 
-	// 等待进程启动后退出，monitor 应自动重启
-	time.Sleep(3 * time.Second)
+	// Start the monitor so it can detect the exited process and auto-restart it.
+	monitor := NewMonitor(processManager)
+	monitor.Start()
+	defer monitor.Stop()
 
-	// 进程应该已经退出并被 monitor 重启（或正在重启）
-	state := p.GetState()
-	if state != StateRunning && state != StateStarting {
-		t.Errorf("期望进程状态为RUNNING或STARTING（已重启），实际为%s", state)
+	// Wait for the process to exit and be auto-restarted by the monitor.
+	deadline := time.After(10 * time.Second)
+	var restarted bool
+	for !restarted {
+		select {
+		case <-deadline:
+			t.Fatal("超时等待自动重启")
+		default:
+		}
+		s := p.Snapshot()
+		if s.RestartCount > 0 {
+			restarted = true
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 
-	// 停止进程
+	s := p.Snapshot()
+	if s.RestartCount == 0 {
+		t.Errorf("期望 RestartCount > 0, 实际 %d", s.RestartCount)
+	}
+
+	// Stop the process to clean up
 	if err := p.Stop(); err != nil {
 		t.Logf("停止进程时遇到错误: %v", err)
 	}
-}
-
-// TestProcessResourceMonitoring 测试进程资源监控功能
+}// TestProcessResourceMonitoring 测试进程资源监控功能
 func TestProcessResourceMonitoring(t *testing.T) {
-	// 初始化日志管理器
-	logDir := "./test_logs"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
-	defer os.RemoveAll(logDir)
 
 	logManager, err := logger.NewDefaultLogger(logDir)
 	if err != nil {
@@ -394,53 +400,49 @@ func TestProcessResourceMonitoring(t *testing.T) {
 	}
 	defer logManager.Close()
 
-	// 创建进程管理器
 	processManager := NewProcessManager(logManager)
 
-	// 创建测试进程配置，使用ping命令让进程一直运行
+	// Use a command that runs long enough for resource monitoring to sample it.
 	programCfg := &config.ProgramConfig{
 		Name:         "test_resource",
-		Command:      "ping localhost",
+		Command:      "sleep 10",
 		Directory:    ".",
 		AutoStart:    true,
-		AutoRestart:  true,
-		StartSecs:    1,
+		AutoRestart:  false,
+		StartSecs:    0,
 		StartRetries: 3,
 		User:         "",
 		Environment:  make(map[string]string),
 	}
 
-	// 添加进程
 	processManager.AddProcess(programCfg)
-
-	// 获取进程
 	p := processManager.GetProcess("test_resource")
 	if p == nil {
 		t.Fatalf("获取进程失败")
 	}
 
-	// 启动进程
-	err = p.Start()
-	if err != nil {
-		t.Errorf("启动进程失败: %v", err)
+	if err := p.Start(); err != nil {
+		t.Fatalf("启动进程失败: %v", err)
 	}
 
-	// 等待进程启动
-	time.Sleep(2 * time.Second)
+	// Wait for multiple resource monitoring ticks (interval is 5s).
+	time.Sleep(6 * time.Second)
 
-	// 测试获取进程资源使用情况 — verify PID is populated
-	if p.PID <= 0 {
+	s := p.Snapshot()
+	if s.PID <= 0 {
 		t.Error("已启动进程应有有效 PID")
 	}
+	if s.MemoryUsage == 0 {
+		t.Error("资源监控应记录内存使用量")
+	}
+	if s.CPUUsage < 0 {
+		t.Error("CPU 使用率不应为负数")
+	}
 
-	// 停止进程
-	// 停止进程，若出错则记录
 	if err := p.Stop(); err != nil {
 		t.Logf("停止进程时遇到错误: %v", err)
 	}
-}
-
-// TestProcessStateTransitions 测试进程状态转换
+}// TestProcessStateTransitions 测试进程状态转换
 func TestProcessStateTransitions(t *testing.T) {
 	// 初始化日志管理器
 	logDir := "./test_logs"
@@ -524,15 +526,16 @@ func TestMonitorAutoRestart(t *testing.T) {
 
 	processManager := NewProcessManager(logManager)
 
-	// 创建一个短暂进程（运行 1 秒后自动退出）
+	// Use a command that exits quickly. StartSecs=5 ensures the monitor
+	// never resets StartRetries mid-test (the process never stays up that long).
 	programCfg := &config.ProgramConfig{
 		Name:         "short_lived",
-		Command:      "sleep 1",
+		Command:      "echo test",
 		Directory:    ".",
 		AutoStart:    true,
 		AutoRestart:  true,
-		StartSecs:    1,
-		StartRetries: 2,
+		StartSecs:    5,
+		StartRetries: 3,
 		User:         "",
 		Environment:  make(map[string]string),
 	}
@@ -555,21 +558,23 @@ func TestMonitorAutoRestart(t *testing.T) {
 		t.Errorf("启动进程失败: %v", err)
 	}
 
-	// 等待进程退出
-	time.Sleep(2 * time.Second)
-
-	// 进程应该已退出或被 monitor 重启（允许 STARTING 过渡态）
-	if state := p.GetState(); state != StateExited && state != StateRunning && state != StateStarting {
-		t.Errorf("第一次检查：进程状态为%s，期望 EXITED/RUNNING/STARTING", state)
+	// Poll for restart: the process should exit, be detected, and restarted
+	// within a few monitor ticks. Use a condition loop instead of hardcoded
+	// sleeps to avoid timing flakiness.
+	deadline := time.Now().Add(8 * time.Second)
+	var lastRestartCount int
+	for time.Now().Before(deadline) {
+		s := p.Snapshot()
+		lastRestartCount = s.RestartCount
+		if lastRestartCount >= 2 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-
-	// 等待监控尝试重启
-	time.Sleep(2 * time.Second)
-
-	// 检查是否发生了重启（RestartCount > 0 或状态变化）
-	s := p.Snapshot()
-	if s.RestartCount == 0 && s.StartRetries == 1 {
-		t.Errorf("期望重启至少发生过一次，RestartCount=%d, StartRetries=%d", s.RestartCount, s.StartRetries)
+	if lastRestartCount < 2 {
+		s := p.Snapshot()
+		t.Errorf("期望至少重启2次，实际 RestartCount=%d, StartRetries=%d, State=%s",
+			s.RestartCount, s.StartRetries, s.State)
 	}
 }
 
@@ -634,7 +639,7 @@ func TestTopologicalSortWithStartAllFallback(t *testing.T) {
 	// 虽然有循环依赖，但进程应该还是能启动（至少状态应该有变化）
 	// 由于 echo 命令会立即完成，进程会进入 EXITED 状态
 	s1, s2 := p1.GetState(), p2.GetState()
-	if s1 == StateStopped && s2 == StateStopped {
+	if s1 == StateStopped || s2 == StateStopped {
 		t.Errorf("循环依赖时 StartAll 可能未执行（期望至少有进程启动/退出）")
 	}
 }
@@ -1387,17 +1392,19 @@ func TestRedirectStdoutStderrFlags(t *testing.T) {
 // TestCPUUsageIsPercentage tests that CPU usage is computed as a delta-based
 // percentage after two sampling intervals.
 func TestCPUUsageIsPercentage(t *testing.T) {
-	logDir := "./test_logs_cpu"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
-	defer os.RemoveAll(logDir)
 
-	logManager, _ := logger.NewDefaultLogger(logDir)
+	logManager, err := logger.NewDefaultLogger(logDir)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
 	defer logManager.Close()
 
 	pm := NewProcessManager(logManager)
 	cfg := &config.ProgramConfig{
 		Name:         "cpu_test",
-		Command:      "dd if=/dev/zero of=/dev/null bs=1M count=100",
+		Command:      "dd if=/dev/zero of=/dev/null bs=1M count=1024",
 		Directory:    ".",
 		AutoStart:    false,
 		AutoRestart:  false,
@@ -1407,8 +1414,14 @@ func TestCPUUsageIsPercentage(t *testing.T) {
 	}
 	pm.AddProcess(cfg)
 	p := pm.GetProcess("cpu_test")
-	_ = p.Start()
-	defer p.Stop()
+	if err := p.Start(); err != nil {
+		t.Fatalf("启动进程失败: %v", err)
+	}
+	defer func() {
+		if err := p.Stop(); err != nil {
+			t.Logf("停止进程时遇到错误: %v", err)
+		}
+	}()
 
 	// Wait for at least one resource sample
 	time.Sleep(6 * time.Second)
@@ -1421,9 +1434,7 @@ func TestCPUUsageIsPercentage(t *testing.T) {
 		t.Errorf("CPU 使用率异常高 (可能仍是 ticks), got %.2f", s.CPUUsage)
 	}
 	t.Logf("CPU usage: %.2f%%", s.CPUUsage)
-}
-
-// TestReadSystemCPUTicks tests the system CPU ticks reader.
+}// TestReadSystemCPUTicks tests the system CPU ticks reader.
 func TestReadSystemCPUTicks(t *testing.T) {
 	ticks := readSystemCPUTicks()
 	if ticks <= 0 {
@@ -1842,21 +1853,23 @@ func TestMonitorExitCodeOnNormalExit(t *testing.T) {
 // TestMemoryUsagePreservedOnStatFailure tests that MemoryUsage from VmRSS
 // is preserved on Snapshot after resource monitoring runs.
 func TestMemoryUsagePreservedOnStatFailure(t *testing.T) {
-	logDir := "./test_logs_memstat"
+	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
-	defer os.RemoveAll(logDir)
 
-	logManager, _ := logger.NewDefaultLogger(logDir)
+	logManager, err := logger.NewDefaultLogger(logDir)
+	if err != nil {
+		t.Fatalf("初始化日志管理器失败: %v", err)
+	}
 	defer logManager.Close()
 
 	pm := NewProcessManager(logManager)
 	cfg := &config.ProgramConfig{
 		Name:         "memstat_test",
-		Command:      "sleep 30",
+		Command:      "sleep 10",
 		Directory:    ".",
 		AutoStart:    false,
 		AutoRestart:  false,
-		StartSecs:    1,
+		StartSecs:    0,
 		StartRetries: 3,
 		Environment:  make(map[string]string),
 	}
@@ -1880,11 +1893,15 @@ func TestMemoryUsagePreservedOnStatFailure(t *testing.T) {
 	if s.PID <= 0 {
 		t.Error("PID should be > 0 while running")
 	}
+	// MemoryUsage should be populated by resource monitoring.
+	if s.MemoryUsage == 0 {
+		t.Error("MemoryUsage 应已记录，但依旧为 0")
+	}
 
-	p.Stop()
-}
-
-// TestGroupOperations tests StartGroup, StopGroup, RestartGroup.
+	if err := p.Stop(); err != nil {
+		t.Logf("停止进程时遇到错误: %v", err)
+	}
+}// TestGroupOperations tests StartGroup, StopGroup, RestartGroup.
 func TestGroupOperations(t *testing.T) {
 	logDir := "./test_logs_group"
 	os.MkdirAll(logDir, 0755)
@@ -1918,9 +1935,12 @@ func TestGroupOperations(t *testing.T) {
 		Environment:  make(map[string]string),
 	})
 
-	started := pm.StartGroup("testgrp")
+	started, failed := pm.StartGroup("testgrp")
 	if len(started) != 3 {
 		t.Errorf("StartGroup 期望启动 3 个, 实际 %d", len(started))
+	}
+	if len(failed) != 0 {
+		t.Errorf("StartGroup 期望无失败, 实际失败 %d: %v", len(failed), failed)
 	}
 
 	time.Sleep(400 * time.Millisecond)
@@ -1950,9 +1970,12 @@ func TestEmptyGroup(t *testing.T) {
 	defer logManager.Close()
 
 	pm := NewProcessManager(logManager)
-	started := pm.StartGroup("nonexistent")
+	started, failed := pm.StartGroup("nonexistent")
 	if len(started) != 0 {
 		t.Errorf("空组 StartGroup 应返回空, 实际 %d", len(started))
+	}
+	if len(failed) != 0 {
+		t.Errorf("空组 StartGroup 应无失败, 实际失败 %d", len(failed))
 	}
 }
 

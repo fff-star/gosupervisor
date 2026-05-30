@@ -28,7 +28,7 @@ GoSupervisor is a process management tool written in Go, inspired by Python's Su
 - **Unix socket CLI**: text-based protocol for interactive process control
 - **Stdin support**: pipe file content to managed process stdin
 - **Webhook notifications**: POST process state transitions to external URLs
-- **Live reload**: SIGHUP signal or `-cmd reload` to reload configuration without restarting the supervisor
+- **Live reload**: SIGHUP signal or `reload` command via socket/ctl to reload configuration without restarting the supervisor
 - **Incremental reload**: config diff-based reload — only restarts changed/new/removed processes, unchanged processes keep running
 - **Daemon mode**: fork with setsid for background operation (`-d` flag)
 - **Config includes**: `[include]` section with `files=` glob patterns to split config across multiple files
@@ -36,6 +36,14 @@ GoSupervisor is a process management tool written in Go, inspired by Python's Su
 - **Process group signaling**: `killasgroup`/`stopasgroup` options to signal entire process groups, preventing orphan processes
 - **Web TLS/SSL**: `-web-cert`/`-web-key` flags and `[inet_http_server]` config section for HTTPS support
 - **Interactive REPL**: `gosupervisorctl` (no args) enters an interactive shell with tab completion and command history
+- **Event listener subsystem**: `[eventlistener:x]` config sections for external programs that subscribe to process events via supervisord-compatible READY/RESULT protocol over stdin/stdout
+- **FastCGI program support**: `[fcgi-program:x]` config sections for FastCGI child process management with TCP/Unix socket lifecycle, shared socket across `numprocs` children, and fd 0 passing
+- **SSE event streaming**: real-time process event push via Server-Sent Events at `/api/v1/events/stream`; dashboard auto-connects for live updates without polling
+- **Structured logging**: `LogFormat` (`text`/`json`) in `[supervisord]` for JSON-format system logs
+- **Socket permissions**: `SocketMode` (octal) and `SocketOwner` (`uid:gid`) for Unix socket access control
+- **Configurable log level**: `LogLevel` (debug/info/warning/error) for controlling system log verbosity
+- **rlimit control**: 8 rlimit fields (`RlimitAs`, `RlimitCore`, `RlimitCpu`, `RlimitData`, `RlimitFsize`, `RlimitNofile`, `RlimitNproc`, `RlimitStack`) applied before fork
+- **CSRF protection**: `Origin`/`Referer` header validation against `Host` on all POST endpoints; browsers send these automatically
 
 ## Installation
 
@@ -66,22 +74,19 @@ sudo cp gosupervisor /usr/local/bin/
 |------|---------|-------------|
 | `-c` | `gosupervisor.ini` | Config file path |
 | `-l` | `./logs` | Log directory path |
-| `-cmd` | `start` | Command: `start`, `stop`, `restart`, `status`, `reload`, `update` |
-| `-p` | `""` | Process name (for targeting a single process) |
-| `-web` | `false` | Enable web UI |
-| `-web-addr` | `:8080` | Web UI listen address |
-| `-metrics` | `false` | Enable Prometheus metrics |
-| `-metrics-addr` | `:9090` | Metrics HTTP listen address |
 | `-d` | `false` | Run as daemon (forks with setsid, parent exits) |
 | `-t` | `false` | Validate config file and exit |
-| `-g` | `""` | Group name (for targeting a group of processes) |
+| `-web` | `false` | Enable web UI |
+| `-web-addr` | `:8080` | Web UI listen address |
 | `-web-user` | `""` | Web UI Basic Auth username |
 | `-web-pass` | `""` | Web UI Basic Auth password |
 | `-web-api-auth` | `true` | Require API v1 Basic Auth (on by default; set `=false` to expose API without auth) |
-| `-socket` | `""` | Unix socket path for CLI control |
-| `-state-file` | `""` | Path to persist process state as JSON |
 | `-web-cert` | `""` | TLS certificate file path |
 | `-web-key` | `""` | TLS private key file path |
+| `-metrics` | `false` | Enable Prometheus metrics |
+| `-metrics-addr` | `:9090` | Metrics HTTP listen address |
+| `-socket` | `""` | Unix socket path for CLI control |
+| `-state-file` | `""` | Path to persist process state as JSON |
 | `-version` | `false` | Print version and exit |
 
 ### Basic commands
@@ -90,36 +95,19 @@ sudo cp gosupervisor /usr/local/bin/
 # Validate configuration
 gosupervisor -t -c config.ini
 
-# Start all processes
-gosupervisor -cmd start
+# Start daemon (manages all autostart processes)
+gosupervisor -c config.ini
 
-# Start a single process
-gosupervisor -cmd start -p myapp
+# Start daemon with web UI and Prometheus metrics
+gosupervisor -c config.ini -web -web-addr :8080 -metrics -metrics-addr :9090
 
-# Stop all processes
-gosupervisor -cmd stop
+# Start daemon with socket for runtime control
+gosupervisor -c config.ini -socket /tmp/gosupervisor.sock
 
-# Stop a single process
-gosupervisor -cmd stop -p myapp
-
-# Restart all processes
-gosupervisor -cmd restart
-
-# Restart a single process
-gosupervisor -cmd restart -p myapp
-
-# Show process status
-gosupervisor -cmd status
-gosupervisor -cmd status -p myapp
-
-# Reload configuration (also triggers on SIGHUP)
-gosupervisor -cmd reload
-
-# Update a single process config
-gosupervisor -cmd update -p myapp
-
-# Start with web UI and Prometheus metrics
-gosupervisor -cmd start -web -web-addr :8080 -metrics -metrics-addr :9090
+# All runtime control goes through gosupervisorctl (see below)
+gosupervisorctl -socket /tmp/gosupervisor.sock status
+gosupervisorctl -socket /tmp/gosupervisor.sock start myapp
+gosupervisorctl -socket /tmp/gosupervisor.sock stop myapp
 ```
 
 ## Configuration
@@ -234,7 +222,18 @@ programs:
 | `norestartcodes` | []int | `[]` | Exit codes that skip restart |
 | `cgrouppath` | string | `""` | Cgroup v2 path for resource limits (e.g., `/sys/fs/cgroup/myapp`) |
 | `webhookurl` | string | `""` | URL to POST process state transitions |
+| `webhookretries` | int | `3` | Max retry attempts for webhook delivery (exponential backoff, capped at 30s) |
+| `webhooktimeout` | int | `10` | HTTP request timeout in seconds for webhook delivery |
 | `stdinfile` | string | `""` | File path to pipe as process stdin |
+| `exitcodes` | []int | `[]` | Expected exit codes — resets `StartRetries` to 0 on match |
+| `rlimitas` | int64 | `0` | RLIMIT_AS — address space limit in bytes |
+| `rlimitcore` | int64 | `0` | RLIMIT_CORE — core file size limit in bytes |
+| `rlimitcpu` | int64 | `0` | RLIMIT_CPU — CPU time limit in seconds |
+| `rlimitdata` | int64 | `0` | RLIMIT_DATA — data segment limit in bytes |
+| `rlimitfsize` | int64 | `0` | RLIMIT_FSIZE — file size limit in bytes |
+| `rlimitnofile` | int64 | `0` | RLIMIT_NOFILE — open file descriptor limit |
+| `rlimitnproc` | int64 | `0` | RLIMIT_NPROC — max user processes |
+| `rlimitstack` | int64 | `0` | RLIMIT_STACK — stack size limit in bytes |
 
 ## Web UI
 
@@ -264,12 +263,17 @@ All endpoints return JSON responses with `{"status": "ok", "message": "..."}` or
 
 | Method | Route | Description |
 |--------|-------|-------------|
-| `GET` | `/api/v1/processes` | List all processes (JSON array of snapshots) |
+| `GET` | `/api/v1/processes` | List all processes (JSON array of snapshots). Query params: `?state=`, `?group=`, `?offset=`, `?limit=` |
 | `GET` | `/api/v1/processes/{name}` | Get single process detail |
 | `POST` | `/api/v1/processes/{name}/start` | Start a process |
 | `POST` | `/api/v1/processes/{name}/stop` | Stop a process |
 | `POST` | `/api/v1/processes/{name}/restart` | Restart a process |
-| `GET` | `/api/v1/processes/{name}/logs` | Stream process log via Server-Sent Events (SSE) |
+| `GET` | `/api/v1/processes/{name}/logs` | Stream process stdout log via Server-Sent Events (SSE) |
+| `GET` | `/api/v1/processes/{name}/logs/tail` | Last N lines of stdout log. Query params: `?lines=`, `?bytes=` |
+| `GET` | `/api/v1/processes/{name}/logs/stderr` | Stream process stderr log via SSE |
+| `GET` | `/api/v1/processes/{name}/resources` | CPU/memory history. Query params: `?minutes=N` |
+| `POST` | `/api/v1/processes/{name}/signal` | Send signal. JSON body: `{"signal":"SIGHUP"}` |
+| `POST` | `/api/v1/processes/{name}/reload` | Reload single process config from file |
 
 ### Groups
 
@@ -278,6 +282,15 @@ All endpoints return JSON responses with `{"status": "ok", "message": "..."}` or
 | `POST` | `/api/v1/groups/{group}/start` | Start all processes in a group |
 | `POST` | `/api/v1/groups/{group}/stop` | Stop all processes in a group |
 | `POST` | `/api/v1/groups/{group}/restart` | Restart all processes in a group |
+
+### System & Events
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `GET` | `/api/v1/system` | System info (OS, memory, disk, uptime, Go version) |
+| `GET` | `/api/v1/config` | Current config (masked sensitive fields) |
+| `GET` | `/api/v1/events` | Recent process lifecycle events. Query params: `?limit=` |
+| `GET` | `/api/v1/events/stream` | Real-time SSE stream of process lifecycle events |
 
 ## Health Checks
 
@@ -292,7 +305,7 @@ When a process exceeds `healthcheckunhealthythreshold` consecutive failures, the
 
 Shell scripts executed at process lifecycle events:
 
-- **Pre-start** (`prestartscript`): runs before the process starts. If the script exits non-zero, the start is aborted.
+- **Pre-start** (`prestartscript`): runs before the process starts. Failures are logged but do not abort the start.
 - **Post-stop** (`poststopscript`): runs after the process exits. Best-effort; failures are logged but do not affect the lifecycle.
 
 ## Process Groups
@@ -300,9 +313,9 @@ Shell scripts executed at process lifecycle events:
 Assign processes to groups with the `group` config field, then control them in bulk:
 
 ```bash
-gosupervisor -cmd start -g web       # start all processes in the "web" group
-gosupervisor -cmd stop -g web        # stop all processes in the "web" group
-gosupervisor -cmd restart -g workers # restart all processes in the "workers" group
+gosupervisorctl -socket /tmp/gosupervisor.sock group-start web
+gosupervisorctl -socket /tmp/gosupervisor.sock group-stop web
+gosupervisorctl -socket /tmp/gosupervisor.sock group-restart workers
 ```
 
 Group operations use topological sort based on `dependson` for correct startup/shutdown ordering, and are also available via the REST API and Unix socket CLI.
@@ -332,34 +345,56 @@ Start with `-socket /var/run/gosupervisor.sock` to enable a Unix domain socket f
 
 ```
 nc -U /var/run/gosupervisor.sock
-> status           # list all processes
-> start myapp      # start a process
-> stop myapp       # stop a process
-> restart myapp    # restart a process
-> group-start web  # start a group
-> group-stop web   # stop a group
+> status            # list all processes
+> status myapp      # single process status
+> start myapp       # start a process
+> stop myapp        # stop a process
+> restart myapp     # restart a process
+> start-all         # start all processes
+> stop-all          # stop all processes
+> restart-all       # restart all processes
+> group-start web   # start a group
+> group-stop web    # stop a group
 > group-restart web # restart a group
-> help             # show available commands
-> quit             # close connection
+> signal myapp HUP  # send signal to a process
+> reload myapp      # reload single process config
+> events            # recent events
+> events 50         # last 50 events
+> help              # show available commands
+> quit              # close connection
 ```
 
 ## gosupervisorctl
 
-A dedicated CLI client for connecting to the Unix socket:
+A dedicated CLI client for connecting to the Unix socket. Running without arguments enters an interactive REPL with tab completion and command history.
 
 ```bash
 # Build
 go build -o gosupervisorctl ./cmd/gosupervisorctl
 
-# Usage
-gosupervisorctl -socket /tmp/gosupervisor.sock status
-gosupervisorctl -socket /tmp/gosupervisor.sock status myapp
+# Process control
+gosupervisorctl -socket /tmp/gosupervisor.sock status              # all processes
+gosupervisorctl -socket /tmp/gosupervisor.sock status myapp        # single process
 gosupervisorctl -socket /tmp/gosupervisor.sock start myapp
 gosupervisorctl -socket /tmp/gosupervisor.sock stop myapp
 gosupervisorctl -socket /tmp/gosupervisor.sock restart myapp
+gosupervisorctl -socket /tmp/gosupervisor.sock start-all
+gosupervisorctl -socket /tmp/gosupervisor.sock stop-all
+gosupervisorctl -socket /tmp/gosupervisor.sock restart-all
+
+# Group operations
 gosupervisorctl -socket /tmp/gosupervisor.sock group-start web
 gosupervisorctl -socket /tmp/gosupervisor.sock group-stop web
 gosupervisorctl -socket /tmp/gosupervisor.sock group-restart web
+
+# Signal, reload, events
+gosupervisorctl -socket /tmp/gosupervisor.sock signal myapp SIGHUP
+gosupervisorctl -socket /tmp/gosupervisor.sock reload myapp        # reload single process config
+gosupervisorctl -socket /tmp/gosupervisor.sock events              # recent events
+gosupervisorctl -socket /tmp/gosupervisor.sock events 50           # last 50 events
+
+# Interactive REPL (no args)
+gosupervisorctl -socket /tmp/gosupervisor.sock
 ```
 
 ## Stdin Support
@@ -408,6 +443,8 @@ gosupervisor/
 │   └── gosupervisorctl/    # Socket CLI client
 ├── internal/
 │   ├── config/             # Config parsing (INI/YAML/JSON)
+│   ├── eventlistener/      # Event listener subsystem (READY/RESULT protocol)
+│   ├── fcgi/               # FastCGI socket manager (TCP/Unix socket lifecycle)
 │   ├── logger/             # Log management with rotation
 │   ├── metrics/            # Prometheus metrics exposition
 │   ├── process/            # Process lifecycle and monitoring

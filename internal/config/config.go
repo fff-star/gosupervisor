@@ -771,6 +771,7 @@ func loadYAMLConfig(configPath string) (*Config, error) {
 	applyEventListenerDefaults(yamlConfig.EventListeners, rawDoc["eventlisteners"])
 	cfg.EventListeners = yamlConfig.EventListeners
 	// Merge fcgi programs — apply defaults and add to FcgiPrograms
+	rawFcgiPrograms := rawDoc["fcgiprograms"]
 	cfg.FcgiPrograms = make(map[string]*ProgramConfig)
 	for name, prog := range yamlConfig.FcgiPrograms {
 		if prog.Name == "" {
@@ -800,7 +801,33 @@ func loadYAMLConfig(configPath string) (*Config, error) {
 		if prog.SocketBacklog == 0 {
 			prog.SocketBacklog = -1 // SOMAXCONN sentinel
 		}
-		// AutoStart/AutoRestart defaults handled by applyDefaults via raw map
+		// Bool defaults: use raw map to distinguish "absent" from "explicitly false"
+		if rawFcgiPrograms != nil {
+			if raw, ok := rawFcgiPrograms[name]; ok {
+				if _, exists := raw["autostart"]; !exists {
+					prog.AutoStart = true
+				}
+				if _, exists := raw["autorestart"]; !exists {
+					prog.AutoRestart = true
+				}
+				if _, exists := raw["redirectstdout"]; !exists {
+					prog.RedirectStdout = true
+				}
+				if _, exists := raw["redirectstderr"]; !exists {
+					prog.RedirectStderr = true
+				}
+			} else {
+				prog.AutoStart = true
+				prog.AutoRestart = true
+				prog.RedirectStdout = true
+				prog.RedirectStderr = true
+			}
+		} else {
+			prog.AutoStart = true
+			prog.AutoRestart = true
+			prog.RedirectStdout = true
+			prog.RedirectStderr = true
+		}
 		if prog.StopSignal == "" {
 			prog.StopSignal = "SIGTERM"
 		}
@@ -852,8 +879,6 @@ func loadYAMLConfig(configPath string) (*Config, error) {
 		if prog.RestartWindowSecs == 0 {
 			prog.RestartWindowSecs = 60
 		}
-		prog.RedirectStdout = true
-		prog.RedirectStderr = true
 		cfg.FcgiPrograms[name] = prog
 	}
 	cfg.Server = yamlConfig.Server
@@ -1000,6 +1025,7 @@ func loadJSONConfig(configPath string) (*Config, error) {
 	applyEventListenerDefaults(jsonConfig.EventListeners, rawDoc["eventlisteners"])
 	cfg.EventListeners = jsonConfig.EventListeners
 	// Merge fcgi programs — apply defaults and add to FcgiPrograms
+	rawFcgiPrograms := rawDoc["fcgiprograms"]
 	cfg.FcgiPrograms = make(map[string]*ProgramConfig)
 	for name, prog := range jsonConfig.FcgiPrograms {
 		if prog.Name == "" {
@@ -1029,7 +1055,33 @@ func loadJSONConfig(configPath string) (*Config, error) {
 		if prog.SocketBacklog == 0 {
 			prog.SocketBacklog = -1 // SOMAXCONN sentinel
 		}
-		// AutoStart/AutoRestart defaults handled by applyDefaults via raw map
+		// Bool defaults: use raw map to distinguish "absent" from "explicitly false"
+		if rawFcgiPrograms != nil {
+			if raw, ok := rawFcgiPrograms[name]; ok {
+				if _, exists := raw["autostart"]; !exists {
+					prog.AutoStart = true
+				}
+				if _, exists := raw["autorestart"]; !exists {
+					prog.AutoRestart = true
+				}
+				if _, exists := raw["redirectstdout"]; !exists {
+					prog.RedirectStdout = true
+				}
+				if _, exists := raw["redirectstderr"]; !exists {
+					prog.RedirectStderr = true
+				}
+			} else {
+				prog.AutoStart = true
+				prog.AutoRestart = true
+				prog.RedirectStdout = true
+				prog.RedirectStderr = true
+			}
+		} else {
+			prog.AutoStart = true
+			prog.AutoRestart = true
+			prog.RedirectStdout = true
+			prog.RedirectStderr = true
+		}
 		if prog.StopSignal == "" {
 			prog.StopSignal = "SIGTERM"
 		}
@@ -1081,8 +1133,6 @@ func loadJSONConfig(configPath string) (*Config, error) {
 		if prog.RestartWindowSecs == 0 {
 			prog.RestartWindowSecs = 60
 		}
-		prog.RedirectStdout = true
-		prog.RedirectStderr = true
 		cfg.FcgiPrograms[name] = prog
 	}
 	cfg.Server = jsonConfig.Server

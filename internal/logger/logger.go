@@ -204,6 +204,11 @@ func (l *Logger) GetProcessLogWriters(name string, cfg *config.ProgramConfig) (i
 
 // getOrCreateWriter returns an existing writer or creates a new one with rotation check.
 func (l *Logger) getOrCreateWriter(key, filePath string, maxSize int64, backupCount int) (io.Writer, error) {
+	// Recover from a nil map (e.g. Close() was called while a restart goroutine
+	// was still in flight). Re-create the map so the assignment doesn't panic.
+	if l.processLogs == nil {
+		l.processLogs = make(map[string]*logStream)
+	}
 	if stream, exists := l.processLogs[key]; exists {
 		if info, err := os.Stat(filePath); err == nil {
 			if info.Size() >= maxSize {
@@ -616,7 +621,8 @@ func (l *Logger) Close() error {
 		}
 		delete(l.processLogs, key)
 	}
-	l.processLogs = nil
+	// Don't nil processLogs — a racing restart goroutine may still
+	// call GetProcessLogWriters, which would assign to a nil map.
 	return nil
 }
 
