@@ -96,27 +96,27 @@ type EventListener struct {
 	Name   string
 	Config *config.EventListenerConfig
 
-	mu          sync.Mutex
-	state       string
-	cmd         *exec.Cmd
-	stdoutW     io.WriteCloser // write events to child's stdin
-	stdinR      io.ReadCloser  // read READY/RESULT from child's stdout
-	queue       *eventQueue
-	ctx         context.Context
-	cancel      context.CancelFunc
-	done        chan struct{}
-	startDone   chan struct{} // closed when start() completes
-	poolSerial  int64
-	eventMask   map[process.EventType]bool
+	mu         sync.Mutex
+	state      string
+	cmd        *exec.Cmd
+	stdoutW    io.WriteCloser // write events to child's stdin
+	stdinR     io.ReadCloser  // read READY/RESULT from child's stdout
+	queue      *eventQueue
+	ctx        context.Context
+	cancel     context.CancelFunc
+	done       chan struct{}
+	startDone  chan struct{} // closed when start() completes
+	poolSerial int64
+	eventMask  map[process.EventType]bool
 }
 
 // newEventListener creates a new EventListener.
 func newEventListener(cfg *config.EventListenerConfig) *EventListener {
 	l := &EventListener{
-		Name:  cfg.Name,
+		Name:   cfg.Name,
 		Config: cfg,
-		queue: newEventQueue(cfg.BufferSize),
-		done:  make(chan struct{}),
+		queue:  newEventQueue(cfg.BufferSize),
+		done:   make(chan struct{}),
 	}
 	l.buildEventMask()
 	return l

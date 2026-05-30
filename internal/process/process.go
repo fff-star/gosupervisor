@@ -4,16 +4,16 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"reflect"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
+	"reflect"
 	"runtime"
-	"sort"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,22 +63,22 @@ func ParseSignal(name string) (syscall.Signal, bool) {
 type Process struct {
 	mu sync.Mutex
 
-	Name         string
-	Config       *config.ProgramConfig
-	Cmd          *exec.Cmd
-	State        ProcessState
-	PID          int
-	StartTime    time.Time
-	StopTime     time.Time
-	ExitCode     int
-	StartRetries int
-	Context      context.Context
-	CancelFunc   context.CancelFunc
-	Logger       *logger.Logger
-	CPUUsage     float64
-	MemoryUsage  uint64
-	RestartCount int
-	LastRestart  time.Time
+	Name            string
+	Config          *config.ProgramConfig
+	Cmd             *exec.Cmd
+	State           ProcessState
+	PID             int
+	StartTime       time.Time
+	StopTime        time.Time
+	ExitCode        int
+	StartRetries    int
+	Context         context.Context
+	CancelFunc      context.CancelFunc
+	Logger          *logger.Logger
+	CPUUsage        float64
+	MemoryUsage     uint64
+	RestartCount    int
+	LastRestart     time.Time
 	Healthy         bool
 	ResourceHealthy bool
 	Group           string
@@ -830,7 +830,6 @@ func (p *Process) monitorResources() {
 		}
 	}
 }
-
 
 func (p *Process) readProcStats(pid int) {
 	var rss uint64

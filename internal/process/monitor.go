@@ -151,6 +151,11 @@ func (m *Monitor) handleExitedProcess(process *Process) {
 
 	// 在独立 goroutine 中执行重启，不阻塞 monitor 循环
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("panic in restart goroutine for %s: %v\n", name, r)
+			}
+		}()
 		time.Sleep(1 * time.Second)
 
 		process.mu.Lock()
@@ -235,6 +240,11 @@ func (m *Monitor) checkRunningProcess(process *Process) {
 		name := process.Name
 		process.mu.Unlock()
 		fmt.Printf("进程 %s 健康检查失败，触发重启...\n", name)
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("panic in health-check restart goroutine for %s: %v\n", name, r)
+			}
+		}()
 		if err := process.Restart(); err != nil {
 			fmt.Printf("健康检查重启进程 %s 失败: %v\n", name, err)
 			process.mu.Lock()

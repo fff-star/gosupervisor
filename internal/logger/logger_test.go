@@ -45,8 +45,22 @@ func TestLogger(t *testing.T) {
 		t.Fatalf("读取日志目录失败: %v", err)
 	}
 
-	if len(logFiles) == 0 {
-		t.Fatalf("日志文件未创建")
+	// Verify log content contains the written messages
+	for _, f := range logFiles {
+		if strings.HasSuffix(f.Name(), ".log") || f.Name() == "system.log" {
+			data, err := os.ReadFile(filepath.Join(logDir, f.Name()))
+			if err != nil {
+				t.Errorf("读取日志文件 %s 失败: %v", f.Name(), err)
+				continue
+			}
+			content := string(data)
+			if !strings.Contains(content, "测试信息日志") {
+				t.Errorf("日志文件 %s 未包含测试信息日志", f.Name())
+			}
+			if !strings.Contains(content, "测试警告日志") {
+				t.Errorf("日志文件 %s 未包含测试警告日志", f.Name())
+			}
+		}
 	}
 }
 
@@ -65,9 +79,9 @@ func TestProcessLogWriterWithLargeWrites(t *testing.T) {
 
 	// 获取进程日志写入器
 	cfg := &config.ProgramConfig{
-		Name:               "test_large",
-		StdoutLogMaxBytes:  1024,
-		StderrLogMaxBytes:  1024,
+		Name:                 "test_large",
+		StdoutLogMaxBytes:    1024,
+		StderrLogMaxBytes:    1024,
 		StdoutLogBackupCount: 5,
 		StderrLogBackupCount: 5,
 	}
@@ -157,9 +171,20 @@ func TestLogRotation(t *testing.T) {
 		t.Fatalf("读取日志目录失败: %v", err)
 	}
 
-	// 至少应该有一个原始日志文件和一个轮转后的日志文件
-	if len(logFiles) < 1 {
-		t.Errorf("日志文件数量不足，期望至少1个，实际有%d个", len(logFiles))
+	// Verify that rotation produced additional log files (original + rotated).
+	if len(logFiles) < 2 {
+		t.Errorf("日志轮转后文件数量不足，期望至少2个，实际有%d个", len(logFiles))
+	}
+	// Check for existence of a rotated file (with timestamp suffix).
+	hasRotated := false
+	for _, f := range logFiles {
+		if strings.Contains(f.Name(), "system.log.") {
+			hasRotated = true
+			break
+		}
+	}
+	if !hasRotated {
+		t.Error("未找到轮转后的日志文件 (system.log.xxx)")
 	}
 }
 
@@ -516,6 +541,7 @@ func TestGetProcessLogWritersSeparatePaths(t *testing.T) {
 		t.Errorf("自定义 stderr 日志文件未创建: %s", stderrPath)
 	}
 }
+
 // TestGetProcessLogWritersSamePath tests that when stdout and stderr share
 // the same path, they reuse the same writer instead of opening separate handles.
 func TestGetProcessLogWritersSamePath(t *testing.T) {
@@ -531,11 +557,11 @@ func TestGetProcessLogWritersSamePath(t *testing.T) {
 
 	// Both stdout and stderr default to {logDir}/{name}.log — same path
 	cfg := &config.ProgramConfig{
-		Name:                  "same_test",
-		StdoutLogMaxBytes:     1024,
-		StderrLogMaxBytes:     2048,
-		StdoutLogBackupCount:  3,
-		StderrLogBackupCount:  5,
+		Name:                 "same_test",
+		StdoutLogMaxBytes:    1024,
+		StderrLogMaxBytes:    2048,
+		StdoutLogBackupCount: 3,
+		StderrLogBackupCount: 5,
 	}
 
 	stdoutW, stderrW, err := logger.GetProcessLogWriters("same_test", cfg)
@@ -660,7 +686,6 @@ func TestRotateLogsSharedWriter(t *testing.T) {
 		t.Errorf("旋转后写入失败: %v", err)
 	}
 }
-
 
 // TestRotateLogFallback tests the fallback path when no active writers exist.
 func TestRotateLogFallback(t *testing.T) {

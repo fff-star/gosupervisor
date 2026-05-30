@@ -530,4 +530,3 @@ collect:
 		t.Error("expected STOPPED event in SSE stream")
 	}
 }
-

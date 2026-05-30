@@ -222,16 +222,11 @@ func TestProtocolLoop_READYSendRESULTOK(t *testing.T) {
 
 	// Goroutine simulating the child listener process
 	go func() {
-		// 1. READY
+		// Standard supervisord protocol: READY, read event, RESULT
 		childStdoutW.Write([]byte("READY\n"))
-		// 2. Read event from stdin
 		buf := make([]byte, 4096)
 		_, _ = childStdinR.Read(buf)
-		// 3. READY (ack)
-		childStdoutW.Write([]byte("READY\n"))
-		// 4. RESULT OK
 		childStdoutW.Write([]byte("RESULT 2\nOK"))
-		// Close to signal protocol loop to exit
 		childStdoutW.Close()
 	}()
 
@@ -256,17 +251,15 @@ func TestProtocolLoop_RESULTFAIL(t *testing.T) {
 	l.queue.Push(process.Event{Name: "proc1", Type: process.EventStart, PID: 10})
 
 	go func() {
-		// First attempt: FAIL
+		// Standard supervisord protocol: READY, read event, RESULT FAIL, READY, read event (retry), RESULT OK
 		childStdoutW.Write([]byte("READY\n"))
 		buf := make([]byte, 4096)
 		_, _ = childStdinR.Read(buf)
-		childStdoutW.Write([]byte("READY\n"))
 		childStdoutW.Write([]byte("RESULT 4\nFAIL"))
 
-		// Second attempt: OK
+		// Retry
 		childStdoutW.Write([]byte("READY\n"))
 		_, _ = childStdinR.Read(buf)
-		childStdoutW.Write([]byte("READY\n"))
 		childStdoutW.Write([]byte("RESULT 2\nOK"))
 
 		childStdoutW.Close()

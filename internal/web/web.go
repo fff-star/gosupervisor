@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"net"
 	"net/http"
@@ -15,7 +16,6 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
-	"html/template"
 	"time"
 
 	"gosupervisor/internal/process"
@@ -784,19 +784,19 @@ func (ws *WebServer) handleAPIV1Config(w http.ResponseWriter, r *http.Request) {
 	ws.processManager.RangeProcesses(func(name string, p *process.Process) {
 		s := p.Snapshot()
 		configs = append(configs, map[string]interface{}{
-			"name":      s.Config.Name,
-			"command":   s.Config.Command,
-			"directory": s.Config.Directory,
-			"autostart": s.Config.AutoStart,
-			"autorestart": s.Config.AutoRestart,
-			"startsecs": s.Config.StartSecs,
-			"startretries": s.Config.StartRetries,
-			"stopsecs": s.Config.StopSecs,
-			"stopsignal": s.Config.StopSignal,
-			"user": s.Config.User,
-			"priority": s.Config.Priority,
-			"group": s.Config.Group,
-			"dependson": s.Config.DependsOn,
+			"name":           s.Config.Name,
+			"command":        s.Config.Command,
+			"directory":      s.Config.Directory,
+			"autostart":      s.Config.AutoStart,
+			"autorestart":    s.Config.AutoRestart,
+			"startsecs":      s.Config.StartSecs,
+			"startretries":   s.Config.StartRetries,
+			"stopsecs":       s.Config.StopSecs,
+			"stopsignal":     s.Config.StopSignal,
+			"user":           s.Config.User,
+			"priority":       s.Config.Priority,
+			"group":          s.Config.Group,
+			"dependson":      s.Config.DependsOn,
 			"healthcheckurl": s.Config.HealthCheckURL,
 		})
 	})

@@ -134,19 +134,19 @@ func TestRunHealthCheck_ThresholdReached(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 	cfg := &config.ProgramConfig{
-		Name:                      "hc_threshold",
-		Command:                   "sleep 60",
-		AutoStart:                 false,
-		AutoRestart:               false,
-		HealthCheckURL:            srv.URL,
-		HealthCheckInterval:       1,
-		HealthCheckTimeout:        5,
+		Name:                          "hc_threshold",
+		Command:                       "sleep 60",
+		AutoStart:                     false,
+		AutoRestart:                   false,
+		HealthCheckURL:                srv.URL,
+		HealthCheckInterval:           1,
+		HealthCheckTimeout:            5,
 		HealthCheckUnhealthyThreshold: 3,
-		StartSecs:                 0,
-		StartRetries:              3,
-		StopSignal:                "SIGTERM",
-		StopSecs:                  10,
-		Environment:               make(map[string]string),
+		StartSecs:                     0,
+		StartRetries:                  3,
+		StopSignal:                    "SIGTERM",
+		StopSecs:                      10,
+		Environment:                   make(map[string]string),
 	}
 	pm.AddProcess(cfg)
 	p := pm.GetProcess("hc_threshold")
@@ -196,19 +196,19 @@ func TestRunHealthCheck_ThresholdNotReached(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 	cfg := &config.ProgramConfig{
-		Name:                      "hc_threshold_not",
-		Command:                   "sleep 60",
-		AutoStart:                 false,
-		AutoRestart:               false,
-		HealthCheckURL:            srv.URL,
-		HealthCheckInterval:       1,
-		HealthCheckTimeout:        5,
+		Name:                          "hc_threshold_not",
+		Command:                       "sleep 60",
+		AutoStart:                     false,
+		AutoRestart:                   false,
+		HealthCheckURL:                srv.URL,
+		HealthCheckInterval:           1,
+		HealthCheckTimeout:            5,
 		HealthCheckUnhealthyThreshold: 3,
-		StartSecs:                 0,
-		StartRetries:              3,
-		StopSignal:                "SIGTERM",
-		StopSecs:                  10,
-		Environment:               make(map[string]string),
+		StartSecs:                     0,
+		StartRetries:                  3,
+		StopSignal:                    "SIGTERM",
+		StopSecs:                      10,
+		Environment:                   make(map[string]string),
 	}
 	pm.AddProcess(cfg)
 	p := pm.GetProcess("hc_threshold_not")
@@ -332,19 +332,19 @@ func TestRunHealthCheck_FailureThenRestore(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 	cfg := &config.ProgramConfig{
-		Name:                      "hc_restore",
-		Command:                   "sleep 60",
-		AutoStart:                 false,
-		AutoRestart:               false,
-		HealthCheckURL:            srv.URL,
-		HealthCheckInterval:       1,
-		HealthCheckTimeout:        5,
+		Name:                          "hc_restore",
+		Command:                       "sleep 60",
+		AutoStart:                     false,
+		AutoRestart:                   false,
+		HealthCheckURL:                srv.URL,
+		HealthCheckInterval:           1,
+		HealthCheckTimeout:            5,
 		HealthCheckUnhealthyThreshold: 3,
-		StartSecs:                 0,
-		StartRetries:              3,
-		StopSignal:                "SIGTERM",
-		StopSecs:                  10,
-		Environment:               make(map[string]string),
+		StartSecs:                     0,
+		StartRetries:                  3,
+		StopSignal:                    "SIGTERM",
+		StopSecs:                      10,
+		Environment:                   make(map[string]string),
 	}
 	pm.AddProcess(cfg)
 	p := pm.GetProcess("hc_restore")

@@ -80,26 +80,26 @@ func TestBurnIn(t *testing.T) {
 			groups[d.group] = append(groups[d.group], d.name)
 		}
 		pm.AddProcess(&config.ProgramConfig{
-			Name:                        d.name,
-			Command:                     d.cmd,
-			AutoStart:                   false,
-			AutoRestart:                 d.autoRestart,
-			StartSecs:                   0,
-			StartRetries:                3,
-			StopSecs:                    2,
-			StopSignal:                  "SIGTERM",
-			Group:                       d.group,
-			HealthCheckURL:              d.healthCheck,
-			HealthCheckInterval:         5,
-			HealthCheckTimeout:          1,
+			Name:                          d.name,
+			Command:                       d.cmd,
+			AutoStart:                     false,
+			AutoRestart:                   d.autoRestart,
+			StartSecs:                     0,
+			StartRetries:                  3,
+			StopSecs:                      2,
+			StopSignal:                    "SIGTERM",
+			Group:                         d.group,
+			HealthCheckURL:                d.healthCheck,
+			HealthCheckInterval:           5,
+			HealthCheckTimeout:            1,
 			HealthCheckUnhealthyThreshold: 2,
-			HealthCheckRestart:          true,
-			WebhookURL:                  d.webhook,
-			WebhookTimeout:              1,
-			WebhookRetries:              1,
-			RestartWindowSecs:           60,
-			RestartMaxCount:             d.restartMaxCount,
-			Environment:                 make(map[string]string),
+			HealthCheckRestart:            true,
+			WebhookURL:                    d.webhook,
+			WebhookTimeout:                1,
+			WebhookRetries:                1,
+			RestartWindowSecs:             60,
+			RestartMaxCount:               d.restartMaxCount,
+			Environment:                   make(map[string]string),
 		})
 	}
 
@@ -339,11 +339,13 @@ autostart=false
 group=g3
 `)
 	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Logf("reload: write config failed: %v", err)
 		return
 	}
 
 	newCfg, err := config.LoadConfig(cfgPath)
 	if err != nil {
+		t.Logf("reload: load config failed: %v", err)
 		return
 	}
 

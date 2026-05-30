@@ -16,7 +16,6 @@ import (
 
 	"go.uber.org/goleak"
 
-
 	"gosupervisor/internal/process"
 )
 
@@ -124,7 +123,7 @@ func TestHandleIndex(t *testing.T) {
 	}
 
 	// 检查响应内容是否包含进程信息
-	if !strings.Contains(w.Body.String(),"test_process") {
+	if !strings.Contains(w.Body.String(), "test_process") {
 		t.Errorf("响应内容不包含进程信息")
 	}
 }
@@ -243,12 +242,12 @@ func TestHandleStop(t *testing.T) {
 
 	// 检查响应状态码（应该是重定向）
 	if w.Code != http.StatusFound {
-		t.Logf("停止进程时遇到错误，状态码为%d", w.Code)
+		t.Errorf("停止进程时状态码错误，期望 %d，实际 %d", http.StatusFound, w.Code)
 	}
 
 	// 检查重定向URL
 	if w.Header().Get("Location") != "/" {
-		t.Logf("停止进程时重定向URL不正确，实际重定向到%s", w.Header().Get("Location"))
+		t.Errorf("停止进程时重定向URL不正确，期望 /，实际 %s", w.Header().Get("Location"))
 	}
 }
 
@@ -291,12 +290,12 @@ func TestHandleRestart(t *testing.T) {
 
 	// 检查响应状态码（应该是重定向）
 	if w.Code != http.StatusFound {
-		t.Logf("重启进程时遇到错误，状态码为%d", w.Code)
+		t.Errorf("重启进程时状态码错误，期望 %d，实际 %d", http.StatusFound, w.Code)
 	}
 
 	// 检查重定向URL
 	if w.Header().Get("Location") != "/" {
-		t.Logf("重启进程时重定向URL不正确，实际重定向到%s", w.Header().Get("Location"))
+		t.Errorf("重启进程时重定向URL不正确，期望 /，实际 %s", w.Header().Get("Location"))
 	}
 }
 
@@ -332,11 +331,11 @@ func TestHandleLogs(t *testing.T) {
 	}
 
 	// 检查响应内容是否包含日志页面信息
-	if !strings.Contains(w.Body.String(),"test_process") {
+	if !strings.Contains(w.Body.String(), "test_process") {
 		t.Errorf("响应内容不包含进程名称")
 	}
 
-	if !strings.Contains(w.Body.String(),"terminal-body") {
+	if !strings.Contains(w.Body.String(), "terminal-body") {
 		t.Errorf("响应内容不包含日志页面内容")
 	}
 }
@@ -373,7 +372,7 @@ func TestHandleSystemInfo(t *testing.T) {
 	}
 
 	// 检查响应内容是否包含系统信息页面信息
-	if !strings.Contains(w.Body.String(),"操作系统") {
+	if !strings.Contains(w.Body.String(), "操作系统") {
 		t.Errorf("响应内容不包含操作系统信息")
 	}
 }
@@ -410,7 +409,7 @@ func TestHandleProcessDetail(t *testing.T) {
 	}
 
 	// 检查响应内容是否包含进程详情页面信息
-	if !strings.Contains(w.Body.String(),"test_process") {
+	if !strings.Contains(w.Body.String(), "test_process") {
 		t.Errorf("响应内容不包含进程名称")
 	}
 }
@@ -578,7 +577,6 @@ func TestValidateProcessName(t *testing.T) {
 		}
 	}
 }
-
 
 // TestReadTailLines tests reading the last N lines from a file.
 func TestReadTailLines(t *testing.T) {
@@ -2226,13 +2224,6 @@ func TestJsonResponse(t *testing.T) {
 	}
 }
 
-func TestCountProcesses(t *testing.T) {
-	n := countProcesses()
-	if n <= 0 {
-		t.Errorf("expected positive process count, got %d", n)
-	}
-}
-
 // TestCORS_NoOrigin verifies that CORS headers are not set when the request
 // has no Origin header.
 func TestCORS_NoOrigin(t *testing.T) {
@@ -2255,10 +2246,6 @@ func TestCORS_NoOrigin(t *testing.T) {
 		t.Errorf("expected no CORS header without Origin, got %q", acao)
 	}
 }
-
-
-
-
 
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m,

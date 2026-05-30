@@ -24,6 +24,18 @@ func captureStderr(fn func()) string {
 	return buf.String()
 }
 
+func captureStdout(fn func()) string {
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	fn()
+	w.Close()
+	os.Stdout = old
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	return buf.String()
+}
+
 // mockServer writes a response then closes the pipe so the client scanner exits.
 // net.Pipe doesn't support CloseWrite, so we close the whole server side.
 func mockServer(t *testing.T, server net.Conn, expectCmd string, response ...string) {
@@ -45,111 +57,155 @@ func TestHandleCommand_Status(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	go mockServer(t, server, "status", "OK 1 process", "")
-	handleCommand(client, []string{"status"})
+	stdout := captureStdout(func() { handleCommand(client, []string{"status"}) })
+	if !strings.Contains(stdout, "OK 1 process") {
+		t.Errorf("expected response containing %q, got %q", "OK 1 process", stdout)
+	}
 }
 
 func TestHandleCommand_Start(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	go mockServer(t, server, "start testproc", "OK")
-	handleCommand(client, []string{"start", "testproc"})
+	stdout := captureStdout(func() { handleCommand(client, []string{"start", "testproc"}) })
+	if !strings.Contains(stdout, "OK") {
+		t.Errorf("expected response containing %q, got %q", "OK", stdout)
+	}
 }
 
 func TestHandleCommand_Stop(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	go mockServer(t, server, "stop testproc", "OK")
-	handleCommand(client, []string{"stop", "testproc"})
+	stdout := captureStdout(func() { handleCommand(client, []string{"stop", "testproc"}) })
+	if !strings.Contains(stdout, "OK") {
+		t.Errorf("expected response containing %q, got %q", "OK", stdout)
+	}
 }
 
 func TestHandleCommand_Restart(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	go mockServer(t, server, "restart testproc", "OK")
-	handleCommand(client, []string{"restart", "testproc"})
+	stdout := captureStdout(func() { handleCommand(client, []string{"restart", "testproc"}) })
+	if !strings.Contains(stdout, "OK") {
+		t.Errorf("expected response containing %q, got %q", "OK", stdout)
+	}
 }
 
 func TestHandleCommand_Signal(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	go mockServer(t, server, "signal testproc SIGHUP", "OK")
-	handleCommand(client, []string{"signal", "testproc", "SIGHUP"})
+	stdout := captureStdout(func() { handleCommand(client, []string{"signal", "testproc", "SIGHUP"}) })
+	if !strings.Contains(stdout, "OK") {
+		t.Errorf("expected response containing %q, got %q", "OK", stdout)
+	}
 }
 
 func TestHandleCommand_Reload(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	go mockServer(t, server, "reload testproc", "OK")
-	handleCommand(client, []string{"reload", "testproc"})
+	stdout := captureStdout(func() { handleCommand(client, []string{"reload", "testproc"}) })
+	if !strings.Contains(stdout, "OK") {
+		t.Errorf("expected response containing %q, got %q", "OK", stdout)
+	}
 }
 
 func TestHandleCommand_Events(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	go mockServer(t, server, "events", "OK 0 events")
-	handleCommand(client, []string{"events"})
+	stdout := captureStdout(func() { handleCommand(client, []string{"events"}) })
+	if !strings.Contains(stdout, "OK 0 events") {
+		t.Errorf("expected response containing %q, got %q", "OK 0 events", stdout)
+	}
 }
 
 func TestHandleCommand_EventsWithLimit(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	go mockServer(t, server, "events 10", "OK 0 events")
-	handleCommand(client, []string{"events", "10"})
+	stdout := captureStdout(func() { handleCommand(client, []string{"events", "10"}) })
+	if !strings.Contains(stdout, "OK 0 events") {
+		t.Errorf("expected response containing %q, got %q", "OK 0 events", stdout)
+	}
 }
 
 func TestHandleCommand_GroupStart(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	go mockServer(t, server, "group-start mygroup", "OK")
-	handleCommand(client, []string{"group-start", "mygroup"})
+	stdout := captureStdout(func() { handleCommand(client, []string{"group-start", "mygroup"}) })
+	if !strings.Contains(stdout, "OK") {
+		t.Errorf("expected response containing %q, got %q", "OK", stdout)
+	}
 }
 
 func TestHandleCommand_GroupStop(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	go mockServer(t, server, "group-stop mygroup", "OK")
-	handleCommand(client, []string{"group-stop", "mygroup"})
+	stdout := captureStdout(func() { handleCommand(client, []string{"group-stop", "mygroup"}) })
+	if !strings.Contains(stdout, "OK") {
+		t.Errorf("expected response containing %q, got %q", "OK", stdout)
+	}
 }
 
 func TestHandleCommand_GroupRestart(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	go mockServer(t, server, "group-restart mygroup", "OK")
-	handleCommand(client, []string{"group-restart", "mygroup"})
+	stdout := captureStdout(func() { handleCommand(client, []string{"group-restart", "mygroup"}) })
+	if !strings.Contains(stdout, "OK") {
+		t.Errorf("expected response containing %q, got %q", "OK", stdout)
+	}
 }
 
 func TestHandleCommand_StartAll(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	go mockServer(t, server, "start-all", "OK all started")
-	handleCommand(client, []string{"start-all"})
+	stdout := captureStdout(func() { handleCommand(client, []string{"start-all"}) })
+	if !strings.Contains(stdout, "OK all started") {
+		t.Errorf("expected response containing %q, got %q", "OK all started", stdout)
+	}
 }
 
 func TestHandleCommand_StopAll(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	go mockServer(t, server, "stop-all", "OK all stopped")
-	handleCommand(client, []string{"stop-all"})
+	stdout := captureStdout(func() { handleCommand(client, []string{"stop-all"}) })
+	if !strings.Contains(stdout, "OK all stopped") {
+		t.Errorf("expected response containing %q, got %q", "OK all stopped", stdout)
+	}
 }
 
 func TestHandleCommand_RestartAll(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	go mockServer(t, server, "restart-all", "OK all restarted")
-	handleCommand(client, []string{"restart-all"})
+	stdout := captureStdout(func() { handleCommand(client, []string{"restart-all"}) })
+	if !strings.Contains(stdout, "OK all restarted") {
+		t.Errorf("expected response containing %q, got %q", "OK all restarted", stdout)
+	}
 }
 
 func TestHandleCommand_Help(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()
 	go mockServer(t, server, "help", "OK commands: start stop restart")
-	handleCommand(client, []string{"help"})
+	stdout := captureStdout(func() { handleCommand(client, []string{"help"}) })
+	if !strings.Contains(stdout, "OK commands: start stop restart") {
+		t.Errorf("expected response containing %q, got %q", "OK commands: start stop restart", stdout)
+	}
 }
 
 func TestHandleCommand_Unknown(t *testing.T) {
-	_, server := net.Pipe()
+	client, server := net.Pipe()
 	defer server.Close()
-	client, _ := net.Pipe()
 	defer client.Close()
 	stderr := captureStderr(func() { handleCommand(client, []string{"nonexistent"}) })
 	if !strings.Contains(stderr, "未知命令") {
@@ -158,9 +214,8 @@ func TestHandleCommand_Unknown(t *testing.T) {
 }
 
 func TestHandleCommand_StartNoArgs(t *testing.T) {
-	_, server := net.Pipe()
+	client, server := net.Pipe()
 	defer server.Close()
-	client, _ := net.Pipe()
 	defer client.Close()
 	stderr := captureStderr(func() { handleCommand(client, []string{"start"}) })
 	if !strings.Contains(stderr, "需要进程名") {
@@ -169,9 +224,8 @@ func TestHandleCommand_StartNoArgs(t *testing.T) {
 }
 
 func TestHandleCommand_StopNoArgs(t *testing.T) {
-	_, server := net.Pipe()
+	client, server := net.Pipe()
 	defer server.Close()
-	client, _ := net.Pipe()
 	defer client.Close()
 	stderr := captureStderr(func() { handleCommand(client, []string{"stop"}) })
 	if !strings.Contains(stderr, "需要进程名") {
@@ -180,9 +234,8 @@ func TestHandleCommand_StopNoArgs(t *testing.T) {
 }
 
 func TestHandleCommand_RestartNoArgs(t *testing.T) {
-	_, server := net.Pipe()
+	client, server := net.Pipe()
 	defer server.Close()
-	client, _ := net.Pipe()
 	defer client.Close()
 	stderr := captureStderr(func() { handleCommand(client, []string{"restart"}) })
 	if !strings.Contains(stderr, "需要进程名") {
@@ -191,9 +244,8 @@ func TestHandleCommand_RestartNoArgs(t *testing.T) {
 }
 
 func TestHandleCommand_SignalNoArgs(t *testing.T) {
-	_, server := net.Pipe()
+	client, server := net.Pipe()
 	defer server.Close()
-	client, _ := net.Pipe()
 	defer client.Close()
 	stderr := captureStderr(func() { handleCommand(client, []string{"signal"}) })
 	if !strings.Contains(stderr, "需要进程名和信号名") {
@@ -202,9 +254,8 @@ func TestHandleCommand_SignalNoArgs(t *testing.T) {
 }
 
 func TestHandleCommand_ReloadNoArgs(t *testing.T) {
-	_, server := net.Pipe()
+	client, server := net.Pipe()
 	defer server.Close()
-	client, _ := net.Pipe()
 	defer client.Close()
 	stderr := captureStderr(func() { handleCommand(client, []string{"reload"}) })
 	if !strings.Contains(stderr, "需要进程名") {
@@ -213,9 +264,8 @@ func TestHandleCommand_ReloadNoArgs(t *testing.T) {
 }
 
 func TestHandleCommand_GroupStartNoArgs(t *testing.T) {
-	_, server := net.Pipe()
+	client, server := net.Pipe()
 	defer server.Close()
-	client, _ := net.Pipe()
 	defer client.Close()
 	stderr := captureStderr(func() { handleCommand(client, []string{"group-start"}) })
 	if !strings.Contains(stderr, "需要组名") {
@@ -224,9 +274,8 @@ func TestHandleCommand_GroupStartNoArgs(t *testing.T) {
 }
 
 func TestHandleCommand_GroupStopNoArgs(t *testing.T) {
-	_, server := net.Pipe()
+	client, server := net.Pipe()
 	defer server.Close()
-	client, _ := net.Pipe()
 	defer client.Close()
 	stderr := captureStderr(func() { handleCommand(client, []string{"group-stop"}) })
 	if !strings.Contains(stderr, "需要组名") {
@@ -235,9 +284,8 @@ func TestHandleCommand_GroupStopNoArgs(t *testing.T) {
 }
 
 func TestHandleCommand_GroupRestartNoArgs(t *testing.T) {
-	_, server := net.Pipe()
+	client, server := net.Pipe()
 	defer server.Close()
-	client, _ := net.Pipe()
 	defer client.Close()
 	stderr := captureStderr(func() { handleCommand(client, []string{"group-restart"}) })
 	if !strings.Contains(stderr, "需要组名") {

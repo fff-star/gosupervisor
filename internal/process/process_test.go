@@ -15,8 +15,6 @@ import (
 	"testing"
 	"time"
 
-
-
 	"gosupervisor/internal/config"
 	"gosupervisor/internal/logger"
 )
@@ -389,7 +387,7 @@ func TestProcessAutoRestart(t *testing.T) {
 	if err := p.Stop(); err != nil {
 		t.Logf("停止进程时遇到错误: %v", err)
 	}
-}// TestProcessResourceMonitoring 测试进程资源监控功能
+} // TestProcessResourceMonitoring 测试进程资源监控功能
 func TestProcessResourceMonitoring(t *testing.T) {
 	logDir := t.TempDir()
 	os.MkdirAll(logDir, 0755)
@@ -442,7 +440,7 @@ func TestProcessResourceMonitoring(t *testing.T) {
 	if err := p.Stop(); err != nil {
 		t.Logf("停止进程时遇到错误: %v", err)
 	}
-}// TestProcessStateTransitions 测试进程状态转换
+} // TestProcessStateTransitions 测试进程状态转换
 func TestProcessStateTransitions(t *testing.T) {
 	// 初始化日志管理器
 	logDir := "./test_logs"
@@ -1434,7 +1432,7 @@ func TestCPUUsageIsPercentage(t *testing.T) {
 		t.Errorf("CPU 使用率异常高 (可能仍是 ticks), got %.2f", s.CPUUsage)
 	}
 	t.Logf("CPU usage: %.2f%%", s.CPUUsage)
-}// TestReadSystemCPUTicks tests the system CPU ticks reader.
+} // TestReadSystemCPUTicks tests the system CPU ticks reader.
 func TestReadSystemCPUTicks(t *testing.T) {
 	ticks := readSystemCPUTicks()
 	if ticks <= 0 {
@@ -1762,7 +1760,6 @@ func TestRemoveProcess(t *testing.T) {
 	}
 }
 
-
 // TestMonitorExitCodeOnSignal tests that ExitCode is set to -1 when a process
 // is killed by a signal (non-ExitError from cmd.Wait).
 func TestMonitorExitCodeOnSignal(t *testing.T) {
@@ -1901,7 +1898,7 @@ func TestMemoryUsagePreservedOnStatFailure(t *testing.T) {
 	if err := p.Stop(); err != nil {
 		t.Logf("停止进程时遇到错误: %v", err)
 	}
-}// TestGroupOperations tests StartGroup, StopGroup, RestartGroup.
+} // TestGroupOperations tests StartGroup, StopGroup, RestartGroup.
 func TestGroupOperations(t *testing.T) {
 	logDir := "./test_logs_group"
 	os.MkdirAll(logDir, 0755)
@@ -1989,15 +1986,15 @@ func TestRestartRateLimiting(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 	cfg := &config.ProgramConfig{
-		Name:             "rate_test",
-		Command:          "false",
-		AutoStart:        true,
-		AutoRestart:      true,
-		StartSecs:        0,
-		StartRetries:     99,
-		RestartMaxCount:  3,
+		Name:              "rate_test",
+		Command:           "false",
+		AutoStart:         true,
+		AutoRestart:       true,
+		StartSecs:         0,
+		StartRetries:      99,
+		RestartMaxCount:   3,
 		RestartWindowSecs: 60,
-		Environment:      make(map[string]string),
+		Environment:       make(map[string]string),
 	}
 	pm.AddProcess(cfg)
 	p := pm.GetProcess("rate_test")
@@ -2026,15 +2023,15 @@ func TestRestartRateLimitingNotExceeded(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 	cfg := &config.ProgramConfig{
-		Name:             "rate_ok",
-		Command:          "sleep 0.1",
-		AutoStart:        true,
-		AutoRestart:      true,
-		StartSecs:        0,
-		StartRetries:     99,
-		RestartMaxCount:  5,
+		Name:              "rate_ok",
+		Command:           "sleep 0.1",
+		AutoStart:         true,
+		AutoRestart:       true,
+		StartSecs:         0,
+		StartRetries:      99,
+		RestartMaxCount:   5,
 		RestartWindowSecs: 60,
-		Environment:      make(map[string]string),
+		Environment:       make(map[string]string),
 	}
 	pm.AddProcess(cfg)
 	p := pm.GetProcess("rate_ok")
@@ -2066,15 +2063,15 @@ func TestRestartRateLimitDisabled(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 	cfg := &config.ProgramConfig{
-		Name:             "nolimit",
-		Command:          "sleep 0.1",
-		AutoStart:        true,
-		AutoRestart:      true,
-		StartSecs:        0,
-		StartRetries:     99,
-		RestartMaxCount:  0,
+		Name:              "nolimit",
+		Command:           "sleep 0.1",
+		AutoStart:         true,
+		AutoRestart:       true,
+		StartSecs:         0,
+		StartRetries:      99,
+		RestartMaxCount:   0,
 		RestartWindowSecs: 60,
-		Environment:      make(map[string]string),
+		Environment:       make(map[string]string),
 	}
 	pm.AddProcess(cfg)
 	p := pm.GetProcess("nolimit")
@@ -2572,17 +2569,17 @@ func TestStartHealthCheckAndRunHealthCheck(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 	cfg := &config.ProgramConfig{
-		Name:                         "hc_run",
-		Command:                      "sleep 60",
-		AutoStart:                    false,
-		AutoRestart:                  false,
-		StartSecs:                    0,
-		StartRetries:                 1,
-		HealthCheckURL:               "http://127.0.0.1:19999/health",
-		HealthCheckInterval:          1,
-		HealthCheckTimeout:           1,
+		Name:                          "hc_run",
+		Command:                       "sleep 60",
+		AutoStart:                     false,
+		AutoRestart:                   false,
+		StartSecs:                     0,
+		StartRetries:                  1,
+		HealthCheckURL:                "http://127.0.0.1:19999/health",
+		HealthCheckInterval:           1,
+		HealthCheckTimeout:            1,
 		HealthCheckUnhealthyThreshold: 2,
-		Environment:                  make(map[string]string),
+		Environment:                   make(map[string]string),
 	}
 	p := pm.AddProcess(cfg)
 	if err := p.Start(); err != nil {
@@ -2627,7 +2624,7 @@ func TestStartHealthCheckSecondCallCancelsPrevious(t *testing.T) {
 		StartSecs:           0,
 		StartRetries:        1,
 		HealthCheckURL:      "http://127.0.0.1:19999/health",
-		HealthCheckInterval:  1,
+		HealthCheckInterval: 1,
 		HealthCheckTimeout:  1,
 		Environment:         make(map[string]string),
 	}
@@ -3060,15 +3057,15 @@ func TestRestartTimestampOnlyAfterStartSuccess(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 	cfg := &config.ProgramConfig{
-		Name:             "restart_ts_test",
-		Command:          "sleep 0.2",
-		AutoStart:        false,
-		AutoRestart:      false,
-		StartSecs:        0,
-		StartRetries:     3,
-		RestartMaxCount:  5,
+		Name:              "restart_ts_test",
+		Command:           "sleep 0.2",
+		AutoStart:         false,
+		AutoRestart:       false,
+		StartSecs:         0,
+		StartRetries:      3,
+		RestartMaxCount:   5,
 		RestartWindowSecs: 60,
-		Environment:      make(map[string]string),
+		Environment:       make(map[string]string),
 	}
 	pm.AddProcess(cfg)
 	p := pm.GetProcess("restart_ts_test")
@@ -3109,16 +3106,16 @@ func TestHealthCheckCtxCancelledOnStop(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 	cfg := &config.ProgramConfig{
-		Name:                   "hc_ctx_test",
-		Command:                "sleep 10",
-		AutoStart:              false,
-		AutoRestart:            false,
-		HealthCheckURL:         "http://127.0.0.1:19999/health",
-		HealthCheckInterval:    60,
-		HealthCheckTimeout:     5,
-		StartSecs:              0,
-		StartRetries:           3,
-		Environment:            make(map[string]string),
+		Name:                "hc_ctx_test",
+		Command:             "sleep 10",
+		AutoStart:           false,
+		AutoRestart:         false,
+		HealthCheckURL:      "http://127.0.0.1:19999/health",
+		HealthCheckInterval: 60,
+		HealthCheckTimeout:  5,
+		StartSecs:           0,
+		StartRetries:        3,
+		Environment:         make(map[string]string),
 	}
 	pm.AddProcess(cfg)
 	p := pm.GetProcess("hc_ctx_test")
@@ -3256,22 +3253,22 @@ func TestHealthCheckRestartNoFalseFatal(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 	cfg := &config.ProgramConfig{
-		Name:                   "hc_restart_race",
-		Command:                "sleep 60",
-		AutoStart:              false,
-		AutoRestart:            true,
-		HealthCheckURL:         "http://127.0.0.1:19998/health",
-		HealthCheckInterval:    1,
-		HealthCheckTimeout:     1,
+		Name:                          "hc_restart_race",
+		Command:                       "sleep 60",
+		AutoStart:                     false,
+		AutoRestart:                   true,
+		HealthCheckURL:                "http://127.0.0.1:19998/health",
+		HealthCheckInterval:           1,
+		HealthCheckTimeout:            1,
 		HealthCheckUnhealthyThreshold: 1,
-		HealthCheckRestart:     true,
-		StartSecs:              0,
-		StartRetries:           3,
-		RestartWindowSecs:      60,
-		RestartMaxCount:        0,
-		StopSignal:             "SIGTERM",
-		StopSecs:               10,
-		Environment:            make(map[string]string),
+		HealthCheckRestart:            true,
+		StartSecs:                     0,
+		StartRetries:                  3,
+		RestartWindowSecs:             60,
+		RestartMaxCount:               0,
+		StopSignal:                    "SIGTERM",
+		StopSecs:                      10,
+		Environment:                   make(map[string]string),
 	}
 	pm.AddProcess(cfg)
 	p := pm.GetProcess("hc_restart_race")
@@ -3330,16 +3327,16 @@ func TestHealthCheckFailuresResetOnStart(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 	cfg := &config.ProgramConfig{
-		Name:                   "hc_reset_test",
-		Command:                "sleep 60",
-		AutoStart:              false,
-		AutoRestart:            false,
-		HealthCheckURL:         "http://127.0.0.1:19997/health",
-		HealthCheckInterval:    60,
-		HealthCheckTimeout:     5,
-		StartSecs:              0,
-		StartRetries:           3,
-		Environment:            make(map[string]string),
+		Name:                "hc_reset_test",
+		Command:             "sleep 60",
+		AutoStart:           false,
+		AutoRestart:         false,
+		HealthCheckURL:      "http://127.0.0.1:19997/health",
+		HealthCheckInterval: 60,
+		HealthCheckTimeout:  5,
+		StartSecs:           0,
+		StartRetries:        3,
+		Environment:         make(map[string]string),
 	}
 	pm.AddProcess(cfg)
 	p := pm.GetProcess("hc_reset_test")
@@ -3403,11 +3400,11 @@ func TestCompareConfigsNoChange(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 	cfg := &config.ProgramConfig{
-		Name:        "cmp_test",
-		Command:     "sleep 10",
-		AutoStart:   true,
+		Name:         "cmp_test",
+		Command:      "sleep 10",
+		AutoStart:    true,
 		StartRetries: 3,
-		Environment: make(map[string]string),
+		Environment:  make(map[string]string),
 	}
 	pm.AddProcess(cfg)
 
@@ -3436,19 +3433,19 @@ func TestCompareConfigsAddedAndRemoved(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 	pm.AddProcess(&config.ProgramConfig{
-		Name:    "keep",
-		Command: "sleep 10",
+		Name:        "keep",
+		Command:     "sleep 10",
 		Environment: make(map[string]string),
 	})
 	pm.AddProcess(&config.ProgramConfig{
-		Name:    "remove_me",
-		Command: "sleep 10",
+		Name:        "remove_me",
+		Command:     "sleep 10",
 		Environment: make(map[string]string),
 	})
 
 	newConfigs := map[string]*config.ProgramConfig{
-		"keep":     {Name: "keep", Command: "sleep 10", Environment: make(map[string]string)},
-		"new_one":  {Name: "new_one", Command: "sleep 10", Environment: make(map[string]string)},
+		"keep":    {Name: "keep", Command: "sleep 10", Environment: make(map[string]string)},
+		"new_one": {Name: "new_one", Command: "sleep 10", Environment: make(map[string]string)},
 	}
 
 	added, removed, modified := pm.CompareConfigs(newConfigs)
@@ -3473,9 +3470,9 @@ func TestCompareConfigsModified(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 	pm.AddProcess(&config.ProgramConfig{
-		Name:    "changer",
-		Command: "sleep 10",
-		AutoStart: true,
+		Name:        "changer",
+		Command:     "sleep 10",
+		AutoStart:   true,
 		Environment: make(map[string]string),
 	})
 
@@ -3508,20 +3505,20 @@ func TestCheckRunningProcessHealthCheckRestart(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 	cfg := &config.ProgramConfig{
-		Name:                   "hc_restart",
-		Command:                "sleep 60",
-		AutoStart:              false,
-		AutoRestart:            true,
-		HealthCheckURL:         "http://127.0.0.1:19999/health",
-		HealthCheckInterval:    60,
-		HealthCheckTimeout:     5,
+		Name:                          "hc_restart",
+		Command:                       "sleep 60",
+		AutoStart:                     false,
+		AutoRestart:                   true,
+		HealthCheckURL:                "http://127.0.0.1:19999/health",
+		HealthCheckInterval:           60,
+		HealthCheckTimeout:            5,
 		HealthCheckUnhealthyThreshold: 1,
-		HealthCheckRestart:     true,
-		StartSecs:              0,
-		StartRetries:           3,
-		StopSignal:             "SIGTERM",
-		StopSecs:               10,
-		Environment:            make(map[string]string),
+		HealthCheckRestart:            true,
+		StartSecs:                     0,
+		StartRetries:                  3,
+		StopSignal:                    "SIGTERM",
+		StopSecs:                      10,
+		Environment:                   make(map[string]string),
 	}
 	pm.AddProcess(cfg)
 	p := pm.GetProcess("hc_restart")
@@ -3562,19 +3559,19 @@ func TestCheckRunningProcessHealthCheckRestartFatal(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 	cfg := &config.ProgramConfig{
-		Name:                   "hc_fatal",
-		Command:                "sleep 60",
-		AutoStart:              false,
-		AutoRestart:            true,
-		HealthCheckURL:         "http://127.0.0.1:20000/health",
-		HealthCheckInterval:    60,
-		HealthCheckTimeout:     5,
-		HealthCheckRestart:     true,
-		StartSecs:              0,
-		StartRetries:           3,
-		StopSignal:             "SIGTERM",
-		StopSecs:               10,
-		Environment:            make(map[string]string),
+		Name:                "hc_fatal",
+		Command:             "sleep 60",
+		AutoStart:           false,
+		AutoRestart:         true,
+		HealthCheckURL:      "http://127.0.0.1:20000/health",
+		HealthCheckInterval: 60,
+		HealthCheckTimeout:  5,
+		HealthCheckRestart:  true,
+		StartSecs:           0,
+		StartRetries:        3,
+		StopSignal:          "SIGTERM",
+		StopSecs:            10,
+		Environment:         make(map[string]string),
 	}
 	pm.AddProcess(cfg)
 	p := pm.GetProcess("hc_fatal")
@@ -3843,20 +3840,20 @@ func TestRunHealthCheckLifecycle(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 	cfg := &config.ProgramConfig{
-		Name:                   "hc_lifecycle",
-		Command:                "sleep 60",
-		AutoStart:              false,
-		AutoRestart:            true,
-		HealthCheckURL:         srv.URL,
-		HealthCheckInterval:    1,
-		HealthCheckTimeout:     2,
+		Name:                          "hc_lifecycle",
+		Command:                       "sleep 60",
+		AutoStart:                     false,
+		AutoRestart:                   true,
+		HealthCheckURL:                srv.URL,
+		HealthCheckInterval:           1,
+		HealthCheckTimeout:            2,
 		HealthCheckUnhealthyThreshold: 3,
-		HealthCheckRestart:     true,
-		StartSecs:              0,
-		StartRetries:           3,
-		StopSignal:             "SIGTERM",
-		StopSecs:               10,
-		Environment:            make(map[string]string),
+		HealthCheckRestart:            true,
+		StartSecs:                     0,
+		StartRetries:                  3,
+		StopSignal:                    "SIGTERM",
+		StopSecs:                      10,
+		Environment:                   make(map[string]string),
 	}
 	pm.AddProcess(cfg)
 	p := pm.GetProcess("hc_lifecycle")
@@ -3891,20 +3888,20 @@ func TestOnHealthCheckFailureCallback(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 	cfg := &config.ProgramConfig{
-		Name:                   "hc_callback",
-		Command:                "sleep 60",
-		AutoStart:              false,
-		AutoRestart:            true,
-		HealthCheckURL:         srv.URL,
-		HealthCheckInterval:    1,
-		HealthCheckTimeout:     2,
+		Name:                          "hc_callback",
+		Command:                       "sleep 60",
+		AutoStart:                     false,
+		AutoRestart:                   true,
+		HealthCheckURL:                srv.URL,
+		HealthCheckInterval:           1,
+		HealthCheckTimeout:            2,
 		HealthCheckUnhealthyThreshold: 5,
-		HealthCheckRestart:     true,
-		StartSecs:              0,
-		StartRetries:           3,
-		StopSignal:             "SIGTERM",
-		StopSecs:               10,
-		Environment:            make(map[string]string),
+		HealthCheckRestart:            true,
+		StartSecs:                     0,
+		StartRetries:                  3,
+		StopSignal:                    "SIGTERM",
+		StopSecs:                      10,
+		Environment:                   make(map[string]string),
 	}
 
 	pm.AddProcess(cfg)
@@ -4183,12 +4180,12 @@ func TestFcgiProcessStartStop(t *testing.T) {
 
 	pm := NewProcessManager(nil)
 	cfg := &config.ProgramConfig{
-		Name:    "fcgi-test",
-		Command: "sleep 10",
-		Socket:  "unix://" + sockPath,
-		SocketMode: 0700,
-		StopSecs:   1,
-		StartSecs:  1,
+		Name:         "fcgi-test",
+		Command:      "sleep 10",
+		Socket:       "unix://" + sockPath,
+		SocketMode:   0700,
+		StopSecs:     1,
+		StartSecs:    1,
 		StartRetries: 1,
 	}
 
@@ -4236,21 +4233,21 @@ func TestFcgiNumProcsSocketShared(t *testing.T) {
 
 	pm := NewProcessManager(nil)
 	cfg1 := &config.ProgramConfig{
-		Name:    "fcgi-shared_1",
-		Command: "sleep 30",
-		Socket:  "unix://" + sockPath,
-		SocketMode: 0700,
-		StopSecs:   1,
-		StartSecs:  1,
+		Name:         "fcgi-shared_1",
+		Command:      "sleep 30",
+		Socket:       "unix://" + sockPath,
+		SocketMode:   0700,
+		StopSecs:     1,
+		StartSecs:    1,
 		StartRetries: 1,
 	}
 	cfg2 := &config.ProgramConfig{
-		Name:    "fcgi-shared_2",
-		Command: "sleep 30",
-		Socket:  "unix://" + sockPath,
-		SocketMode: 0700,
-		StopSecs:   1,
-		StartSecs:  1,
+		Name:         "fcgi-shared_2",
+		Command:      "sleep 30",
+		Socket:       "unix://" + sockPath,
+		SocketMode:   0700,
+		StopSecs:     1,
+		StartSecs:    1,
 		StartRetries: 1,
 	}
 
@@ -4311,12 +4308,12 @@ func TestFcgiSnapshotFields(t *testing.T) {
 
 	pm := NewProcessManager(nil)
 	cfg := &config.ProgramConfig{
-		Name:    "fcgi-snap",
-		Command: "sleep 10",
-		Socket:  "unix://" + sockPath,
-		SocketMode: 0700,
-		StopSecs:   1,
-		StartSecs:  1,
+		Name:         "fcgi-snap",
+		Command:      "sleep 10",
+		Socket:       "unix://" + sockPath,
+		SocketMode:   0700,
+		StopSecs:     1,
+		StartSecs:    1,
 		StartRetries: 1,
 	}
 
@@ -4731,13 +4728,13 @@ func TestStdinFileIntegration(t *testing.T) {
 
 	pm := NewProcessManager(logManager)
 	cfg := &config.ProgramConfig{
-		Name:         "stdin_test",
-		Command:      fmt.Sprintf("cat > %s", outputFile),
-		AutoStart:    false,
-		AutoRestart:  false,
-		StdinFile:    stdinFile,
-		StopSecs:     1,
-		Environment:  make(map[string]string),
+		Name:        "stdin_test",
+		Command:     fmt.Sprintf("cat > %s", outputFile),
+		AutoStart:   false,
+		AutoRestart: false,
+		StdinFile:   stdinFile,
+		StopSecs:    1,
+		Environment: make(map[string]string),
 	}
 	pm.AddProcess(cfg)
 	p := pm.GetProcess("stdin_test")

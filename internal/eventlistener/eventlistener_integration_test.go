@@ -14,8 +14,8 @@ func writeEchoListenerScript(t *testing.T, dir string) string {
 	t.Helper()
 	script := `#!/bin/sh
 echo "READY"
-read -r line
-echo "READY"
+read -r header
+read -r body
 printf "RESULT 2\nOK"
 `
 	path := filepath.Join(dir, "listener.sh")
@@ -50,6 +50,14 @@ func TestEventListenerE2E_SingleEvent(t *testing.T) {
 		t.Errorf("expected empty queue after processing, got %d events", l.queue.Len())
 	}
 
+	// Verify the listener is still RUNNING (protocol loop processed OK result).
+	l.mu.Lock()
+	state := l.state
+	l.mu.Unlock()
+	if state != "RUNNING" {
+		t.Errorf("expected RUNNING after OK result, got %q", state)
+	}
+
 	l.stop()
 }
 
@@ -57,12 +65,12 @@ func TestEventListenerE2E_RetryOnFail(t *testing.T) {
 	dir := t.TempDir()
 	script := `#!/bin/sh
 echo "READY"
-read -r line
-echo "READY"
+read -r header
+read -r body
 printf "RESULT 4\nFAIL"
 echo "READY"
-read -r line
-echo "READY"
+read -r header
+read -r body
 printf "RESULT 2\nOK"
 `
 	scriptPath := filepath.Join(dir, "retry_listener.sh")
@@ -115,11 +123,19 @@ func TestEventListenerE2E_ChildCrash(t *testing.T) {
 	}
 	l := newEventListener(cfg)
 
+	// Push an event so we can verify it survives when the child crashes.
+	testEvent := process.Event{Name: "crash_proc", Type: process.EventStart, PID: 42}
+	l.queue.Push(testEvent)
+
 	if err := l.start(); err != nil {
 		t.Fatalf("start() failed: %v", err)
 	}
 
 	time.Sleep(300 * time.Millisecond)
+	// The event should still be in the queue since the child crashed.
+	if l.queue.Len() == 0 {
+		t.Error("expected event to remain in queue after child crash")
+	}
 	l.stop()
 
 	// After a crashing child, stop() should clean up and leave state STOPPED.

@@ -15,11 +15,11 @@ import (
 )
 
 type SocketServer struct {
-	pm             *process.ProcessManager
-	socket         net.Listener
-	socketMode     os.FileMode
-	socketOwner    string
-	socketBacklog  int
+	pm            *process.ProcessManager
+	socket        net.Listener
+	socketMode    os.FileMode
+	socketOwner   string
+	socketBacklog int
 }
 
 func NewSocketServer(pm *process.ProcessManager) *SocketServer {
@@ -121,6 +121,7 @@ func (s *SocketServer) handleConn(conn net.Conn) {
 			continue
 		}
 		if line == "quit" || line == "exit" {
+			fmt.Fprintln(conn, "OK bye")
 			return
 		}
 		response := s.handleCommand(line)
@@ -236,8 +237,12 @@ func (s *SocketServer) handleCommand(line string) string {
 		if name == "" {
 			return "ERR missing group name"
 		}
-		started := s.pm.StartGroup(name)
-		return fmt.Sprintf("OK started %d: %s", len(started), strings.Join(started, ", "))
+		started, failed := s.pm.StartGroup(name)
+		msg := fmt.Sprintf("OK started %d: %s", len(started), strings.Join(started, ", "))
+		if len(failed) > 0 {
+			msg += fmt.Sprintf("; failed %d: %s", len(failed), strings.Join(failed, ", "))
+		}
+		return msg
 
 	case "group-stop":
 		if name == "" {
@@ -330,7 +335,7 @@ func listenUnix(path string, backlog int) (net.Listener, error) {
 		return net.Listen("unix", path)
 	}
 
-	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}

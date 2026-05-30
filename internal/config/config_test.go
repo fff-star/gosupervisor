@@ -281,6 +281,7 @@ command=echo "Cache"
 		t.Errorf("期望第二个依赖为'cache'，实际为'%s'", app.DependsOn[1])
 	}
 }
+
 // TestYAMLJSONBoolDefaults tests that explicit false values are preserved
 // and absent keys default to true in YAML/JSON configs.
 func TestYAMLJSONBoolDefaults(t *testing.T) {
@@ -340,7 +341,6 @@ func TestProgramConfigStructTags(t *testing.T) {
 		t.Error("dependson 标签导致字段未正确解析")
 	}
 }
-
 
 // TestNewConfigFieldsINI tests parsing of all new config fields from INI format.
 func TestNewConfigFieldsINI(t *testing.T) {
@@ -945,10 +945,10 @@ func TestLoadJSONConfigWithIncludes(t *testing.T) {
 
 func TestExpandTemplate(t *testing.T) {
 	tests := []struct {
-		tmpl        string
-		name        string
-		num         int
-		expected    string
+		tmpl     string
+		name     string
+		num      int
+		expected string
 	}{
 		{"%(program_name)s", "test", 1, "test"},
 		{"worker_%(process_num)d", "test", 5, "worker_5"},
@@ -1114,7 +1114,7 @@ fcgiprograms:
 
 func TestFcgiValidationMissingSocket(t *testing.T) {
 	cfg := &Config{
-		Programs:     make(map[string]*ProgramConfig),
+		Programs: make(map[string]*ProgramConfig),
 		FcgiPrograms: map[string]*ProgramConfig{
 			"bad": {Name: "bad", Command: "/bin/true"},
 		},

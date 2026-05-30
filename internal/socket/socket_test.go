@@ -336,12 +336,12 @@ func TestHandleConnWithQuit(t *testing.T) {
 		t.Fatalf("写入命令失败: %v", err)
 	}
 
-	// quit should close the connection
+	// quit should close the connection with "OK bye"
 	buf := make([]byte, 4096)
 	n, _ := conn.Read(buf)
 	resp := strings.TrimSpace(string(buf[:n]))
-	if !strings.Contains(resp, "BYE") && !strings.Contains(resp, "OK") {
-		t.Logf("quit response: %s", resp)
+	if !strings.Contains(resp, "OK bye") {
+		t.Errorf("quit response should contain 'OK bye', got: %q", resp)
 	}
 	conn.Close()
 }
@@ -463,7 +463,6 @@ func TestHandleCommandGroupRestartEmptyGroup(t *testing.T) {
 		t.Errorf("空组 restart 应返回0, 实际: %s", resp)
 	}
 }
-
 
 // --- Fuzz tests ---
 
@@ -645,6 +644,12 @@ func TestStart_WithSocketMode(t *testing.T) {
 	mode := info.Mode()
 	if mode&os.ModeSocket == 0 {
 		t.Error("file is not a socket")
+	}
+	// Verify the socket permissions match what was requested.
+	perm := mode.Perm()
+	expectedPerm := os.FileMode(0700)
+	if perm != expectedPerm {
+		t.Errorf("socket permissions mismatch: expected %o, got %o", expectedPerm, perm)
 	}
 }
 

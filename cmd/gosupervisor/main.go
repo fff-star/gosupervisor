@@ -28,8 +28,8 @@ const (
 // Metrics and event listener refs are protected by refsMu to prevent
 // data races between the main goroutine and the signal handler goroutine.
 var (
-	refsMu                 sync.Mutex
-	metricsManagerRef      *metrics.MetricsManager
+	refsMu                  sync.Mutex
+	metricsManagerRef       *metrics.MetricsManager
 	eventListenerManagerRef *eventlistener.EventListenerManager
 )
 
@@ -246,10 +246,6 @@ func main() {
 		}
 	}()
 
-	// Start all autostart processes (respects dependency order)
-	processManager.StartAll()
-	fmt.Println("所有进程启动成功")
-
 	// Find socket_backlog from any program config (first non-default wins)
 	backlog := -1
 	for _, progCfg := range cfg.Programs {
@@ -352,6 +348,15 @@ func main() {
 			return
 		case <-time.After(100 * time.Millisecond):
 		}
+	}
+
+	// Start child processes after all servers are up so that a server
+	// startup failure does not leave orphaned processes behind.
+	failed := processManager.StartAll()
+	if len(failed) > 0 {
+		fmt.Printf("启动完成，%d 个进程启动失败: %v\n", len(failed), failed)
+	} else {
+		fmt.Println("所有进程启动成功")
 	}
 
 	// 保持运行
@@ -470,8 +475,17 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 		logManager.Info("进程 %s 已移除", name)
 	}
 
-	// Stop, remove, re-add, and restart modified processes
+	// Stop, remove, re-add, and restart modified processes in dependency
+	// order so that dependencies start before their dependents.
+	modDepGraph := make(map[string][]string)
 	for _, name := range modified {
+		modDepGraph[name] = newConfigs[name].DependsOn
+	}
+	modOrdered, modErr := processManager.SortByDeps(modDepGraph)
+	if modErr != nil {
+		modOrdered = modified
+	}
+	for _, name := range modOrdered {
 		if p := processManager.GetProcess(name); p != nil {
 			_ = p.Stop()
 			if p.CancelFunc != nil {
@@ -512,10 +526,12 @@ func reloadConfiguration(processManager *process.ProcessManager, configPath stri
 		m.RecordConfigReload()
 	}
 
-	// Reload event listeners
+	// Reload event listeners. Set the callback before Reload so that
+	// events emitted during reload are routed to the new listeners, not
+	// the ones being shut down.
 	if e := getEventListenerRef(); e != nil {
-		e.Reload(cfg)
 		process.SetOnEventEL(e.EmitEvent)
+		e.Reload(cfg)
 	}
 
 	return nil

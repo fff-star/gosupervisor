@@ -300,8 +300,8 @@ func TestCheckRunningProcess_HealthCheckRestart(t *testing.T) {
 		Name: "hc_restart", Command: "sleep 60", AutoStart: false,
 		HealthCheckRestart: true, HealthCheckURL: "http://127.0.0.1:1",
 		HealthCheckInterval: 10,
-		StartSecs: 10,
-		StopSecs:  1,
+		StartSecs:           10,
+		StopSecs:            1,
 	})
 
 	// Start the process first so it is actually RUNNING
@@ -378,7 +378,7 @@ func TestCheckRunningProcess_HealthCheckNoURL(t *testing.T) {
 	p := pm.AddProcess(&config.ProgramConfig{
 		Name: "hc_nourl", Command: "sleep 1", AutoStart: false,
 		HealthCheckRestart: true, // No HealthCheckURL set
-		StartSecs: 10,
+		StartSecs:          10,
 	})
 	p.mu.Lock()
 	p.State = StateRunning
